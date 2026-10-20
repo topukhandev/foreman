@@ -55,12 +55,12 @@ class InteractiveShell:
 
     def print_slash_menu(self, filter_prefix: str = "") -> None:
         """Render dropdown menu of available slash commands."""
-        box_str, _ = render_dropdown_box(filter_prefix or "/")
+        box_str, _, _ = render_dropdown_box(filter_prefix or "/")
         if box_str:
             print(box_str)
 
-    def handle_provider_menu(self) -> None:
-        """Interactive provider selector menu."""
+    def handle_provider_menu(self, choice_arg: str = "") -> None:
+        """Interactive provider selector menu or direct switch."""
         diag = SetupDoctor.check_system(self.config)
         tools = diag["tools"]
 
@@ -70,22 +70,35 @@ class InteractiveShell:
 
         curr = self._get_active_provider_name()
 
-        print("\n? Select Default AI Provider for this project:")
-        print(f"  [1] Antigravity CLI (agy)       {'[INSTALLED]' if has_agy else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'antigravity_cli' else ''}")
-        print(f"  [2] Claude Code (claude)        {'[INSTALLED]' if has_claude else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'claude_code' else ''}")
-        print(f"  [3] OpenCode (opencode)         {'[INSTALLED]' if has_opencode else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'opencode' else ''}")
-        print(f"  [4] Dual-Model (Antigravity builds, Claude reviews) {'[READY]' if (has_agy and has_claude) else '[NEED BOTH]'}")
-        print(f"  [5] Simulation / Mock Mode (Zero tokens)")
-        print("  [c] Cancel")
+        preset_map = {"1": "2", "2": "3", "3": "5", "4": "4", "5": "6"}
+        name_alias = {
+            "agy": "1", "antigravity": "1", "antigravity_cli": "1",
+            "claude": "2", "claude_code": "2",
+            "opencode": "3",
+            "dual": "4",
+            "mock": "5", "sim": "5"
+        }
 
-        try:
-            choice = input("\nEnter choice (1-5 or c): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("")
-            return
+        choice = choice_arg.lower().strip()
+        if choice in name_alias:
+            choice = name_alias[choice]
+
+        if not choice:
+            print("\n? Select Default AI Provider for this project:")
+            print(f"  [1] Antigravity CLI (agy)       {'[INSTALLED]' if has_agy else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'antigravity_cli' else ''}")
+            print(f"  [2] Claude Code (claude)        {'[INSTALLED]' if has_claude else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'claude_code' else ''}")
+            print(f"  [3] OpenCode (opencode)         {'[INSTALLED]' if has_opencode else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'opencode' else ''}")
+            print(f"  [4] Dual-Model (Antigravity builds, Claude reviews) {'[READY]' if (has_agy and has_claude) else '[NEED BOTH]'}")
+            print(f"  [5] Simulation / Mock Mode (Zero tokens)")
+            print("  [c] Cancel")
+
+            try:
+                choice = input("\nEnter choice (1-5 or c): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("")
+                return
 
         from orchestrator.wizard import build_config_for_preset
-        preset_map = {"1": "2", "2": "3", "3": "5", "4": "4", "5": "6"}
         if choice in preset_map:
             new_cfg = build_config_for_preset(preset_map[choice], tools)
             with open(self.config_path, "w", encoding="utf-8") as f:
@@ -97,9 +110,46 @@ class InteractiveShell:
         else:
             print("Invalid selection.")
 
-    def handle_link_menu(self) -> None:
-        """Interactive link menu to connect another directory/service."""
+    def handle_link_menu(self, args: Optional[List[str]] = None) -> None:
+        """Interactive link menu to connect another directory/service, or CLI command."""
         services = self.links.list_links()
+
+        # If direct arguments given: /link add <path> [name] [desc] or /link remove <name>
+        if args and len(args) > 0:
+            sub = args[0].lower()
+            if sub == "list":
+                if services:
+                    print("\nCurrently Linked Services:")
+                    for s in services:
+                        print(f"  - {s.name}: {s.path} ({s.description or 'No desc'})")
+                else:
+                    print("\nNo services currently linked.")
+                return
+            elif sub == "add" and len(args) > 1:
+                target_path = args[1]
+                name = args[2] if len(args) > 2 else ""
+                desc = " ".join(args[3:]) if len(args) > 3 else ""
+                ok = self.links.add_link(name, target_path, desc)
+                if ok:
+                    print(f"[OK] Successfully linked directory at: {os.path.abspath(os.path.expanduser(target_path))}")
+                else:
+                    print(f"[!] Error: Directory not found: {target_path}")
+                return
+            elif sub in ("remove", "rm") and len(args) > 1:
+                del_name = args[1]
+                if self.links.remove_link(del_name):
+                    print(f"[OK] Removed link: {del_name}")
+                else:
+                    print(f"[!] Link not found: {del_name}")
+                return
+            elif len(args) == 1 and os.path.exists(os.path.expanduser(args[0])):
+                # Quick syntax: /link /path/to/dir
+                target_path = args[0]
+                ok = self.links.add_link("", target_path, "")
+                if ok:
+                    print(f"[OK] Successfully linked directory at: {os.path.abspath(os.path.expanduser(target_path))}")
+                return
+
         if services:
             print("\nCurrently Linked Services:")
             for s in services:
@@ -167,8 +217,20 @@ class InteractiveShell:
         except (EOFError, KeyboardInterrupt):
             print("")
 
-    def handle_pack_menu(self) -> None:
-        """Select default workflow pack."""
+    def handle_pack_menu(self, choice_arg: str = "") -> None:
+        """Select default workflow pack interactively or via argument."""
+        mapping = {
+            "1": "developer", "dev": "developer", "developer": "developer",
+            "2": "business_idea", "business": "business_idea", "biz": "business_idea", "idea": "business_idea",
+            "3": "qa", "test": "qa"
+        }
+
+        choice = choice_arg.lower().strip()
+        if choice in mapping:
+            self.active_pack = mapping[choice]
+            print(f"[OK] Active workflow pack set to: {self.active_pack}")
+            return
+
         print(f"\nCurrent Pack: {self.active_pack}")
         print("Available Packs:")
         print("  [1] developer     - Architecture, code patch implementation, test suite, review")
@@ -176,7 +238,6 @@ class InteractiveShell:
         print("  [3] qa            - Test matrix, edge cases, automation scripts, sign-off")
         try:
             choice = input("\nSelect pack (1-3): ").strip()
-            mapping = {"1": "developer", "2": "business_idea", "3": "qa"}
             if choice in mapping:
                 self.active_pack = mapping[choice]
                 print(f"[OK] Active workflow pack set to: {self.active_pack}")
@@ -284,7 +345,8 @@ class InteractiveShell:
 
         while True:
             try:
-                line = read_interactive_line(prompt="\norchestrator> ")
+                print()
+                line = read_interactive_line()
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting orchestrator. Goodbye!")
                 break
@@ -311,11 +373,11 @@ class InteractiveShell:
                 elif cmd == "/tasks":
                     self.handle_tasks_menu()
                 elif cmd == "/provider":
-                    self.handle_provider_menu()
+                    self.handle_provider_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
                 elif cmd == "/link":
-                    self.handle_link_menu()
+                    self.handle_link_menu(cmd_parts[1:])
                 elif cmd == "/pack":
-                    self.handle_pack_menu()
+                    self.handle_pack_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
                 elif cmd == "/doctor":
                     report = SetupDoctor.render_report(self.config)
                     print("\n" + report)

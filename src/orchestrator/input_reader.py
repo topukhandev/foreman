@@ -1,6 +1,9 @@
-"""Interactive character-by-character input reader with live slash command popup."""
+"""Interactive character-by-character input reader with arrow-key navigable slash dropdown.
+Emulates Claude Code and Antigravity CLI terminal UX without external dependencies.
+"""
 
 import os
+import select
 import sys
 from typing import List, Optional, Tuple
 
@@ -24,22 +27,35 @@ def get_command_matches(prefix: str) -> List[Tuple[str, str]]:
     return [(cmd, desc) for cmd, desc in COMMANDS if cmd.lower().startswith(prefix_clean)]
 
 
-def render_dropdown_box(prefix: str) -> Tuple[str, int]:
-    """Render popup box string and count of lines."""
+def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int, Optional[str]]:
+    """
+    Render floating dropdown box with arrow selection pointer.
+    Returns: (rendered_ansi_string, number_of_lines, currently_selected_command)
+    """
     matches = get_command_matches(prefix)
     if not matches:
-        return "", 0
+        return "", 0, None
 
-    lines = ["\n  ╭─ Slash Commands (Tab to complete, Enter to run) ────────────────────╮"]
-    for cmd, desc in matches[:7]:
-        lines.append(f"  │  {cmd:<12} {desc:<53} │")
-    lines.append("  ╰─────────────────────────────────────────────────────────────────────╯")
-    return "\n".join(lines), len(lines)
+    # Keep selected_index in valid bounds
+    selected_index = max(0, min(selected_index, len(matches) - 1))
+    selected_cmd = matches[selected_index][0]
+
+    lines = ["\n  ╭─ Commands (↑/↓ to navigate, Enter to select, Esc to cancel) ──────╮"]
+    matches_to_show = matches[:9]
+    for i, (cmd, desc) in enumerate(matches_to_show):
+        if i == selected_index:
+            # Highlighted item in bright cyan with pointer
+            lines.append(f"  │ \033[1;36m❯ {cmd:<11} {desc:<51}\033[0m │")
+        else:
+            lines.append(f"  │   {cmd:<11} {desc:<51} │")
+    lines.append("  ╰───────────────────────────────────────────────────────────────────╯")
+
+    return "\n".join(lines), len(lines), selected_cmd
 
 
-def read_interactive_line(prompt: str = "orchestrator> ") -> str:
+def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrator\033[0m › ") -> str:
     """
-    Read line with live character-by-character slash dropdown.
+    Read line with live character-by-character slash dropdown and arrow key navigation.
     Falls back to sys.stdin.readline() if not a TTY.
     """
     if not sys.stdin.isatty():
@@ -50,7 +66,6 @@ def read_interactive_line(prompt: str = "orchestrator> ") -> str:
             raise EOFError
         return line.strip()
 
-    # Unix terminal cbreak mode for instant key reactions
     import termios
     import tty
 
@@ -58,32 +73,50 @@ def read_interactive_line(prompt: str = "orchestrator> ") -> str:
     old_settings = termios.tcgetattr(fd)
     buf: List[str] = []
     dropdown_lines = 0
+    selected_idx = 0
+    active_matches_count = 0
+    current_selected_cmd: Optional[str] = None
+    dropdown_dismissed = False
+
+    def get_clean_prompt_len() -> int:
+        """Calculate visible length of prompt excluding ANSI escape codes."""
+        import re
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        return len(ansi_escape.sub('', prompt))
 
     def redraw():
-        nonlocal dropdown_lines
+        nonlocal dropdown_lines, active_matches_count, current_selected_cmd
         # 1. Clear dropdown from previous render
         if dropdown_lines > 0:
-            # Move down into dropdown area and clear down
             sys.stdout.write("\033[J")
 
         # 2. Redraw prompt and current buffer
         curr_text = "".join(buf)
         sys.stdout.write("\r\033[K" + prompt + curr_text)
 
-        # 3. If line starts with '/', draw live dropdown below cursor
-        if curr_text.startswith("/"):
+        # 3. If line starts with '/' and not dismissed, draw live dropdown below cursor
+        if curr_text.startswith("/") and not dropdown_dismissed:
             token = curr_text.split()[0]
-            box_str, num_lines = render_dropdown_box(token)
-            if box_str:
+            matches = get_command_matches(token)
+            visible_count = min(9, len(matches))
+            active_matches_count = visible_count
+
+            if matches:
+                box_str, num_lines, selected_cmd = render_dropdown_box(token, selected_idx)
                 dropdown_lines = num_lines
+                current_selected_cmd = selected_cmd
                 sys.stdout.write(box_str)
                 # Move cursor back up to the input line at correct column
-                target_col = len(prompt) + len(curr_text)
+                target_col = get_clean_prompt_len() + len(curr_text)
                 sys.stdout.write(f"\033[{num_lines}A\r\033[{target_col}C")
             else:
                 dropdown_lines = 0
+                active_matches_count = 0
+                current_selected_cmd = None
         else:
             dropdown_lines = 0
+            active_matches_count = 0
+            current_selected_cmd = None
 
         sys.stdout.flush()
 
@@ -93,7 +126,13 @@ def read_interactive_line(prompt: str = "orchestrator> ") -> str:
         sys.stdout.flush()
 
         while True:
-            ch = sys.stdin.read(1)
+            raw = os.read(fd, 1)
+            if not raw:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                raise EOFError
+
+            ch = raw.decode("utf-8", errors="replace")
 
             # Ctrl+C
             if ch == "\x03":
@@ -108,37 +147,80 @@ def read_interactive_line(prompt: str = "orchestrator> ") -> str:
                     sys.stdout.flush()
                     raise EOFError
 
+            # Escape sequences (Arrow keys, Esc)
+            if ch == "\x1b":
+                # Check unbuffered fd if more characters follow immediately
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    raw2 = os.read(fd, 1)
+                    ch2 = raw2.decode("utf-8", errors="replace") if raw2 else ""
+                    if ch2 in ("[", "O"):
+                        raw3 = os.read(fd, 1)
+                        ch3 = raw3.decode("utf-8", errors="replace") if raw3 else ""
+                        # Up Arrow
+                        if ch3 == "A":
+                            if active_matches_count > 0:
+                                selected_idx = (selected_idx - 1) % active_matches_count
+                                redraw()
+                            continue
+                        # Down Arrow
+                        elif ch3 == "B":
+                            if active_matches_count > 0:
+                                selected_idx = (selected_idx + 1) % active_matches_count
+                                redraw()
+                            continue
+                        # Right/Left Arrow
+                        elif ch3 in ("C", "D"):
+                            continue
+                        # Handle keypad or extended function keys with potential trailing ~
+                        elif ch3.isdigit():
+                            r_tilde, _, _ = select.select([fd], [], [], 0.02)
+                            if r_tilde:
+                                os.read(fd, 1)
+                            continue
+                else:
+                    # Standalone Esc key pressed -> Dismiss dropdown
+                    dropdown_dismissed = True
+                    redraw()
+                    continue
+
             # Enter (\r or \n)
             if ch in ("\r", "\n"):
                 if dropdown_lines > 0:
                     sys.stdout.write("\033[J")
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-                return "".join(buf).strip()
 
-            # Tab (Auto-complete command)
+                curr_text = "".join(buf).strip()
+                # If dropdown was active and user selected with arrow keys:
+                if curr_text.startswith("/") and not dropdown_dismissed and current_selected_cmd:
+                    # If user just typed '/' or partial prefix, return the selected item
+                    if curr_text in ("/", "/p", "/s", "/t", "/l", "/d", "/c", "/h", "/e") or " " not in curr_text:
+                        return current_selected_cmd
+                return curr_text
+
+            # Tab (Auto-complete to highlighted command)
             if ch == "\t":
-                curr_text = "".join(buf)
-                if curr_text.startswith("/"):
-                    token = curr_text.split()[0]
-                    matches = get_command_matches(token)
-                    if matches:
-                        # Auto-complete to first matching command
-                        completed_cmd = matches[0][0]
-                        buf = list(completed_cmd)
-                        redraw()
+                if current_selected_cmd:
+                    buf = list(current_selected_cmd)
+                    selected_idx = 0
+                    redraw()
                 continue
 
             # Backspace (\x7f or \x08)
             if ch in ("\x7f", "\x08"):
                 if buf:
                     buf.pop()
+                    dropdown_dismissed = False
+                    selected_idx = 0
                     redraw()
                 continue
 
             # Printable characters
             if ch.isprintable():
                 buf.append(ch)
+                dropdown_dismissed = False
+                selected_idx = 0
                 redraw()
 
     finally:
