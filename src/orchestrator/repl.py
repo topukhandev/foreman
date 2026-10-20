@@ -1,7 +1,6 @@
-"""Interactive REPL shell with slash commands, live dropdown suggestions, and sub-menu selectors."""
+"""Interactive REPL shell with live slash suggestions and conversational intent handling."""
 
 import os
-import readline
 import sys
 import time
 from typing import Dict, List, Optional
@@ -12,32 +11,7 @@ from orchestrator.doctor import SetupDoctor
 from orchestrator.links import WorkspaceLinks
 from orchestrator.engine import OrchestratorEngine
 from orchestrator.packs import PACKS
-
-
-SLASH_COMMANDS = [
-    ("/provider", "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
-    ("/status",   "View single-page project state (state.md) & active workers"),
-    ("/tasks",    "Inspect recent tasks, specs, and reviewer verdicts"),
-    ("/link",     "Connect another directory, repository, or microservice"),
-    ("/pack",     "Select default workflow pack (developer, business_idea, qa)"),
-    ("/doctor",   "Check installed AI tools & system health diagnostics"),
-    ("/clear",    "Clear the terminal screen"),
-    ("/help",     "Display interactive command guide"),
-    ("/exit",     "Exit orchestrator session")
-]
-
-
-class SlashCompleter:
-    """Readline completer for slash commands."""
-
-    def __init__(self, commands: List[tuple]):
-        self.commands = [cmd for cmd, _ in commands]
-
-    def complete(self, text: str, state: int) -> Optional[str]:
-        matches = [c for c in self.commands if c.startswith(text)]
-        if state < len(matches):
-            return matches[state]
-        return None
+from orchestrator.input_reader import read_interactive_line, COMMANDS, render_dropdown_box
 
 
 class InteractiveShell:
@@ -50,12 +24,6 @@ class InteractiveShell:
         self.config_path = os.path.join(self.project_dir, "providers.yaml")
         self.config = load_config(self.config_path)
         self.active_pack = "developer"
-
-        # Setup readline
-        self.completer = SlashCompleter(SLASH_COMMANDS)
-        readline.set_completer(self.completer.complete)
-        readline.parse_and_bind("tab: complete")
-        readline.set_completer_delims(" \t\n")
 
     def _get_active_provider_name(self) -> str:
         """Find currently active primary provider."""
@@ -81,22 +49,15 @@ class InteractiveShell:
         print(f" Tools Found: {', '.join(available_tools) or 'None'}")
         print(f" Workspaces : {services_str}")
         print("------------------------------------------------------------------------")
-        print(" Type '/' to see slash commands, or enter your goal naturally below.")
+        print(" Type '/' to see live commands, or ask any question/goal below.")
         print(" Type /help for usage guide, /exit to quit.")
         print("========================================================================")
 
     def print_slash_menu(self, filter_prefix: str = "") -> None:
         """Render dropdown menu of available slash commands."""
-        matches = [
-            (cmd, desc) for cmd, desc in SLASH_COMMANDS if cmd.startswith(filter_prefix)
-        ]
-        if not matches:
-            return
-
-        print("\n  ╭─ Available Commands (Press Tab to complete) ────────────────────────╮")
-        for cmd, desc in matches:
-            print(f"  │  {cmd:<12} {desc:<55} │")
-        print("  ╰─────────────────────────────────────────────────────────────────────╯")
+        box_str, _ = render_dropdown_box(filter_prefix or "/")
+        if box_str:
+            print(box_str)
 
     def handle_provider_menu(self) -> None:
         """Interactive provider selector menu."""
@@ -224,20 +185,76 @@ class InteractiveShell:
         except (EOFError, KeyboardInterrupt):
             print("")
 
+    def handle_conversational_inquiry(self, query: str) -> bool:
+        """
+        Check if user input is an informational or status question about the workspace.
+        Returns True if handled conversationally, False if it is an actionable goal.
+        """
+        q = query.lower().strip()
+
+        # Location / Folder inquiries
+        if any(w in q for w in ["which folder", "where am i", "what folder", "current directory", "pwd", "which directory"]):
+            print(f"\n📍 You are currently in: {self.project_dir}")
+            services = self.links.list_links()
+            if services:
+                print("   Linked external services:")
+                for s in services:
+                    print(f"   - {s.name}: {s.path}")
+            else:
+                print("   (No external services currently linked. Use /link to connect one.)")
+            return True
+
+        # Status / Progress inquiries
+        if any(w in q for w in ["what is the status", "current status", "show status", "what is done", "how is the project"]):
+            state = self.hub.read_state()
+            print("\n" + (state or "No active state found."))
+            return True
+
+        # Tool / Provider inquiries
+        if any(w in q for w in ["which ai", "which tool", "what tools", "active provider"]):
+            p_name = self._get_active_provider_name()
+            print(f"\n🤖 Active AI Worker: {p_name} (Pack: {self.active_pack})")
+            print("   Type /provider to switch, or /doctor to inspect system tools.")
+            return True
+
+        # Help / Greeting
+        if q in ("hello", "hi", "hey", "help", "who are you", "what can you do"):
+            print("\n👋 I am your Foreman Orchestrator Front-Desk Manager.")
+            print("   - Type your goal (e.g. 'Build an auth API with SQLite') to delegate tasks.")
+            print("   - Type '/' to see available commands (/provider, /status, /link, /tasks).")
+            print("   - Type any question to inspect the workspace.")
+            return True
+
+        return False
+
     def execute_goal(self, goal: str) -> None:
-        """Execute user goal through OrchestratorEngine with live feedback."""
-        # Auto-detect intent if user specifies keywords
+        """Execute user goal with confirmation and live feedback."""
         goal_lower = goal.lower()
         selected_pack = self.active_pack
-        if "business" in goal_lower or "market" in goal_lower or "monetiz" in goal_lower:
+
+        if any(w in goal_lower for w in ["business", "market", "monetiz", "pricing", "competitor", "idea"]):
             selected_pack = "business_idea"
-        elif "test" in goal_lower or "qa" in goal_lower or "coverage" in goal_lower:
+        elif any(w in goal_lower for w in ["test", "qa", "coverage", "benchmark", "stress"]):
             selected_pack = "qa"
 
         provider_name = self._get_active_provider_name()
-        print(f"\n🚀 Dispatching Orchestrator on: '{goal}'")
-        print(f"   Provider : {provider_name}")
-        print(f"   Workflow : {selected_pack}")
+
+        # Ask for confirmation before launching an engineering sprint!
+        print(f"\n📋 Proposed Task: '{goal}'")
+        print(f"   Target Dir : {self.project_dir}")
+        print(f"   AI Worker  : {provider_name}")
+        print(f"   Workflow   : {selected_pack}")
+
+        try:
+            confirm = input("\nProceed with execution? [Y/n]: ").strip().lower()
+            if confirm and confirm not in ("y", "yes"):
+                print("Execution cancelled.")
+                return
+        except (EOFError, KeyboardInterrupt):
+            print("\nExecution cancelled.")
+            return
+
+        print("\n🚀 Starting execution...")
         print("------------------------------------------------------------------------")
 
         def print_progress(text: str):
@@ -262,22 +279,17 @@ class InteractiveShell:
         print("=" * 60)
 
     def run(self) -> None:
-        """Main REPL loop."""
+        """Main interactive REPL loop."""
         self.render_banner()
 
         while True:
             try:
-                line = input("\norchestrator> ").strip()
+                line = read_interactive_line(prompt="\norchestrator> ")
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting orchestrator. Goodbye!")
                 break
 
             if not line:
-                continue
-
-            # If user just typed '/'
-            if line == "/":
-                self.print_slash_menu()
                 continue
 
             # Slash commands
@@ -312,5 +324,9 @@ class InteractiveShell:
                     self.print_slash_menu(cmd)
 
             else:
-                # Natural language goal or request
+                # 1. First check if it's a conversational question about the workspace
+                if self.handle_conversational_inquiry(line):
+                    continue
+
+                # 2. Otherwise it's a goal -> confirm and execute
                 self.execute_goal(line)
