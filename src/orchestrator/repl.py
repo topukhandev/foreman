@@ -11,6 +11,7 @@ from orchestrator.doctor import SetupDoctor
 from orchestrator.links import WorkspaceLinks
 from orchestrator.engine import OrchestratorEngine
 from orchestrator.packs import PACKS
+from orchestrator.adapters import create_adapter
 from orchestrator.input_reader import read_interactive_line, COMMANDS, render_dropdown_box
 
 
@@ -246,50 +247,114 @@ class InteractiveShell:
         except (EOFError, KeyboardInterrupt):
             print("")
 
-    def handle_conversational_inquiry(self, query: str) -> bool:
+    def check_or_prompt_ai_provider(self) -> bool:
         """
-        Check if user input is an informational or status question about the workspace.
-        Returns True if handled conversationally, False if it is an actionable goal.
+        Verify that a real AI CLI worker (antigravity_cli, claude_code, opencode) is connected.
+        If not, suggest and prompt the user to select one before executing natural language.
         """
-        q = query.lower().strip()
+        active_p = self._get_active_provider_name()
+        if active_p != "mock":
+            return True
 
-        # Location / Folder inquiries
-        if any(w in q for w in ["which folder", "where am i", "what folder", "current directory", "pwd", "which directory"]):
-            print(f"\n📍 You are currently in: {self.project_dir}")
+        diag = SetupDoctor.check_system(self.config)
+        tools = diag["tools"]
+        installed_any = any(t["installed"] for t in tools.values())
+
+        print("\n\033[1;33m⚠️  No Active AI Provider Selected!\033[0m")
+        print("Foreman Orchestrator is a Front-Desk Bridge & Conductor — it has no built-in LLM.")
+        print("To converse, inspect workspace state, and write code, an AI worker CLI must be connected.")
+
+        if not installed_any:
+            print("\n[!] No local AI CLI tools were detected on your system.")
+            print("    Please install Antigravity CLI (agy) or Claude Code (claude).")
+            print("    Run /doctor for setup diagnostics and instructions.")
+            return False
+
+        print("\nPlease choose an AI Worker to activate for this project:")
+        self.handle_provider_menu()
+        return self._get_active_provider_name() != "mock"
+
+    def handle_lightweight_query(self, query: str) -> bool:
+        """
+        Fast local utility responses for zero-token operational questions.
+        Returns True if handled locally, False if it requires AI worker processing.
+        """
+        q = query.strip().lower()
+
+        # Location / Folder
+        if q in ("where am i", "pwd", "which folder is this", "what directory is this", "which folder", "what folder"):
+            print(f"\n📍 Working Directory: {self.project_dir}")
             services = self.links.list_links()
             if services:
-                print("   Linked external services:")
+                print("   Connected Workspaces:")
                 for s in services:
-                    print(f"   - {s.name}: {s.path}")
+                    print(f"   - {s.name}: {s.path} ({s.description or 'No desc'})")
             else:
-                print("   (No external services currently linked. Use /link to connect one.)")
+                print("   (No external services linked yet. Use /link to connect one.)")
             return True
 
-        # Status / Progress inquiries
-        if any(w in q for w in ["what is the status", "current status", "show status", "what is done", "how is the project"]):
-            state = self.hub.read_state()
-            print("\n" + (state or "No active state found."))
-            return True
-
-        # Tool / Provider inquiries
-        if any(w in q for w in ["which ai", "which tool", "what tools", "active provider"]):
-            p_name = self._get_active_provider_name()
-            print(f"\n🤖 Active AI Worker: {p_name} (Pack: {self.active_pack})")
-            print("   Type /provider to switch, or /doctor to inspect system tools.")
-            return True
-
-        # Help / Greeting
-        if q in ("hello", "hi", "hey", "help", "who are you", "what can you do"):
-            print("\n👋 I am your Foreman Orchestrator Front-Desk Manager.")
-            print("   - Type your goal (e.g. 'Build an auth API with SQLite') to delegate tasks.")
-            print("   - Type '/' to see available commands (/provider, /status, /link, /tasks).")
-            print("   - Type any question to inspect the workspace.")
+        # Who are you / help
+        if q in ("who are you", "who r u", "what is orchestrator", "what are you", "hello", "hi", "hey"):
+            active_p = self._get_active_provider_name()
+            print(f"\n👋 Foreman Orchestrator — Front-Desk Bridge & Multi-Agent Conductor")
+            print(f"   - Active AI Worker: {active_p} (Pack: {self.active_pack})")
+            print("   - Type your question or goal naturally — your active AI worker will respond directly.")
+            print("   - Type /run <goal> to execute a complete multi-agent engineering sprint.")
+            print("   - Type '/' to open the live command dropdown (/provider, /status, /link, /doctor).")
             return True
 
         return False
 
+    def bridge_to_ai_provider(self, query: str) -> None:
+        """
+        Send user query/instruction directly to active AI provider (agy, claude, opencode)
+        with workspace context and live elapsed timer.
+        """
+        if not self.check_or_prompt_ai_provider():
+            return
+
+        p_name = self._get_active_provider_name()
+        p_cfg = self.config.providers.get(p_name)
+        if not p_cfg:
+            print(f"[!] Configuration for '{p_name}' not found.")
+            return
+
+        # Prepare workspace context for the AI
+        state_content = self.hub.read_state() or "Project state is clean / idle."
+        services = self.links.list_links()
+        links_summary = ", ".join([f"{s.name} at {s.path}" for s in services]) if services else "None"
+
+        prompt = (
+            f"You are the Front-Desk AI Worker for Foreman Orchestrator.\n"
+            f"Project Directory: {self.project_dir}\n"
+            f"Connected Workspaces: {links_summary}\n"
+            f"Current Project State:\n{state_content[:2000]}\n\n"
+            f"User Inquiry / Request: {query}\n\n"
+            f"Instructions:\n"
+            f"1. Answer the user directly, clearly, and concisely based on the project context above.\n"
+            f"2. If the user asks about project state or progress, summarize accurately from the state above.\n"
+            f"3. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, "
+            f"and inform them they can run '/run <goal>' to trigger a complete 4-agent sprint."
+        )
+
+        adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec)
+        result = adapter.run(
+            prompt=prompt,
+            cwd=self.project_dir,
+            task_id="front_desk",
+            show_progress=True,
+            progress_label=p_name
+        )
+
+        if result.success and result.output:
+            print(result.output.strip())
+        elif result.error:
+            print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}")
+        else:
+            print("\n(No response received from AI worker.)")
+
     def execute_goal(self, goal: str) -> None:
-        """Execute user goal with confirmation and live feedback."""
+        """Execute full multi-agent workflow sprint on user goal with confirmation."""
         goal_lower = goal.lower()
         selected_pack = self.active_pack
 
@@ -301,13 +366,13 @@ class InteractiveShell:
         provider_name = self._get_active_provider_name()
 
         # Ask for confirmation before launching an engineering sprint!
-        print(f"\n📋 Proposed Task: '{goal}'")
+        print(f"\n📋 Proposed Multi-Agent Sprint: '{goal}'")
         print(f"   Target Dir : {self.project_dir}")
         print(f"   AI Worker  : {provider_name}")
         print(f"   Workflow   : {selected_pack}")
 
         try:
-            confirm = input("\nProceed with execution? [Y/n]: ").strip().lower()
+            confirm = input("\nProceed with multi-agent sprint? [Y/n]: ").strip().lower()
             if confirm and confirm not in ("y", "yes"):
                 print("Execution cancelled.")
                 return
@@ -315,7 +380,7 @@ class InteractiveShell:
             print("\nExecution cancelled.")
             return
 
-        print("\n🚀 Starting execution...")
+        print("\n🚀 Starting multi-agent sprint...")
         print("------------------------------------------------------------------------")
 
         def print_progress(text: str):
@@ -339,6 +404,23 @@ class InteractiveShell:
                 print(f"  - {b}")
         print("=" * 60)
 
+    def handle_run_command(self, goal: str = "") -> None:
+        """Launch an engineering sprint via /run <goal>."""
+        if not goal:
+            try:
+                goal = input("\nEnter goal for multi-agent sprint: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("")
+                return
+        if not goal:
+            print("No goal specified. Cancelled.")
+            return
+
+        if not self.check_or_prompt_ai_provider():
+            return
+
+        self.execute_goal(goal)
+
     def run(self) -> None:
         """Main interactive REPL loop."""
         self.render_banner()
@@ -358,10 +440,13 @@ class InteractiveShell:
             if line.startswith("/"):
                 cmd_parts = line.split()
                 cmd = cmd_parts[0].lower()
+                arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
 
                 if cmd in ("/exit", "/quit"):
                     print("Exiting orchestrator. Goodbye!")
                     break
+                elif cmd == "/run":
+                    self.handle_run_command(arg)
                 elif cmd == "/clear":
                     os.system("clear" if os.name != "nt" else "cls")
                     self.render_banner()
@@ -386,9 +471,30 @@ class InteractiveShell:
                     self.print_slash_menu(cmd)
 
             else:
-                # 1. First check if it's a conversational question about the workspace
-                if self.handle_conversational_inquiry(line):
+                # 1. Fast local operational query (who are you, where am i)
+                if self.handle_lightweight_query(line):
                     continue
 
-                # 2. Otherwise it's a goal -> confirm and execute
-                self.execute_goal(line)
+                # 2. If user specifically asks to run/build/implement a full project feature:
+                lower = line.strip().lower()
+                if (lower.startswith("run ") or lower.startswith("build ") or 
+                    lower.startswith("implement ") or lower.startswith("create a ")):
+                    print(f"\n📋 Detected action request: '{line}'")
+                    print("   [1] Run full 4-agent sprint (Planner -> Critic -> Builder -> Reviewer)")
+                    print("   [2] Ask AI worker directly (Chat / Consult)")
+                    print("   [c] Cancel")
+                    try:
+                        choice = input("\nSelect mode [default: 2]: ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print("")
+                        continue
+
+                    if choice == "1":
+                        self.execute_goal(line)
+                        continue
+                    elif choice == "c":
+                        print("Cancelled.")
+                        continue
+
+                # 3. Natural Language query -> Bridge directly to active AI Provider!
+                self.bridge_to_ai_provider(line)

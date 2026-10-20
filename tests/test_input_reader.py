@@ -35,14 +35,14 @@ class TestInputReader(unittest.TestCase):
         """Test dropdown box formatting and pointer selection."""
         box_str, num_lines, selected_cmd = render_dropdown_box("/", selected_index=0)
         self.assertIn("Commands", box_str)
-        self.assertIn("❯ /provider", box_str)
-        self.assertEqual(selected_cmd, "/provider")
+        self.assertIn("❯ /run", box_str)
+        self.assertEqual(selected_cmd, "/run")
         self.assertGreater(num_lines, 5)
 
-        # Test index 1 highlights /status
+        # Test index 1 highlights /provider
         box_str2, _, selected_cmd2 = render_dropdown_box("/", selected_index=1)
-        self.assertIn("❯ /status", box_str2)
-        self.assertEqual(selected_cmd2, "/status")
+        self.assertIn("❯ /provider", box_str2)
+        self.assertEqual(selected_cmd2, "/provider")
 
     def test_interactive_pty_down_arrow_selection(self):
         """Test live arrow key navigation in a virtual PTY."""
@@ -82,7 +82,7 @@ class TestInputReader(unittest.TestCase):
             os.close(master)
             _, status = os.waitpid(pid, 0)
             self.assertEqual(os.waitstatus_to_exitcode(status), 0)
-            self.assertIn(b"RESULT:/status", output)
+            self.assertIn(b"RESULT:/provider", output)
 
     def test_interactive_pty_up_arrow_wrap(self):
         """Test Up Arrow wrapping from first to last command."""

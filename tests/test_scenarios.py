@@ -214,6 +214,16 @@ class TestScenariosAndResilience(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("file count", err.lower())
 
+    def test_scenario_7_interactive_shell_bridge(self):
+        """Verify front-desk shell handles lightweight queries and bridges natural language to AI."""
+        from orchestrator.repl import InteractiveShell
+        shell = InteractiveShell(project_dir=self.project_dir)
+
+        # Lightweight queries
+        self.assertTrue(shell.handle_lightweight_query("who are you"))
+        self.assertTrue(shell.handle_lightweight_query("where am i"))
+        self.assertFalse(shell.handle_lightweight_query("What is the current state of our project?"))
+
 
 if __name__ == "__main__":
     unittest.main()

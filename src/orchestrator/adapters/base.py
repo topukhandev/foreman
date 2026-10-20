@@ -59,7 +59,9 @@ class BaseCLIAdapter:
         cwd: str,
         task_id: str = "general",
         session_id: Optional[str] = None,
-        extra_flags: Optional[List[str]] = None
+        extra_flags: Optional[List[str]] = None,
+        show_progress: bool = False,
+        progress_label: Optional[str] = None
     ) -> ExecutionResult:
         """
         Execute the CLI command securely inside cwd with strict timeout.
@@ -90,19 +92,54 @@ class BaseCLIAdapter:
 
             process = subprocess.Popen(cmd, **popen_kwargs)
 
-            try:
-                stdout, stderr = process.communicate(timeout=self.timeout_sec)
-                exit_code = process.returncode
-            except subprocess.TimeoutExpired:
-                self._kill_process_tree(process)
+            if show_progress and sys.stdout.isatty():
+                spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                lbl = progress_label or self.name
+                idx = 0
+                while process.poll() is None:
+                    elapsed = time.time() - start_time
+                    if elapsed > self.timeout_sec:
+                        break
+                    sys.stdout.write(f"\r\033[K\033[1;36m{spinner[idx % len(spinner)]} [{lbl}]\033[0m Thinking... ({elapsed:.1f}s)")
+                    sys.stdout.flush()
+                    idx += 1
+                    time.sleep(0.1)
+
+                if process.poll() is None:
+                    self._kill_process_tree(process)
+                    stdout, stderr = process.communicate()
+                    sys.stdout.write(f"\r\033[K\033[1;31m✗ [{lbl}]\033[0m Timed out after {self.timeout_sec}s\n")
+                    sys.stdout.flush()
+                    return ExecutionResult(
+                        success=False,
+                        output=stdout or "",
+                        error=f"Execution timed out after {self.timeout_sec} seconds. Process tree terminated.",
+                        exit_code=-1,
+                        duration_sec=time.time() - start_time
+                    )
+
                 stdout, stderr = process.communicate()
-                return ExecutionResult(
-                    success=False,
-                    output=stdout or "",
-                    error=f"Execution timed out after {self.timeout_sec} seconds. Process tree terminated.",
-                    exit_code=-1,
-                    duration_sec=time.time() - start_time
-                )
+                exit_code = process.returncode
+                duration = time.time() - start_time
+                if exit_code == 0:
+                    sys.stdout.write(f"\r\033[K\033[1;32m✓ [{lbl}]\033[0m Responded in {duration:.1f}s\n\n")
+                else:
+                    sys.stdout.write(f"\r\033[K\033[1;31m✗ [{lbl}]\033[0m Error after {duration:.1f}s (code {exit_code})\n\n")
+                sys.stdout.flush()
+            else:
+                try:
+                    stdout, stderr = process.communicate(timeout=self.timeout_sec)
+                    exit_code = process.returncode
+                except subprocess.TimeoutExpired:
+                    self._kill_process_tree(process)
+                    stdout, stderr = process.communicate()
+                    return ExecutionResult(
+                        success=False,
+                        output=stdout or "",
+                        error=f"Execution timed out after {self.timeout_sec} seconds. Process tree terminated.",
+                        exit_code=-1,
+                        duration_sec=time.time() - start_time
+                    )
 
             duration = time.time() - start_time
             success = (exit_code == 0)

@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 
 COMMANDS: List[Tuple[str, str]] = [
+    ("/run",      "Launch full 4-agent sprint (Planner, Critic, Builder, Reviewer)"),
     ("/provider", "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
     ("/status",   "View single-page project state (state.md) & active workers"),
     ("/tasks",    "Inspect recent tasks, specs, and reviewer verdicts"),
@@ -41,7 +42,7 @@ def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int,
     selected_cmd = matches[selected_index][0]
 
     lines = ["\n  ╭─ Commands (↑/↓ to navigate, Enter to select, Esc to cancel) ──────╮"]
-    matches_to_show = matches[:9]
+    matches_to_show = matches[:10]
     for i, (cmd, desc) in enumerate(matches_to_show):
         if i == selected_index:
             # Highlighted item in bright cyan with pointer
@@ -58,6 +59,9 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
     Read line with live character-by-character slash dropdown and arrow key navigation.
     Falls back to sys.stdin.readline() if not a TTY.
     """
+    # Guarantee prompt never has embedded newlines that would cause scroll-jump during redraw
+    prompt = prompt.replace("\r", "").replace("\n", "")
+
     if not sys.stdin.isatty():
         sys.stdout.write(prompt)
         sys.stdout.flush()
@@ -98,7 +102,7 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
         if curr_text.startswith("/") and not dropdown_dismissed:
             token = curr_text.split()[0]
             matches = get_command_matches(token)
-            visible_count = min(9, len(matches))
+            visible_count = min(10, len(matches))
             active_matches_count = visible_count
 
             if matches:
