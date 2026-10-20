@@ -7,8 +7,8 @@ Works on any machine with zero installation hurdles.
 import os
 import sys
 
-# Ensure src/ is in python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
+# Ensure src/ is in python path, resolving symlinks
+current_dir = os.path.dirname(os.path.realpath(__file__))
 src_dir = os.path.join(current_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)

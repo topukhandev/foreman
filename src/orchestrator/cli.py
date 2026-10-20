@@ -11,6 +11,7 @@ from orchestrator.progress import ProgressTracker
 from orchestrator.wizard import run_setup_wizard
 from orchestrator.mcp_server import MCPServer
 from orchestrator.packs import PACKS
+from orchestrator.repl import InteractiveShell
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -23,7 +24,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"[OK] Initialized Orchestrator project at: {target_dir}")
     print(f"     Hub created at: {hub.hub_dir}")
     print(f"     Config file: {config_path}")
-    print("\nNext step: Run 'orchestrator doctor' to check available CLI workers, or 'orchestrator setup' to configure.")
+    print("\nNext step: Run 'orchestrator' to launch interactive shell, or 'orchestrator doctor'.")
     return 0
 
 
@@ -60,13 +61,19 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_shell(args: argparse.Namespace) -> int:
+    target_dir = os.path.abspath(getattr(args, "path", ".") or ".")
+    shell = InteractiveShell(project_dir=target_dir)
+    shell.run()
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     target_dir = os.path.abspath(args.project or ".")
     os.makedirs(target_dir, exist_ok=True)
     config_path = os.path.join(target_dir, "providers.yaml")
     cfg = load_config(config_path)
 
-    # Enable mock mode if requested
     if args.mock:
         for p in cfg.providers.values():
             p.enabled = False
@@ -85,7 +92,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
 
     goal = args.goal or "Validate and prepare a launch strategy for an AI Developer Tool"
-    pack_name = args.pack or "business_idea"
+    pack_name = args.pack or "developer"
 
     def print_progress(text: str):
         print("\n" + text)
@@ -116,11 +123,22 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
+    # If launched with zero arguments, default to interactive shell!
+    if len(sys.argv) == 1:
+        shell = InteractiveShell(project_dir=".")
+        shell.run()
+        sys.exit(0)
+
     parser = argparse.ArgumentParser(
         prog="orchestrator",
         description="Local AI Orchestrator (Foreman / Quorum)"
     )
-    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+    subparsers = parser.add_subparsers(dest="subcommand", required=False)
+
+    # shell (interactive console)
+    p_shell = subparsers.add_parser("shell", help="Launch interactive front-desk shell")
+    p_shell.add_argument("path", nargs="?", default=".", help="Directory to open")
+    p_shell.set_defaults(func=cmd_shell)
 
     # init
     p_init = subparsers.add_parser("init", help="Initialize an orchestrator workspace")
@@ -152,12 +170,18 @@ def main() -> None:
     # run
     p_run = subparsers.add_parser("run", help="Run a multi-agent workflow on a goal")
     p_run.add_argument("goal", nargs="?", default="", help="Goal or user prompt")
-    p_run.add_argument("--pack", choices=list(PACKS.keys()), default="business_idea", help="Role pack to execute (business_idea, developer, qa)")
+    p_run.add_argument("--pack", choices=list(PACKS.keys()), default="developer", help="Role pack to execute (developer, business_idea, qa)")
     p_run.add_argument("--project", default=".", help="Project directory")
     p_run.add_argument("--mock", action="store_true", help="Run with mock/simulation workers")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()
+    if not getattr(args, "func", None):
+        # Default to shell if unknown command or empty
+        shell = InteractiveShell(project_dir=".")
+        shell.run()
+        sys.exit(0)
+
     code = args.func(args)
     sys.exit(code)
 
