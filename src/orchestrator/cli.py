@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from typing import Optional
 from orchestrator.config import load_config, init_default_config_file
 from orchestrator.doctor import SetupDoctor
 from orchestrator.hub import Hub
