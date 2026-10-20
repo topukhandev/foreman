@@ -14,7 +14,6 @@ COMMANDS: List[Tuple[str, str]] = [
     ("/status",   "View single-page project state (state.md) & active workers"),
     ("/tasks",    "Inspect recent tasks, specs, and reviewer verdicts"),
     ("/link",     "Connect another directory, repository, or microservice"),
-    ("/pack",     "Select default workflow pack (developer, business_idea, qa)"),
     ("/doctor",   "Check installed AI tools & system health diagnostics"),
     ("/clear",    "Clear the terminal screen"),
     ("/help",     "Display interactive command guide"),

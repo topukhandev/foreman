@@ -52,7 +52,7 @@ class InteractiveShell:
         print("========================================================================")
         print(" 🎛️  FOREMAN ORCHESTRATOR — Front-Desk Session")
         print(f" Directory  : {self.project_dir}")
-        print(f" Primary AI : {active_p} (Pack: {self.active_pack})")
+        print(f" Primary AI : {active_p}")
         print(f" Tools Found: {', '.join(available_tools) or 'None'}")
         print(f" Workspaces : {services_str}")
         print("------------------------------------------------------------------------")
@@ -289,7 +289,7 @@ class InteractiveShell:
         if q in ("who are you", "who r u", "what is orchestrator", "what are you", "hello", "hi", "hey"):
             active_p = self._get_active_provider_name()
             print(f"\n👋 Foreman Orchestrator — Front-Desk Bridge & Multi-Agent Conductor")
-            print(f"   - Active AI Worker: {active_p} (Pack: {self.active_pack})")
+            print(f"   - Active AI Worker: {active_p}")
             print("   - Type your question or goal naturally — your active AI worker will respond directly.")
             print("   - Type /run <goal> to execute a complete multi-agent engineering sprint.")
             print("   - Type '/' to open the live command dropdown (/provider, /status, /link, /doctor).")
@@ -361,7 +361,6 @@ class InteractiveShell:
         print(f"\n📋 Proposed Multi-Agent Sprint: '{goal}'")
         print(f"   Target Dir : {self.project_dir}")
         print(f"   AI Worker  : {provider_name}")
-        print(f"   Workflow   : {selected_pack}")
 
         confirm = read_input_with_esc("\nProceed with multi-agent sprint? [Y/n]: ", default="y")
         if not confirm or confirm.lower() not in ("y", "yes"):
@@ -426,8 +425,8 @@ class InteractiveShell:
                 cmd = cmd_parts[0].lower()
                 arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
 
-                # Auto-expand unambiguous slash command prefix (e.g. /pa -> /pack, /pro -> /provider)
-                all_cmds = ["/run", "/provider", "/status", "/tasks", "/link", "/pack", "/doctor", "/clear", "/help", "/exit", "/quit"]
+                # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
+                all_cmds = ["/run", "/provider", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
                 matches = [c for c in all_cmds if c.startswith(cmd)]
                 if len(matches) == 1:
                     cmd = matches[0]

@@ -98,8 +98,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("\n" + text)
 
     print(f"Starting Orchestrator in: {target_dir}")
-    print(f"Goal: {goal}")
-    print(f"Role Pack: {pack_name}\n")
+    print(f"Goal: {goal}\n")
 
     engine = OrchestratorEngine(
         project_dir=target_dir,

@@ -25,7 +25,7 @@ class TestInputReader(unittest.TestCase):
         p_matches = get_command_matches("/p")
         p_cmds = [cmd for cmd, _ in p_matches]
         self.assertIn("/provider", p_cmds)
-        self.assertIn("/pack", p_cmds)
+        self.assertNotIn("/pack", p_cmds)
         self.assertNotIn("/status", p_cmds)
 
         xyz_matches = get_command_matches("/xyz")
