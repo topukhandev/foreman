@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from typing import Dict, List, Optional
+import uuid
 import yaml
 from orchestrator.config import load_config, OrchestratorConfig
 from orchestrator.hub import Hub
@@ -32,6 +33,8 @@ class InteractiveShell:
         self.config_path = os.path.join(self.project_dir, "providers.yaml")
         self.config = load_config(self.config_path)
         self.active_pack = "developer"
+        self.session_id = str(uuid.uuid4())
+        self.session_turns = 0
 
     def _get_active_provider_name(self) -> str:
         """Find currently active primary provider."""
@@ -109,11 +112,19 @@ class InteractiveShell:
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(new_cfg, f, sort_keys=False)
             self.config = load_config(self.config_path)
+            self.session_id = str(uuid.uuid4())
+            self.session_turns = 0
             print(f"[OK] Switched active provider to: {self._get_active_provider_name()}")
         elif choice == "c":
             print("Cancelled.")
         else:
             print("Invalid selection.")
+
+    def handle_new_session(self) -> None:
+        """Start a fresh conversation thread with active AI worker."""
+        self.session_id = str(uuid.uuid4())
+        self.session_turns = 0
+        print("\n\033[1;32m[OK]\033[0m Started a fresh conversation thread with active AI worker.\n")
 
     def handle_link_menu(self, args: Optional[List[str]] = None) -> None:
         """Interactive link menu to connect another directory/service, or CLI command."""
@@ -319,29 +330,39 @@ class InteractiveShell:
         services = self.links.list_links()
         links_summary = ", ".join([f"{s.name} at {s.path}" for s in services]) if services else "None"
 
-        prompt = (
-            f"You are the Front-Desk AI Worker for Foreman Orchestrator.\n"
-            f"Project Directory: {self.project_dir}\n"
-            f"Connected Workspaces: {links_summary}\n"
-            f"Current Project State:\n{state_content[:2000]}\n\n"
-            f"User Inquiry / Request: {query}\n\n"
-            f"Instructions:\n"
-            f"1. Answer the user directly, clearly, and concisely based on the project context above.\n"
-            f"2. If the user asks about project state or progress, summarize accurately from the state above.\n"
-            f"3. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, "
-            f"and inform them they can run '/run <goal>' to trigger a complete 4-agent sprint."
-        )
+        if self.session_turns > 0:
+            prompt = (
+                f"[Workspace Update: {self.project_dir} | State: {state_content[:600]}]\n"
+                f"User Request: {query}"
+            )
+            session_arg = self.session_id if p_name == "claude_code" else "continue"
+        else:
+            prompt = (
+                f"You are the Front-Desk AI Worker for Foreman Orchestrator.\n"
+                f"Project Directory: {self.project_dir}\n"
+                f"Connected Workspaces: {links_summary}\n"
+                f"Current Project State:\n{state_content[:2000]}\n\n"
+                f"User Inquiry / Request: {query}\n\n"
+                f"Instructions:\n"
+                f"1. Answer the user directly, clearly, and concisely based on the project context above.\n"
+                f"2. If the user asks about project state or progress, summarize accurately from the state above.\n"
+                f"3. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, "
+                f"and inform them they can run '/run <goal>' to trigger a complete 4-agent sprint."
+            )
+            session_arg = self.session_id if p_name == "claude_code" else None
 
         adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec)
         result = adapter.run(
             prompt=prompt,
             cwd=self.project_dir,
             task_id="front_desk",
+            session_id=session_arg,
             show_progress=True,
             progress_label=p_name
         )
 
         if result.success and result.output:
+            self.session_turns += 1
             formatted = render_markdown(result.output.strip())
             print(formatted)
         elif result.error:
@@ -430,7 +451,7 @@ class InteractiveShell:
                 arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
 
                 # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
-                all_cmds = ["/run", "/provider", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
+                all_cmds = ["/run", "/new", "/provider", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
                 matches = [c for c in all_cmds if c.startswith(cmd)]
                 if len(matches) == 1:
                     cmd = matches[0]
@@ -440,6 +461,8 @@ class InteractiveShell:
                     break
                 elif cmd == "/run":
                     self.handle_run_command(arg)
+                elif cmd == "/new":
+                    self.handle_new_session()
                 elif cmd == "/clear":
                     os.system("clear" if os.name != "nt" else "cls")
                     self.render_banner()

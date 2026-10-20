@@ -23,6 +23,11 @@ class AntigravityAdapter(BaseCLIAdapter):
         cmd = [bin_path]
         if extra_flags:
             cmd.extend(extra_flags)
+        if session_id:
+            if session_id == "continue":
+                cmd.append("--continue")
+            else:
+                cmd.append(f"--conversation={session_id}")
         # In agy CLI, attaching prompt as -p="<prompt>" prevents any argument parsing conflicts
         cmd.append(f"-p={prompt}")
         return cmd

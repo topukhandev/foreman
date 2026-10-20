@@ -39,10 +39,15 @@ class TestInputReader(unittest.TestCase):
         self.assertEqual(selected_cmd, "/run")
         self.assertGreater(num_lines, 5)
 
-        # Test index 1 highlights /provider
+        # Test index 1 highlights /new
         box_str2, _, selected_cmd2 = render_dropdown_box("/", selected_index=1)
-        self.assertIn("❯ /provider", box_str2)
-        self.assertEqual(selected_cmd2, "/provider")
+        self.assertIn("❯ /new", box_str2)
+        self.assertEqual(selected_cmd2, "/new")
+
+        # Test index 2 highlights /provider
+        box_str3, _, selected_cmd3 = render_dropdown_box("/", selected_index=2)
+        self.assertIn("❯ /provider", box_str3)
+        self.assertEqual(selected_cmd3, "/provider")
 
     def test_interactive_pty_down_arrow_selection(self):
         """Test live arrow key navigation in a virtual PTY."""
@@ -82,7 +87,7 @@ class TestInputReader(unittest.TestCase):
             os.close(master)
             _, status = os.waitpid(pid, 0)
             self.assertEqual(os.waitstatus_to_exitcode(status), 0)
-            self.assertIn(b"RESULT:/provider", output)
+            self.assertIn(b"RESULT:/new", output)
 
     def test_interactive_pty_up_arrow_wrap(self):
         """Test Up Arrow wrapping from first to last command."""

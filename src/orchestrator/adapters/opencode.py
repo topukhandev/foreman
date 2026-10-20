@@ -21,5 +21,10 @@ class OpenCodeAdapter(BaseCLIAdapter):
         cmd_parts = self.base_command.strip().split()
         if extra_flags:
             cmd_parts.extend(extra_flags)
+        if session_id:
+            if session_id == "continue":
+                cmd_parts.append("--continue")
+            else:
+                cmd_parts.extend(["--session", session_id])
         cmd_parts.append(prompt)
         return cmd_parts

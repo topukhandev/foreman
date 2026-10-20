@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 COMMANDS: List[Tuple[str, str]] = [
     ("/run",      "Launch full 4-agent sprint (Planner, Critic, Builder, Reviewer)"),
+    ("/new",      "Start a fresh conversation thread with active AI worker"),
     ("/provider", "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
     ("/status",   "View single-page project state (state.md) & active workers"),
     ("/tasks",    "Inspect recent tasks, specs, and reviewer verdicts"),

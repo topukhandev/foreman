@@ -22,5 +22,7 @@ class ClaudeCodeAdapter(BaseCLIAdapter):
         cmd = [bin_path]
         if extra_flags:
             cmd.extend(extra_flags)
+        if session_id:
+            cmd.extend(["--session-id", session_id])
         cmd.extend(["-p", prompt])
         return cmd

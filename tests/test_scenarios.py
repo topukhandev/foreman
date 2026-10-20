@@ -232,6 +232,24 @@ class TestScenariosAndResilience(unittest.TestCase):
         self.assertTrue(res.success)
         self.assertIn("hello world", res.output)
 
+    def test_persistent_session_lifecycle(self):
+        """Verify front-desk session lifecycle preserves session_id and /new resets it."""
+        from orchestrator.repl import InteractiveShell
+        shell = InteractiveShell(project_dir=self.project_dir)
+        first_id = shell.session_id
+        self.assertEqual(shell.session_turns, 0)
+        self.assertIsNotNone(first_id)
+
+        # Simulate turn increment
+        shell.session_turns += 1
+        self.assertEqual(shell.session_turns, 1)
+        self.assertEqual(shell.session_id, first_id)
+
+        # Trigger /new reset
+        shell.handle_new_session()
+        self.assertEqual(shell.session_turns, 0)
+        self.assertNotEqual(shell.session_id, first_id)
+
 
 if __name__ == "__main__":
     unittest.main()
