@@ -12,7 +12,13 @@ from orchestrator.links import WorkspaceLinks
 from orchestrator.engine import OrchestratorEngine
 from orchestrator.packs import PACKS
 from orchestrator.adapters import create_adapter
-from orchestrator.input_reader import read_interactive_line, COMMANDS, render_dropdown_box
+from orchestrator.input_reader import (
+    read_interactive_line,
+    COMMANDS,
+    render_dropdown_box,
+    select_from_menu,
+    read_input_with_esc
+)
 
 
 class InteractiveShell:
@@ -85,18 +91,15 @@ class InteractiveShell:
             choice = name_alias[choice]
 
         if not choice:
-            print("\n? Select Default AI Provider for this project:")
-            print(f"  [1] Antigravity CLI (agy)       {'[INSTALLED]' if has_agy else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'antigravity_cli' else ''}")
-            print(f"  [2] Claude Code (claude)        {'[INSTALLED]' if has_claude else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'claude_code' else ''}")
-            print(f"  [3] OpenCode (opencode)         {'[INSTALLED]' if has_opencode else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'opencode' else ''}")
-            print(f"  [4] Dual-Model (Antigravity builds, Claude reviews) {'[READY]' if (has_agy and has_claude) else '[NEED BOTH]'}")
-            print(f"  [5] Simulation / Mock Mode (Zero tokens)")
-            print("  [c] Cancel")
-
-            try:
-                choice = input("\nEnter choice (1-5 or c): ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("")
+            options = [
+                ("1", f"Antigravity CLI (agy)       {'[INSTALLED]' if has_agy else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'antigravity_cli' else ''}".strip()),
+                ("2", f"Claude Code (claude)        {'[INSTALLED]' if has_claude else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'claude_code' else ''}".strip()),
+                ("3", f"OpenCode (opencode)         {'[INSTALLED]' if has_opencode else '[NOT FOUND]'} {'[ACTIVE]' if curr == 'opencode' else ''}".strip()),
+                ("4", f"Dual-Model (Antigravity builds, Claude reviews) {'[READY]' if (has_agy and has_claude) else '[NEED BOTH]'}"),
+                ("5", "Simulation / Mock Mode (Zero tokens)")
+            ]
+            choice = select_from_menu("? Select Default AI Provider for this project:", options)
+            if not choice:
                 return
 
         from orchestrator.wizard import build_config_for_preset
@@ -156,43 +159,40 @@ class InteractiveShell:
             for s in services:
                 print(f"  - {s.name}: {s.path} ({s.description or 'No desc'})")
 
-        print("\n? Connect an external folder/service:")
-        print("  [1] Add new linked folder")
-        print("  [2] Remove existing link")
-        print("  [c] Cancel")
-
-        try:
-            action = input("\nSelect option (1/2/c): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print("")
+        options = [
+            ("1", "Add new linked folder"),
+            ("2", "Remove existing link")
+        ]
+        action = select_from_menu("? Connect an external folder/service:", options)
+        if not action:
             return
 
         if action == "1":
-            try:
-                target_path = input("Enter path to directory (e.g. ~/Desktop/api): ").strip()
-                if not target_path:
-                    return
-                name = input("Enter a service name (e.g. backend, ui, docs) [default: auto]: ").strip()
-                desc = input("Brief description of this service: ").strip()
-                ok = self.links.add_link(name, target_path, desc)
-                if ok:
-                    print(f"[OK] Successfully linked service '{name}' at: {os.path.abspath(os.path.expanduser(target_path))}")
-                else:
-                    print(f"[!] Error: Directory not found: {target_path}")
-            except (EOFError, KeyboardInterrupt):
-                print("")
+            target_path = read_input_with_esc("Enter path to directory (e.g. ~/Desktop/api): ")
+            if not target_path:
+                return
+            name = read_input_with_esc("Enter a service name (e.g. backend, ui, docs) [default: auto]: ")
+            if name is None:
+                return
+            desc = read_input_with_esc("Brief description of this service: ")
+            if desc is None:
+                return
+            ok = self.links.add_link(name, target_path, desc)
+            if ok:
+                print(f"[OK] Successfully linked service '{name}' at: {os.path.abspath(os.path.expanduser(target_path))}")
+            else:
+                print(f"[!] Error: Directory not found: {target_path}")
         elif action == "2":
             if not services:
                 print("No services currently linked.")
                 return
-            try:
-                del_name = input("Enter service name to remove: ").strip()
-                if self.links.remove_link(del_name):
-                    print(f"[OK] Removed link: {del_name}")
-                else:
-                    print(f"[!] Link not found: {del_name}")
-            except (EOFError, KeyboardInterrupt):
-                print("")
+            del_name = read_input_with_esc("Enter service name to remove: ")
+            if not del_name:
+                return
+            if self.links.remove_link(del_name):
+                print(f"[OK] Removed link: {del_name}")
+            else:
+                print(f"[!] Link not found: {del_name}")
 
     def handle_tasks_menu(self) -> None:
         """Inspect task status and contents interactively."""
@@ -205,18 +205,15 @@ class InteractiveShell:
         for s in statuses:
             print(f"  Task #{s.task_id}: {s.title} [{s.role}] -> {s.state.upper()} ({s.one_line_summary})")
 
-        try:
-            pick = input("\nEnter Task ID to view full specification & results (or Enter to back): ").strip()
-            if pick:
-                spec = self.hub.read_task_spec(pick)
-                if spec:
-                    print("\n" + "=" * 60)
-                    print(spec)
-                    print("=" * 60)
-                else:
-                    print(f"Task #{pick} not found.")
-        except (EOFError, KeyboardInterrupt):
-            print("")
+        pick = read_input_with_esc("\nEnter Task ID to view full specification & results (or Esc to back): ")
+        if pick:
+            spec = self.hub.read_task_spec(pick)
+            if spec:
+                print("\n" + "=" * 60)
+                print(spec)
+                print("=" * 60)
+            else:
+                print(f"Task #{pick} not found.")
 
     def handle_pack_menu(self, choice_arg: str = "") -> None:
         """Select default workflow pack interactively or via argument."""
@@ -232,20 +229,15 @@ class InteractiveShell:
             print(f"[OK] Active workflow pack set to: {self.active_pack}")
             return
 
-        print(f"\nCurrent Pack: {self.active_pack}")
-        print("Available Packs:")
-        print("  [1] developer     - Architecture, code patch implementation, test suite, review")
-        print("  [2] business_idea - Startup checklist, critic gap analysis, strategy blueprint")
-        print("  [3] qa            - Test matrix, edge cases, automation scripts, sign-off")
-        try:
-            choice = input("\nSelect pack (1-3): ").strip()
-            if choice in mapping:
-                self.active_pack = mapping[choice]
-                print(f"[OK] Active workflow pack set to: {self.active_pack}")
-            else:
-                print("Invalid choice.")
-        except (EOFError, KeyboardInterrupt):
-            print("")
+        options = [
+            ("1", "developer     - Architecture, code patch implementation, test suite, review"),
+            ("2", "business_idea - Startup checklist, critic gap analysis, strategy blueprint"),
+            ("3", "qa            - Test matrix, edge cases, automation scripts, sign-off")
+        ]
+        choice = select_from_menu(f"? Select Workflow Pack (Current: {self.active_pack}):", options)
+        if choice and choice in mapping:
+            self.active_pack = mapping[choice]
+            print(f"[OK] Active workflow pack set to: {self.active_pack}")
 
     def check_or_prompt_ai_provider(self) -> bool:
         """
@@ -371,13 +363,9 @@ class InteractiveShell:
         print(f"   AI Worker  : {provider_name}")
         print(f"   Workflow   : {selected_pack}")
 
-        try:
-            confirm = input("\nProceed with multi-agent sprint? [Y/n]: ").strip().lower()
-            if confirm and confirm not in ("y", "yes"):
-                print("Execution cancelled.")
-                return
-        except (EOFError, KeyboardInterrupt):
-            print("\nExecution cancelled.")
+        confirm = read_input_with_esc("\nProceed with multi-agent sprint? [Y/n]: ", default="y")
+        if not confirm or confirm.lower() not in ("y", "yes"):
+            print("Execution cancelled.")
             return
 
         print("\n🚀 Starting multi-agent sprint...")
@@ -407,11 +395,7 @@ class InteractiveShell:
     def handle_run_command(self, goal: str = "") -> None:
         """Launch an engineering sprint via /run <goal>."""
         if not goal:
-            try:
-                goal = input("\nEnter goal for multi-agent sprint: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("")
-                return
+            goal = read_input_with_esc("\nEnter goal for multi-agent sprint: ")
         if not goal:
             print("No goal specified. Cancelled.")
             return
@@ -479,21 +463,15 @@ class InteractiveShell:
                 lower = line.strip().lower()
                 if (lower.startswith("run ") or lower.startswith("build ") or 
                     lower.startswith("implement ") or lower.startswith("create a ")):
-                    print(f"\n📋 Detected action request: '{line}'")
-                    print("   [1] Run full 4-agent sprint (Planner -> Critic -> Builder -> Reviewer)")
-                    print("   [2] Ask AI worker directly (Chat / Consult)")
-                    print("   [c] Cancel")
-                    try:
-                        choice = input("\nSelect mode [default: 2]: ").strip()
-                    except (EOFError, KeyboardInterrupt):
-                        print("")
+                    options = [
+                        ("1", "Run full 4-agent sprint (Planner -> Critic -> Builder -> Reviewer)"),
+                        ("2", "Ask AI worker directly (Chat / Consult)")
+                    ]
+                    choice = select_from_menu(f"? Detected action request: '{line}'", options, default_index=1)
+                    if not choice:
                         continue
-
                     if choice == "1":
                         self.execute_goal(line)
-                        continue
-                    elif choice == "c":
-                        print("Cancelled.")
                         continue
 
                 # 3. Natural Language query -> Bridge directly to active AI Provider!

@@ -183,10 +183,16 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                                 os.read(fd, 1)
                             continue
                 else:
-                    # Standalone Esc key pressed -> Dismiss dropdown
-                    dropdown_dismissed = True
-                    redraw()
-                    continue
+                    # Standalone Esc key pressed
+                    if dropdown_lines > 0:
+                        dropdown_dismissed = True
+                        redraw()
+                        continue
+                    else:
+                        if buf:
+                            buf.clear()
+                            redraw()
+                            continue
 
             # Enter (\r or \n)
             if ch in ("\r", "\n"):
@@ -226,6 +232,193 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                 dropdown_dismissed = False
                 selected_idx = 0
                 redraw()
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def select_from_menu(
+    title: str,
+    options: List[Tuple[str, str]],
+    default_index: int = 0
+) -> Optional[str]:
+    """
+    Interactive arrow-key menu selector.
+    Supports Up/Down arrow navigation, Enter to choose, Esc / 'c' / 'q' to cancel,
+    or typing the direct key (e.g. '1', '2', '3') for instant selection.
+    """
+    if not options:
+        return None
+
+    if not sys.stdin.isatty():
+        print(f"\n{title}")
+        for key, label in options:
+            print(f"  [{key}] {label}")
+        print("  [c] Cancel")
+        try:
+            val = sys.stdin.readline().strip().lower()
+            if not val or val in ("c", "cancel", "q", "quit"):
+                return None
+            for key, _ in options:
+                if val == key.lower():
+                    return key
+            return None
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    selected_idx = max(0, min(default_index, len(options) - 1))
+    num_opts = len(options)
+
+    def render(initial: bool = False):
+        lines = []
+        if initial:
+            lines.append(f"\n{title} \033[2m(↑/↓ to navigate, Enter to select, Esc to cancel)\033[0m")
+        for i, (key, label) in enumerate(options):
+            if i == selected_idx:
+                lines.append(f"  \033[1;36m❯ [{key}] {label}\033[0m")
+            else:
+                lines.append(f"    [{key}] {label}")
+        if initial:
+            sys.stdout.write("\n".join(lines) + "\n")
+        else:
+            sys.stdout.write(f"\033[{num_opts}A")
+            for line in lines:
+                sys.stdout.write(f"\r\033[K{line}\n")
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        render(initial=True)
+        keys_map = {opt[0].lower(): opt[0] for opt in options}
+
+        while True:
+            raw = os.read(fd, 1)
+            if not raw:
+                sys.stdout.write("\nCancelled.\n")
+                sys.stdout.flush()
+                return None
+
+            ch = raw.decode("utf-8", errors="replace")
+
+            if ch in ("\x03", "\x04"):  # Ctrl+C, Ctrl+D
+                sys.stdout.write("\nCancelled.\n")
+                sys.stdout.flush()
+                return None
+
+            if ch == "\x1b":
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    raw2 = os.read(fd, 1)
+                    if raw2 in (b"[", b"O"):
+                        raw3 = os.read(fd, 1)
+                        if raw3 == b"A":  # Up
+                            selected_idx = (selected_idx - 1) % num_opts
+                            render(initial=False)
+                        elif raw3 == b"B":  # Down
+                            selected_idx = (selected_idx + 1) % num_opts
+                            render(initial=False)
+                else:
+                    # Standalone Esc pressed -> Cancel immediately!
+                    sys.stdout.write("\nCancelled.\n")
+                    sys.stdout.flush()
+                    return None
+
+            elif ch in ("\r", "\n"):
+                res = options[selected_idx][0]
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return res
+
+            elif ch.lower() in ("c", "q"):
+                sys.stdout.write("\nCancelled.\n")
+                sys.stdout.flush()
+                return None
+
+            elif ch.lower() in keys_map:
+                res = keys_map[ch.lower()]
+                sys.stdout.write(f"\n[Selected: {res}]\n")
+                sys.stdout.flush()
+                return res
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def read_input_with_esc(prompt: str, default: str = "") -> Optional[str]:
+    """
+    Read line of text from user with immediate cancellation on Esc or Ctrl+C.
+    Returns None if cancelled, or the string entered (or default if blank).
+    """
+    prompt = prompt.replace("\r", "").replace("\n", "")
+
+    if not sys.stdin.isatty():
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        res = line.strip()
+        return res if res else default
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    buf: List[str] = []
+
+    try:
+        tty.setcbreak(fd)
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+
+        while True:
+            raw = os.read(fd, 1)
+            if not raw:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return None
+
+            ch = raw.decode("utf-8", errors="replace")
+
+            if ch in ("\x03", "\x04"):  # Ctrl+C, Ctrl+D
+                sys.stdout.write("\nCancelled.\n")
+                sys.stdout.flush()
+                return None
+
+            if ch == "\x1b":
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    # Consume any trailing escape sequences
+                    os.read(fd, 8)
+                    continue
+                else:
+                    # Standalone Esc pressed! Cancel immediately!
+                    sys.stdout.write("\nCancelled.\n")
+                    sys.stdout.flush()
+                    return None
+
+            elif ch in ("\r", "\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                res = "".join(buf).strip()
+                return res if res else default
+
+            elif ch in ("\x7f", "\x08"):
+                if buf:
+                    buf.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+
+            elif ch.isprintable():
+                buf.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
 
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
