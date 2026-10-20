@@ -5,6 +5,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from typing import List, Optional
 

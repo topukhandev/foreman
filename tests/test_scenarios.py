@@ -224,6 +224,14 @@ class TestScenariosAndResilience(unittest.TestCase):
         self.assertTrue(shell.handle_lightweight_query("where am i"))
         self.assertFalse(shell.handle_lightweight_query("What is the current state of our project?"))
 
+    def test_base_cli_adapter_progress_reporting(self):
+        """Verify BaseCLIAdapter runs with show_progress=True without missing sys import."""
+        from orchestrator.adapters.base import BaseCLIAdapter
+        adapter = BaseCLIAdapter(name="echo_test", base_command="echo")
+        res = adapter.run("hello world", cwd=self.project_dir, show_progress=True)
+        self.assertTrue(res.success)
+        self.assertIn("hello world", res.output)
+
 
 if __name__ == "__main__":
     unittest.main()
