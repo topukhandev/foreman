@@ -114,15 +114,18 @@ def detect_os() -> str:
     return "linux"
 
 
+from orchestrator.finder import find_tool_executable
+
+
 def resolve_command_binary(command_str: str) -> Optional[str]:
-    """Extract binary name from command string and check if it exists in PATH."""
+    """Extract binary name from command string and check if it exists in PATH, NVM, or user dirs."""
     parts = command_str.strip().split()
     if not parts:
         return None
     bin_name = parts[0]
     if bin_name.lower() == "mock":
         return "mock"
-    return shutil.which(bin_name)
+    return find_tool_executable(bin_name)
 
 
 def init_default_config_file(target_path: str) -> None:

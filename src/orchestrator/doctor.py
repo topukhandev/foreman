@@ -5,6 +5,7 @@ import shutil
 import sys
 from typing import Any, Dict, List, Optional
 from orchestrator.config import OrchestratorConfig, detect_os
+from orchestrator.finder import find_tool_executable
 
 
 class SetupDoctor:
@@ -50,10 +51,7 @@ class SetupDoctor:
             ("opencode", "opencode"),
             ("git", "git")
         ]:
-            # Also check alternative names
-            found_path = shutil.which(bin_name)
-            if not found_path and tool == "antigravity_cli":
-                found_path = shutil.which("antigravity")
+            found_path = find_tool_executable(tool) or find_tool_executable(bin_name)
 
             tools_status[tool] = {
                 "installed": bool(found_path),
