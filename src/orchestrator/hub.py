@@ -1,10 +1,11 @@
-"""File-based Hub protocol for communication between Manager and AI CLI Workers."""
+"""File-based Hub protocol with atomic writes and corruption recovery."""
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import json
 import os
 from pathlib import Path
+import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
@@ -29,16 +30,17 @@ class TaskStatus:
     task_id: str
     title: str
     worker: str
-    state: str  # pending | running | reviewing | done | failed | blocked
+    state: str  # pending | running | reviewing | revising | done | failed | blocked
     one_line_summary: str
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     duration_sec: float = 0.0
     role: str = "coder"
+    bounces: int = 0
 
 
 class Hub:
-    """Manages file-based coordination hub."""
+    """Manages file-based coordination hub with crash-proof atomic writes."""
 
     def __init__(self, root_dir: str):
         self.root_dir = Path(root_dir)
@@ -65,17 +67,28 @@ class Hub:
                 blockers=[]
             )
 
+    def _atomic_write_text(self, target_path: Path, content: str) -> None:
+        """Atomically write text file using temporary file and atomic rename."""
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_path = tempfile.mkstemp(dir=str(target_path.parent), prefix=".tmp_")
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(temp_path, str(target_path))
+
+    def _atomic_write_json(self, target_path: Path, data: Any) -> None:
+        """Atomically write JSON data."""
+        self._atomic_write_text(target_path, json.dumps(data, indent=2))
+
     def send_message(self, message: InboxMessage) -> str:
-        """Write a message file to the inbox."""
+        """Write a message file to the inbox atomically."""
         ts = int(time.time() * 1000)
         filename = f"{ts}_{message.task_id}_{message.msg_type}.json"
         msg_path = self.inbox_dir / filename
-        with open(msg_path, "w", encoding="utf-8") as f:
-            json.dump(asdict(message), f, indent=2)
+        self._atomic_write_json(msg_path, asdict(message))
         return str(msg_path)
 
     def get_messages(self, recipient: Optional[str] = None, task_id: Optional[str] = None) -> List[InboxMessage]:
-        """Read all matching inbox messages sorted chronologically."""
+        """Read all matching inbox messages sorted chronologically, ignoring corrupted files."""
         messages: List[InboxMessage] = []
         if not self.inbox_dir.exists():
             return messages
@@ -92,11 +105,12 @@ class Hub:
                         continue
                     messages.append(msg)
             except Exception:
+                # Corrupted or locked message file - skip gracefully
                 continue
         return messages
 
     def save_task_spec(self, task_id: str, title: str, prompt: str, role: str = "coder", context: str = "") -> str:
-        """Create or update tasks/<task_id>.md."""
+        """Create or update tasks/<task_id>.md atomically."""
         task_file = self.tasks_dir / f"{task_id}.md"
         content = (
             f"# Task {task_id}: {title}\n\n"
@@ -106,8 +120,7 @@ class Hub:
             f"## Instructions\n{prompt}\n\n"
             f"## Status\nPending execution.\n"
         )
-        with open(task_file, "w", encoding="utf-8") as f:
-            f.write(content)
+        self._atomic_write_text(task_file, content)
         return str(task_file)
 
     def append_task_result(self, task_id: str, section_title: str, content: str) -> None:
@@ -121,8 +134,11 @@ class Hub:
         """Read content of task file."""
         task_file = self.tasks_dir / f"{task_id}.md"
         if task_file.exists():
-            with open(task_file, "r", encoding="utf-8") as f:
-                return f.read()
+            try:
+                with open(task_file, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                return ""
         return ""
 
     def update_task_status(
@@ -134,9 +150,10 @@ class Hub:
         one_line_summary: str,
         role: str = "coder",
         started_at: Optional[float] = None,
-        completed_at: Optional[float] = None
+        completed_at: Optional[float] = None,
+        bounces: int = 0
     ) -> None:
-        """Write status/<task_id>.json."""
+        """Write status/<task_id>.json atomically."""
         status_file = self.status_dir / f"{task_id}.json"
         duration = 0.0
         if started_at:
@@ -152,13 +169,13 @@ class Hub:
             started_at=started_at,
             completed_at=completed_at,
             duration_sec=duration,
-            role=role
+            role=role,
+            bounces=bounces
         )
-        with open(status_file, "w", encoding="utf-8") as f:
-            json.dump(asdict(stat), f, indent=2)
+        self._atomic_write_json(status_file, asdict(stat))
 
     def get_all_task_statuses(self) -> List[TaskStatus]:
-        """Load all task statuses."""
+        """Load all task statuses safely."""
         statuses: List[TaskStatus] = []
         if not self.status_dir.exists():
             return statuses
@@ -172,18 +189,20 @@ class Hub:
         return statuses
 
     def append_log(self, task_id: str, text: str) -> None:
-        """Append raw output to logs/<task_id>.log."""
+        """Append raw output to logs/<task_id>.log with timestamp."""
         log_file = self.logs_dir / f"{task_id}.log"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+        except Exception:
+            pass
 
     def archive_task(self, task_id: str, summary: str) -> None:
         """Summarize finished task into archive/ and append to archive index."""
         archive_file = self.archive_dir / f"{task_id}.txt"
-        with open(archive_file, "w", encoding="utf-8") as f:
-            f.write(f"{task_id}: {summary} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
+        summary_line = f"{task_id}: {summary} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n"
+        self._atomic_write_text(archive_file, summary_line)
 
-        # Also append to master archive index
         master_archive = self.archive_dir / "index.md"
         with open(master_archive, "a", encoding="utf-8") as f:
             f.write(f"- **{task_id}**: {summary} *({datetime.now().strftime('%H:%M:%S')})*\n")
@@ -197,8 +216,8 @@ class Hub:
         completed_tasks: Optional[List[str]] = None
     ) -> None:
         """
-        Write one-page state.md.
-        Ensures manager reads concise state without token bloat.
+        Write one-page state.md atomically.
+        Strictly guarantees single-page context economy for manager agent.
         """
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [
@@ -234,21 +253,23 @@ class Hub:
             lines.append("_None (All systems nominal)_")
         lines.append("")
 
-        # Recent Completed Summaries (1-2 lines each)
+        # Recent Completed Summaries (strictly last 5 to guarantee single page)
         if completed_tasks:
             lines.append("## Completed Tasks")
-            for c in completed_tasks[-5:]:  # keep to last 5 to ensure state fits on one page
+            for c in completed_tasks[-5:]:
                 lines.append(f"- [x] {c}")
             if len(completed_tasks) > 5:
                 lines.append(f"*(and {len(completed_tasks) - 5} earlier tasks in hub/archive/)*")
             lines.append("")
 
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+        self._atomic_write_text(self.state_file, "\n".join(lines))
 
     def read_state(self) -> str:
         """Read state.md content."""
         if self.state_file.exists():
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                return f.read()
+            try:
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                return ""
         return ""

@@ -1,8 +1,9 @@
-"""Base adapter for running AI CLI worker commands securely."""
+"""Base adapter for running AI CLI worker commands securely with process group isolation."""
 
 from dataclasses import dataclass
 import os
 import shlex
+import signal
 import subprocess
 import time
 from typing import List, Optional
@@ -18,7 +19,7 @@ class ExecutionResult:
 
 
 class BaseCLIAdapter:
-    """Base class for spawning local AI CLI tools with security and timeout guards."""
+    """Base class for spawning local AI CLI tools with security, timeout, and process group guards."""
 
     def __init__(self, name: str, base_command: str, timeout_sec: int = 300):
         self.name = name
@@ -33,6 +34,25 @@ class BaseCLIAdapter:
         cmd_parts.append(prompt)
         return cmd_parts
 
+    def _kill_process_tree(self, process: subprocess.Popen) -> None:
+        """Kill entire process group to prevent zombie or orphaned subprocesses."""
+        try:
+            if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                    time.sleep(0.1)
+                    os.killpg(pgid, signal.SIGKILL)
+                    return
+                except (ProcessLookupError, PermissionError):
+                    pass
+            process.kill()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+
     def run(
         self,
         prompt: str,
@@ -43,7 +63,7 @@ class BaseCLIAdapter:
     ) -> ExecutionResult:
         """
         Execute the CLI command securely inside cwd with strict timeout.
-        Never uses shell=True.
+        Uses process group isolation and direct argument arrays (no shell=True).
         """
         if not os.path.isdir(cwd):
             return ExecutionResult(
@@ -57,25 +77,29 @@ class BaseCLIAdapter:
         start_time = time.time()
 
         try:
-            process = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=os.environ.copy()
-            )
+            # Start in new session/process group on Unix to allow killing child trees
+            popen_kwargs = {
+                "cwd": cwd,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "env": os.environ.copy()
+            }
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
+
+            process = subprocess.Popen(cmd, **popen_kwargs)
 
             try:
                 stdout, stderr = process.communicate(timeout=self.timeout_sec)
                 exit_code = process.returncode
             except subprocess.TimeoutExpired:
-                process.kill()
+                self._kill_process_tree(process)
                 stdout, stderr = process.communicate()
                 return ExecutionResult(
                     success=False,
                     output=stdout or "",
-                    error=f"Execution timed out after {self.timeout_sec} seconds.",
+                    error=f"Execution timed out after {self.timeout_sec} seconds. Process tree terminated.",
                     exit_code=-1,
                     duration_sec=time.time() - start_time
                 )
@@ -84,9 +108,15 @@ class BaseCLIAdapter:
             success = (exit_code == 0)
             err_msg = stderr.strip() if not success else None
 
+            # Cap output buffer to prevent OOM on accidental massive output
+            MAX_OUTPUT_CHARS = 2_000_000  # ~2MB text
+            out_str = stdout.strip() if stdout else ""
+            if len(out_str) > MAX_OUTPUT_CHARS:
+                out_str = out_str[:MAX_OUTPUT_CHARS] + f"\n... [Output truncated at {MAX_OUTPUT_CHARS} characters]"
+
             return ExecutionResult(
                 success=success,
-                output=stdout.strip() if stdout else "",
+                output=out_str,
                 error=err_msg,
                 exit_code=exit_code,
                 duration_sec=duration

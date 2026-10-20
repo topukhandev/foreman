@@ -26,10 +26,11 @@ class TaskProgressItem:
     task_id: str
     title: str
     role: str
-    status: str  # pending | running | reviewing | done | failed | blocked
+    status: str  # pending | running | reviewing | revising | done | failed | blocked
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     summary: str = ""
+    bounces: int = 0
 
     @property
     def duration_seconds(self) -> float:
@@ -75,7 +76,8 @@ class ProgressTracker:
         )
         if task_id in self.tasks:
             t = self.tasks[task_id]
-            t.status = "running"
+            if t.status not in ("reviewing", "revising"):
+                t.status = "running"
             if not t.started_at:
                 t.started_at = now
 
@@ -84,15 +86,20 @@ class ProgressTracker:
             del self.active_agents[agent_id]
         if task_id in self.tasks:
             t = self.tasks[task_id]
-            t.status = "done" if success else "failed"
-            t.completed_at = time.time()
-            t.summary = summary
+            if not success:
+                t.status = "failed"
+                t.completed_at = time.time()
+                t.summary = summary
 
-    def set_task_status(self, task_id: str, status: str, summary: str = "") -> None:
+    def set_task_status(self, task_id: str, status: str, summary: str = "", bounces: Optional[int] = None) -> None:
         if task_id in self.tasks:
             self.tasks[task_id].status = status
             if summary:
                 self.tasks[task_id].summary = summary
+            if bounces is not None:
+                self.tasks[task_id].bounces = bounces
+            if status == "done":
+                self.tasks[task_id].completed_at = time.time()
 
     def get_elapsed_formatted(self) -> str:
         elapsed = int(time.time() - self.orchestrator_start_time)
@@ -104,14 +111,14 @@ class ProgressTracker:
         return f"{mins:02d}:{secs:02d}"
 
     def render(self) -> str:
-        """Render a simple, clean, non-complex ASCII dashboard."""
+        """Render a simple, clean, trustworthy ASCII dashboard."""
         now_str = datetime.now().strftime("%H:%M:%S")
         elapsed_str = self.get_elapsed_formatted()
         active_count = len(self.active_agents)
 
         lines = [
             "------------------------------------------------------------------------",
-            f" [ORCHESTRATOR] Current Time: {now_str} | Total Time: {elapsed_str}",
+            f" [ORCHESTRATOR] Current Time: {now_str} | Elapsed: {elapsed_str}",
             f" Goal: {self.goal or 'General Orchestration'}",
             "------------------------------------------------------------------------",
             f" Active AI Agents: {active_count}"
@@ -135,14 +142,23 @@ class ProgressTracker:
 
         for t in self.tasks.values():
             status_icon = "[ ]"
+            status_label = t.status.capitalize()
+
             if t.status == "done":
                 status_icon = "[x]"
-            elif t.status in ("running", "reviewing"):
+            elif t.status == "running":
                 status_icon = "[>]"
-            elif t.status == "failed":
-                status_icon = "[!]"
-            elif t.status == "blocked":
+            elif t.status == "reviewing":
                 status_icon = "[?]"
+                status_label = "Under Independent Review"
+            elif t.status == "revising":
+                status_icon = "[!]"
+                status_label = f"Revising (Bounce {t.bounces}/3)"
+            elif t.status == "failed":
+                status_icon = "[X]"
+            elif t.status == "blocked":
+                status_icon = "[!]"
+                status_label = "BLOCKED"
 
             duration = int(t.duration_seconds)
             dur_str = f"({duration}s)" if t.started_at else ""
@@ -150,7 +166,7 @@ class ProgressTracker:
 
             lines.append(
                 f"   {status_icon} Task #{t.task_id}: {t.title} "
-                f"[{t.role}] - {t.status.capitalize()} {dur_str}{summary_str}"
+                f"[{t.role}] - {status_label} {dur_str}{summary_str}"
             )
 
         lines.append("------------------------------------------------------------------------")
