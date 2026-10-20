@@ -1,0 +1,54 @@
+# Orchestrator Local Providers Configuration
+# Machine-specific settings - do not sync across different machines.
+machine: "topukhan"
+os: auto
+
+providers:
+  antigravity_cli:
+    enabled: true
+    tier: paid
+    command: "agy -p"
+    roles: [planner, critic, coder, researcher, reviewer]
+    limits:
+      max_runs_per_day: 50
+      max_parallel: 2
+
+  claude_code:
+    enabled: false
+    tier: paid
+    command: "claude -p"
+    roles: [planner, critic, coder, reviewer]
+    limits:
+      max_runs_per_day: 50
+      max_parallel: 2
+
+  opencode:
+    enabled: false
+    tier: free
+    command: "opencode run"
+    roles: [bulk, researcher]
+    limits:
+      max_runs_per_day: 100
+      max_parallel: 4
+
+  mock:
+    enabled: false
+    tier: free
+    command: "mock"
+    roles: [planner, critic, coder, researcher, reviewer]
+    limits:
+      max_runs_per_day: 1000
+      max_parallel: 4
+
+routing:
+  reviewer_must_differ_from_builder: true
+  fallback: any_enabled
+
+budget:
+  max_parallel: 2
+  max_time_per_task_sec: 300
+  max_retries: 3
+  warn_at_percent: 80
+  loop_detect_threshold: 3
+  max_files_per_project: 1000
+  max_project_size_mb: 500

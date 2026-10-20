@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Local AI Orchestrator (Foreman / Quorum)"
+readme = "orchestrator_blueprint.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pyyaml>=6.0"
+]
+
+[project.scripts]
+orchestrator = "orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

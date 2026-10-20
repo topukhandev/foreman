@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Local hub run artifacts (preserve templates/state)
+hub/inbox/*.json
+hub/logs/*.log
+hub/status/*.json
+hub/tasks/*.md
+hub/archive/*.txt
+hub/.budget_ledger.json
+.budget_ledger.json
+
+# Environment
+.venv/
+venv/
+.env
