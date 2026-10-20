@@ -395,8 +395,9 @@ class InteractiveShell:
         print("\n🚀 Starting multi-agent sprint...")
         print("------------------------------------------------------------------------")
 
-        def print_progress(text: str):
-            print("\n" + text)
+        def print_progress(dashboard: str, event: Optional[str] = None):
+            if event:
+                print(f"  {event}")
 
         engine = OrchestratorEngine(
             project_dir=self.project_dir,

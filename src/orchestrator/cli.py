@@ -94,8 +94,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     goal = args.goal or "Validate and prepare a launch strategy for an AI Developer Tool"
     pack_name = args.pack or "developer"
 
-    def print_progress(text: str):
-        print("\n" + text)
+    def print_progress(dashboard: str, event: Optional[str] = None):
+        if event:
+            print(f"  {event}")
 
     print(f"Starting Orchestrator in: {target_dir}")
     print(f"Goal: {goal}\n")

@@ -117,57 +117,70 @@ class ProgressTracker:
         active_count = len(self.active_agents)
 
         lines = [
-            "------------------------------------------------------------------------",
-            f" [ORCHESTRATOR] Current Time: {now_str} | Elapsed: {elapsed_str}",
-            f" Goal: {self.goal or 'General Orchestration'}",
-            "------------------------------------------------------------------------",
-            f" Active AI Agents: {active_count}"
+            "\033[90m────────────────────────────────────────────────────────────────────────\033[0m",
+            f" \033[1;36m🎛️  FOREMAN PROGRESS\033[0m \033[90m|\033[0m Time: \033[1;37m{now_str}\033[0m \033[90m|\033[0m Elapsed: \033[1;33m{elapsed_str}\033[0m",
+            f" \033[1mGoal\033[0m: {self.goal or 'General Orchestration'}",
+            "\033[90m────────────────────────────────────────────────────────────────────────\033[0m"
         ]
 
         if active_count > 0:
+            lines.append(f" \033[1;36m▶ Active Workers ({active_count}):\033[0m")
             for agent in self.active_agents.values():
                 sess = f" ({agent.session_id})" if agent.session_id else ""
                 running_sec = int(agent.running_seconds)
                 lines.append(
-                    f"   * [{agent.role.capitalize()}] {agent.worker_provider}{sess} "
-                    f"-> Task #{agent.task_id}: {agent.task_title} (Running: {running_sec}s)"
+                    f"   \033[1;33m⏳\033[0m \033[1;37m[{agent.role.capitalize()}]\033[0m {agent.worker_provider}{sess} "
+                    f"→ Task #{agent.task_id}: {agent.task_title} ({running_sec}s)"
                 )
         else:
-            lines.append("   (No agents currently executing)")
+            lines.append(" \033[90m(No workers currently running)\033[0m")
 
         lines.append("")
         total_tasks = len(self.tasks)
         done_tasks = sum(1 for t in self.tasks.values() if t.status == "done")
-        lines.append(f" Task Progress ({done_tasks}/{total_tasks} Completed):")
+        lines.append(f" \033[1;37mTask Progress ({done_tasks}/{total_tasks} Completed):\033[0m")
 
         for t in self.tasks.values():
-            status_icon = "[ ]"
-            status_label = t.status.capitalize()
-
             if t.status == "done":
-                status_icon = "[x]"
+                status_icon = "\033[1;32m✓\033[0m"
+                status_label = "\033[1;32mDone\033[0m"
             elif t.status == "running":
-                status_icon = "[>]"
+                status_icon = "\033[1;36m▶\033[0m"
+                status_label = "\033[1;36mRunning\033[0m"
             elif t.status == "reviewing":
-                status_icon = "[?]"
-                status_label = "Under Independent Review"
+                status_icon = "\033[1;35m🔍\033[0m"
+                status_label = "\033[1;35mReviewing\033[0m"
             elif t.status == "revising":
-                status_icon = "[!]"
-                status_label = f"Revising (Bounce {t.bounces}/3)"
+                status_icon = "\033[1;33m↺\033[0m"
+                status_label = f"\033[1;33mRevising (Bounce {t.bounces}/3)\033[0m"
             elif t.status == "failed":
-                status_icon = "[X]"
+                status_icon = "\033[1;31m✗\033[0m"
+                status_label = "\033[1;31mFailed\033[0m"
             elif t.status == "blocked":
-                status_icon = "[!]"
-                status_label = "BLOCKED"
+                status_icon = "\033[1;31m⊘\033[0m"
+                status_label = "\033[1;31mBlocked\033[0m"
+            else:
+                status_icon = "\033[90m○\033[0m"
+                status_label = "\033[90mPending\033[0m"
 
             duration = int(t.duration_seconds)
             dur_str = f"({duration}s)" if t.started_at else ""
-            summary_str = f" - {t.summary}" if t.summary else ""
+
+            # Clean markdown artifacts from summary
+            clean_summary = ""
+            if t.summary:
+                import re
+                s = re.sub(r"^[#*`\s-]+", "", t.summary).strip()
+                s_first = s.splitlines()[0] if s else ""
+                if len(s_first) > 55:
+                    s_first = s_first[:52] + "..."
+                if s_first:
+                    clean_summary = f" \033[90m─ {s_first}\033[0m"
 
             lines.append(
-                f"   {status_icon} Task #{t.task_id}: {t.title} "
-                f"[{t.role}] - {status_label} {dur_str}{summary_str}"
+                f"   {status_icon} \033[1;37mTask #{t.task_id}\033[0m: {t.title} "
+                f"\033[36m[{t.role}]\033[0m ─ {status_label} {dur_str}{clean_summary}"
             )
 
-        lines.append("------------------------------------------------------------------------")
+        lines.append("\033[90m────────────────────────────────────────────────────────────────────────\033[0m")
         return "\n".join(lines)
