@@ -12,6 +12,7 @@ from orchestrator.links import WorkspaceLinks
 from orchestrator.engine import OrchestratorEngine
 from orchestrator.packs import PACKS
 from orchestrator.adapters import create_adapter
+from orchestrator.markdown import render_markdown
 from orchestrator.input_reader import (
     read_interactive_line,
     COMMANDS,
@@ -209,9 +210,7 @@ class InteractiveShell:
         if pick:
             spec = self.hub.read_task_spec(pick)
             if spec:
-                print("\n" + "=" * 60)
-                print(spec)
-                print("=" * 60)
+                print("\n" + render_markdown(spec))
             else:
                 print(f"Task #{pick} not found.")
 
@@ -275,24 +274,28 @@ class InteractiveShell:
 
         # Location / Folder
         if q in ("where am i", "pwd", "which folder is this", "what directory is this", "which folder", "what folder"):
-            print(f"\n📍 Working Directory: {self.project_dir}")
             services = self.links.list_links()
+            lines = [f"📍 **Working Directory**: `{self.project_dir}`"]
             if services:
-                print("   Connected Workspaces:")
+                lines.append("\n### Connected Workspaces")
                 for s in services:
-                    print(f"   - {s.name}: {s.path} ({s.description or 'No desc'})")
+                    lines.append(f"* **{s.name}**: `{s.path}` ({s.description or 'No description'})")
             else:
-                print("   (No external services linked yet. Use /link to connect one.)")
+                lines.append("*(No external services linked yet. Use `/link` to connect one.)*")
+            print("\n" + render_markdown("\n".join(lines)))
             return True
 
         # Who are you / help
         if q in ("who are you", "who r u", "what is orchestrator", "what are you", "hello", "hi", "hey"):
             active_p = self._get_active_provider_name()
-            print(f"\n👋 Foreman Orchestrator — Front-Desk Bridge & Multi-Agent Conductor")
-            print(f"   - Active AI Worker: {active_p}")
-            print("   - Type your question or goal naturally — your active AI worker will respond directly.")
-            print("   - Type /run <goal> to execute a complete multi-agent engineering sprint.")
-            print("   - Type '/' to open the live command dropdown (/provider, /status, /link, /doctor).")
+            content = (
+                f"### 👋 Foreman Orchestrator — Front-Desk Bridge & Conductor\n"
+                f"* **Active AI Worker**: `{active_p}`\n"
+                f"* **Direct AI Chat**: Ask questions, brainstorm, or explore codebase naturally.\n"
+                f"* **Autonomous Sprint**: Run `/run <goal>` to dispatch a complete 4-agent sprint.\n"
+                f"* **Menu & Tools**: Type `/` to open live dropdown (`/provider`, `/status`, `/link`, `/doctor`)."
+            )
+            print("\n" + render_markdown(content))
             return True
 
         return False
@@ -339,11 +342,12 @@ class InteractiveShell:
         )
 
         if result.success and result.output:
-            print(result.output.strip())
+            formatted = render_markdown(result.output.strip())
+            print(formatted)
         elif result.error:
-            print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}")
+            print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}\n")
         else:
-            print("\n(No response received from AI worker.)")
+            print("\n(No response received from AI worker.)\n")
 
     def execute_goal(self, goal: str) -> None:
         """Execute full multi-agent workflow sprint on user goal with confirmation."""
@@ -384,7 +388,7 @@ class InteractiveShell:
         print("\n" + "=" * 60)
         print("                ORCHESTRATOR RUN COMPLETE")
         print("=" * 60)
-        print(result.summary_report)
+        print("\n" + render_markdown(result.summary_report))
         if result.blockers:
             print("\nBlockers / Warnings:")
             for b in result.blockers:
@@ -443,7 +447,7 @@ class InteractiveShell:
                     self.print_slash_menu()
                 elif cmd == "/status":
                     state = self.hub.read_state()
-                    print("\n" + (state or "No active state found."))
+                    print("\n" + render_markdown(state or "No active state found."))
                 elif cmd == "/tasks":
                     self.handle_tasks_menu()
                 elif cmd == "/provider":
