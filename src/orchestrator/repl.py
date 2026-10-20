@@ -426,6 +426,12 @@ class InteractiveShell:
                 cmd = cmd_parts[0].lower()
                 arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
 
+                # Auto-expand unambiguous slash command prefix (e.g. /pa -> /pack, /pro -> /provider)
+                all_cmds = ["/run", "/provider", "/status", "/tasks", "/link", "/pack", "/doctor", "/clear", "/help", "/exit", "/quit"]
+                matches = [c for c in all_cmds if c.startswith(cmd)]
+                if len(matches) == 1:
+                    cmd = matches[0]
+
                 if cmd in ("/exit", "/quit"):
                     print("Exiting orchestrator. Goodbye!")
                     break

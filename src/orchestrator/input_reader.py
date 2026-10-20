@@ -311,17 +311,26 @@ def select_from_menu(
                 return None
 
             if ch == "\x1b":
-                r, _, _ = select.select([fd], [], [], 0.05)
+                r, _, _ = select.select([fd], [], [], 0.08)
                 if r:
                     raw2 = os.read(fd, 1)
-                    if raw2 in (b"[", b"O"):
+                    ch2 = raw2.decode("utf-8", errors="replace") if raw2 else ""
+                    if ch2 in ("[", "O"):
                         raw3 = os.read(fd, 1)
-                        if raw3 == b"A":  # Up
+                        ch3 = raw3.decode("utf-8", errors="replace") if raw3 else ""
+                        if ch3 == "A":  # Up Arrow
                             selected_idx = (selected_idx - 1) % num_opts
                             render(initial=False)
-                        elif raw3 == b"B":  # Down
+                            continue
+                        elif ch3 == "B":  # Down Arrow
                             selected_idx = (selected_idx + 1) % num_opts
                             render(initial=False)
+                            continue
+                        elif ch3.isdigit():
+                            r_tilde, _, _ = select.select([fd], [], [], 0.02)
+                            if r_tilde:
+                                os.read(fd, 1)
+                            continue
                 else:
                     # Standalone Esc pressed -> Cancel immediately!
                     sys.stdout.write("\nCancelled.\n")
