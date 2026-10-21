@@ -1,8 +1,10 @@
 machine: topukhan
 os: linux
+default_provider: opencode
+visual_terminal: true
 providers:
   antigravity_cli:
-    enabled: true
+    enabled: false
     tier: paid
     command: agy -p
     roles:
@@ -22,17 +24,22 @@ providers:
     - planner
     - critic
     - coder
+    - researcher
     - reviewer
     limits:
       max_runs_per_day: 50
       max_parallel: 2
   opencode:
-    enabled: false
+    enabled: true
     tier: free
     command: opencode run
     roles:
-    - bulk
+    - planner
+    - critic
+    - coder
     - researcher
+    - reviewer
+    - bulk
     limits:
       max_runs_per_day: 100
       max_parallel: 4

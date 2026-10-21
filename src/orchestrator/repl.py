@@ -32,19 +32,55 @@ class InteractiveShell:
         self.links = WorkspaceLinks(self.project_dir)
         self.config_path = os.path.join(self.project_dir, "providers.yaml")
         self.config = load_config(self.config_path)
+        self.config_mtime = os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 0.0
+        self.visual_mode = getattr(self.config, "visual_terminal", True)
         self.active_pack = "developer"
         self.session_id = str(uuid.uuid4())
         self.session_turns = 0
 
+        # Auto-clean any stale orphaned tasks left behind in state.md from earlier interrupted runs
+        active_p = self._get_active_provider_name()
+        self.hub.cleanup_stale_active_tasks(default_provider=active_p)
+
+    def _reload_config_if_needed(self) -> None:
+        """Reload config from disk if providers.yaml was modified externally."""
+        if os.path.exists(self.config_path):
+            try:
+                curr_mtime = os.path.getmtime(self.config_path)
+                if curr_mtime > self.config_mtime:
+                    self.config = load_config(self.config_path)
+                    self.config_mtime = curr_mtime
+                    self.visual_mode = getattr(self.config, "visual_terminal", True)
+            except Exception:
+                pass
+
     def _get_active_provider_name(self) -> str:
         """Find currently active primary provider."""
+        self._reload_config_if_needed()
+
+        # 1. If explicit default_provider is configured and valid
+        if getattr(self.config, "default_provider", ""):
+            dp = self.config.default_provider
+            if dp in self.config.providers:
+                p = self.config.providers[dp]
+                if p.enabled and p.verified:
+                    return dp
+
+        # 2. First enabled and verified provider
         for name, p in self.config.providers.items():
             if p.enabled and p.verified:
                 return name
+
+        # 3. First enabled provider (e.g. mock or unverified)
+        for name, p in self.config.providers.items():
+            if p.enabled:
+                return name
+
         return "mock"
 
     def render_banner(self) -> None:
         """Render welcoming interactive session banner."""
+        from orchestrator.terminal import detect_desktop_terminal
         active_p = self._get_active_provider_name()
         diag = SetupDoctor.check_system(self.config)
         available_tools = [
@@ -53,10 +89,19 @@ class InteractiveShell:
         services = self.links.list_links()
         services_str = f"{len(services)} linked" if services else "None linked"
 
+        emulator = detect_desktop_terminal()
+        if self.visual_mode and emulator:
+            vis_str = f"Enabled ({emulator.name})"
+        elif self.visual_mode:
+            vis_str = "Enabled (No GUI display found)"
+        else:
+            vis_str = "Disabled (Headless background)"
+
         print("========================================================================")
         print(" 🎛️  FOREMAN ORCHESTRATOR — Front-Desk Session")
         print(f" Directory  : {self.project_dir}")
         print(f" Primary AI : {active_p}")
+        print(f" Visual Term: {vis_str}")
         print(f" Tools Found: {', '.join(available_tools) or 'None'}")
         print(f" Workspaces : {services_str}")
         print("------------------------------------------------------------------------")
@@ -109,16 +154,78 @@ class InteractiveShell:
         from orchestrator.wizard import build_config_for_preset
         if choice in preset_map:
             new_cfg = build_config_for_preset(preset_map[choice], tools)
+            new_cfg["visual_terminal"] = self.visual_mode
             with open(self.config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(new_cfg, f, sort_keys=False)
             self.config = load_config(self.config_path)
+            self.config_mtime = os.path.getmtime(self.config_path)
+            new_active = self._get_active_provider_name()
+
+            # Immediately update hub/state.md so it never shows stale provider or running ghost tasks!
+            self.hub.write_state(
+                goal=self.hub.get_current_goal() or "Idle / Front-Desk Chat",
+                phase="idle",
+                active_tasks=[],
+                blockers=[],
+                default_provider=new_active
+            )
             self.session_id = str(uuid.uuid4())
             self.session_turns = 0
-            print(f"[OK] Switched active provider to: {self._get_active_provider_name()}")
+            print(f"\n\033[1;32m[OK]\033[0m Switched default AI provider to: \033[1;36m{new_active}\033[0m\n")
         elif choice == "c":
             print("Cancelled.")
         else:
             print("Invalid selection.")
+
+    def handle_visual_toggle(self, arg: str = "") -> None:
+        """Toggle or set visual desktop terminal windows for AI workers."""
+        from orchestrator.terminal import detect_desktop_terminal
+        arg = arg.strip().lower()
+        if arg in ("on", "1", "true", "enable"):
+            self.visual_mode = True
+        elif arg in ("off", "0", "false", "disable"):
+            self.visual_mode = False
+        else:
+            self.visual_mode = not self.visual_mode
+
+        emulator = detect_desktop_terminal()
+        status_str = "\033[1;32mENABLED\033[0m" if self.visual_mode else "\033[1;31mDISABLED\033[0m"
+        print(f"\n🖥️  Visual Worker Terminals: {status_str}")
+        if self.visual_mode:
+            if emulator:
+                print(f"   Using desktop terminal: \033[1;36m{emulator.name}\033[0m ({emulator.executable})")
+                print("   AI worker sessions (OpenCode, Antigravity, Claude) will pop up in visible desktop windows.")
+            else:
+                print("   ⚠️  Warning: No desktop display or terminal emulator detected (running headless).")
+        else:
+            print("   AI workers will execute under the hood (headless in background).")
+
+    def _detect_provider_intent(self, text: str) -> Optional[str]:
+        """Detect if user is expressing intent to switch or select AI provider in natural language."""
+        t = text.strip().lower()
+        triggers = [
+            "change provider", "switch provider", "use provider", "select provider",
+            "set provider", "choose provider", "change ai", "switch ai", "use ai",
+            "switch to opencode", "change to opencode", "use opencode",
+            "switch to claude", "change to claude", "use claude",
+            "switch to antigravity", "change to antigravity", "use antigravity",
+            "switch to agy", "change to agy", "use agy",
+            "switch to mock", "use mock",
+            "প্রোভাইডার চেঞ্জ", "প্রোভাইডার পরিবর্তন", "প্রোভাইডার বদল"
+        ]
+        if any(tr in t for tr in triggers):
+            if "opencode" in t:
+                return "opencode"
+            elif "claude" in t:
+                return "claude"
+            elif "agy" in t or "antigravity" in t:
+                return "antigravity"
+            elif "mock" in t or "simul" in t:
+                return "mock"
+            elif "dual" in t:
+                return "dual"
+            return ""  # Trigger interactive selector menu
+        return None
 
     def handle_new_session(self) -> None:
         """Start a fresh conversation thread with active AI worker."""
@@ -352,6 +459,7 @@ class InteractiveShell:
             session_arg = self.session_id if p_name == "claude_code" else None
 
         adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec)
+        adapter.visual_mode = self.visual_mode
         result = adapter.run(
             prompt=prompt,
             cwd=self.project_dir,
@@ -404,6 +512,8 @@ class InteractiveShell:
             config=self.config,
             status_callback=print_progress
         )
+        for adapter in engine.adapters.values():
+            adapter.visual_mode = self.visual_mode
 
         result = engine.run_pack(selected_pack, goal)
 
@@ -437,7 +547,9 @@ class InteractiveShell:
         while True:
             try:
                 print()
-                line = read_interactive_line()
+                active_p = self._get_active_provider_name()
+                prompt = f"\033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[{active_p}]\033[0m › "
+                line = read_interactive_line(prompt=prompt)
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting orchestrator. Goodbye!")
                 break
@@ -452,7 +564,7 @@ class InteractiveShell:
                 arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
 
                 # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
-                all_cmds = ["/run", "/new", "/provider", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
+                all_cmds = ["/run", "/new", "/provider", "/visual", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
                 matches = [c for c in all_cmds if c.startswith(cmd)]
                 if len(matches) == 1:
                     cmd = matches[0]
@@ -476,6 +588,8 @@ class InteractiveShell:
                     self.handle_tasks_menu()
                 elif cmd == "/provider":
                     self.handle_provider_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
+                elif cmd == "/visual":
+                    self.handle_visual_toggle(cmd_parts[1] if len(cmd_parts) > 1 else "")
                 elif cmd == "/link":
                     self.handle_link_menu(cmd_parts[1:])
                 elif cmd == "/pack":
@@ -488,11 +602,17 @@ class InteractiveShell:
                     self.print_slash_menu(cmd)
 
             else:
-                # 1. Fast local operational query (who are you, where am i)
+                # 1. Check for natural language provider switch/selection intent
+                provider_intent = self._detect_provider_intent(line)
+                if provider_intent is not None:
+                    self.handle_provider_menu(provider_intent)
+                    continue
+
+                # 2. Fast local operational query (who are you, where am i)
                 if self.handle_lightweight_query(line):
                     continue
 
-                # 2. If user specifically asks to run/build/implement a full project feature:
+                # 3. If user specifically asks to run/build/implement a full project feature:
                 lower = line.strip().lower()
                 if (lower.startswith("run ") or lower.startswith("build ") or 
                     lower.startswith("implement ") or lower.startswith("create a ")):
@@ -507,5 +627,5 @@ class InteractiveShell:
                         self.execute_goal(line)
                         continue
 
-                # 3. Natural Language query -> Bridge directly to active AI Provider!
+                # 4. Natural Language query -> Bridge directly to active AI Provider!
                 self.bridge_to_ai_provider(line)

@@ -22,10 +22,11 @@ class ExecutionResult:
 class BaseCLIAdapter:
     """Base class for spawning local AI CLI tools with security, timeout, and process group guards."""
 
-    def __init__(self, name: str, base_command: str, timeout_sec: int = 300):
+    def __init__(self, name: str, base_command: str, timeout_sec: int = 300, visual_mode: bool = True):
         self.name = name
         self.base_command = base_command
         self.timeout_sec = timeout_sec
+        self.visual_mode = visual_mode
 
     def build_command(self, prompt: str, session_id: Optional[str] = None, extra_flags: Optional[List[str]] = None) -> List[str]:
         """Convert base_command and prompt into argument list."""
@@ -77,6 +78,32 @@ class BaseCLIAdapter:
             )
 
         cmd = self.build_command(prompt, session_id=session_id, extra_flags=extra_flags)
+
+        # 1. If visual mode is enabled and desktop GUI is available, launch visual terminal window!
+        if getattr(self, "visual_mode", True):
+            try:
+                from orchestrator.terminal import can_launch_visual_terminal, launch_visual_worker
+                if can_launch_visual_terminal():
+                    role = task_id.split("_")[0] if "_" in task_id else "worker"
+                    title = f"Foreman Worker: [{self.name}] Task #{task_id}"
+                    lbl = progress_label or self.name
+                    vis_res = launch_visual_worker(
+                        cmd=cmd,
+                        cwd=cwd,
+                        title=title,
+                        worker_name=self.name,
+                        task_id=task_id,
+                        role=role,
+                        timeout_sec=self.timeout_sec,
+                        show_progress=show_progress,
+                        progress_label=lbl
+                    )
+                    if vis_res is not None:
+                        return vis_res
+            except Exception:
+                # If visual terminal spawn fails for any reason, fall through safely to headless
+                pass
+
         start_time = time.time()
 
         try:

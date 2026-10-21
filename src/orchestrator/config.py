@@ -45,6 +45,8 @@ class OrchestratorConfig:
     providers: Dict[str, ProviderConfig] = field(default_factory=dict)
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    default_provider: str = ""
+    visual_terminal: bool = True
 
 
 DEFAULT_PROVIDERS_TEMPLATE = """# Orchestrator Local Providers Configuration
@@ -207,10 +209,16 @@ def load_config(config_path: str) -> OrchestratorConfig:
             verification_error=verr
         )
 
+    default_p = str(data.get("default_provider", "")).strip()
+    runtime_data = data.get("runtime", {})
+    vis_term = bool(runtime_data.get("visual_terminal", data.get("visual_terminal", True)))
+
     return OrchestratorConfig(
         machine=machine,
         os=current_os,
         providers=providers,
         routing=routing,
-        budget=budget
+        budget=budget,
+        default_provider=default_p,
+        visual_terminal=vis_term
     )

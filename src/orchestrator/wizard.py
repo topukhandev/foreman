@@ -52,27 +52,43 @@ def build_config_for_preset(preset_key: str, detected_tools: Dict[str, Any]) -> 
     enable_opencode = False
     enable_mock = False
 
+    default_provider = "mock"
+
     if preset_key == "1" or preset_key == "auto":
         enable_agy = has_agy
         enable_claude = has_claude
         enable_opencode = has_opencode
-        if not (enable_agy or enable_claude or enable_opencode):
+        if enable_agy:
+            default_provider = "antigravity_cli"
+        elif enable_claude:
+            default_provider = "claude_code"
+        elif enable_opencode:
+            default_provider = "opencode"
+        else:
             enable_mock = True
+            default_provider = "mock"
     elif preset_key == "2" or preset_key == "antigravity_only":
         enable_agy = True
+        default_provider = "antigravity_cli"
     elif preset_key == "3" or preset_key == "claude_only":
         enable_claude = True
+        default_provider = "claude_code"
     elif preset_key == "4" or preset_key == "dual_model":
         enable_agy = True
         enable_claude = True
+        default_provider = "antigravity_cli"
     elif preset_key == "5" or preset_key == "free_only":
         enable_opencode = True
+        default_provider = "opencode"
     elif preset_key == "6" or preset_key == "mock":
         enable_mock = True
+        default_provider = "mock"
 
     return {
         "machine": hostname,
         "os": current_os,
+        "default_provider": default_provider,
+        "visual_terminal": True,
         "providers": {
             "antigravity_cli": {
                 "enabled": enable_agy,
@@ -85,14 +101,14 @@ def build_config_for_preset(preset_key: str, detected_tools: Dict[str, Any]) -> 
                 "enabled": enable_claude,
                 "tier": "paid",
                 "command": "claude -p",
-                "roles": ["planner", "critic", "coder", "reviewer"],
+                "roles": ["planner", "critic", "coder", "researcher", "reviewer"],
                 "limits": {"max_runs_per_day": 50, "max_parallel": 2}
             },
             "opencode": {
                 "enabled": enable_opencode,
                 "tier": "free",
                 "command": "opencode run",
-                "roles": ["bulk", "researcher"],
+                "roles": ["planner", "critic", "coder", "researcher", "reviewer", "bulk"],
                 "limits": {"max_runs_per_day": 100, "max_parallel": 4}
             },
             "mock": {

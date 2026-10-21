@@ -12,6 +12,7 @@ COMMANDS: List[Tuple[str, str]] = [
     ("/run",      "Launch full 4-agent sprint (Planner, Critic, Builder, Reviewer)"),
     ("/new",      "Start a fresh conversation thread with active AI worker"),
     ("/provider", "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
+    ("/visual",   "Toggle visible desktop terminal windows for AI workers (on/off)"),
     ("/status",   "View single-page project state (state.md) & active workers"),
     ("/tasks",    "Inspect recent tasks, specs, and reviewer verdicts"),
     ("/link",     "Connect another directory, repository, or microservice"),
@@ -42,7 +43,7 @@ def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int,
     selected_cmd = matches[selected_index][0]
 
     lines = ["\n  ╭─ Commands (↑/↓ to navigate, Enter to select, Esc to cancel) ──────╮"]
-    matches_to_show = matches[:10]
+    matches_to_show = matches[:15]
     for i, (cmd, desc) in enumerate(matches_to_show):
         if i == selected_index:
             # Highlighted item in bright cyan with pointer
@@ -102,7 +103,7 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
         if curr_text.startswith("/") and not dropdown_dismissed:
             token = curr_text.split()[0]
             matches = get_command_matches(token)
-            visible_count = min(10, len(matches))
+            visible_count = min(15, len(matches))
             active_matches_count = visible_count
 
             if matches:

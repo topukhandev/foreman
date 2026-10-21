@@ -207,13 +207,57 @@ class Hub:
         with open(master_archive, "a", encoding="utf-8") as f:
             f.write(f"- **{task_id}**: {summary} *({datetime.now().strftime('%H:%M:%S')})*\n")
 
+    def get_current_goal(self) -> str:
+        """Extract goal string from state.md if present."""
+        content = self.read_state()
+        for line in content.splitlines():
+            if line.startswith("**Goal**:"):
+                return line.replace("**Goal**:", "").strip()
+        return "Idle / Front-Desk Chat"
+
+    def cleanup_stale_active_tasks(self, default_provider: Optional[str] = None) -> bool:
+        """
+        Detect and clear any orphaned 'running' tasks left behind by previous interrupted sessions.
+        Ensures hub/state.md always accurately reflects idle status when no sprint is executing.
+        """
+        content = self.read_state()
+        if not content:
+            return False
+
+        has_stale_running = ("| running |" in content or "**Current Phase**: `active`" in content)
+        if has_stale_running:
+            # Mark any stale task status files as interrupted
+            if self.status_dir.exists():
+                for sf in self.status_dir.glob("*.json"):
+                    try:
+                        with open(sf, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if data.get("state") in ("running", "reviewing", "revising"):
+                            data["state"] = "interrupted"
+                            data["one_line_summary"] = "Task was interrupted by session exit / server restart."
+                            self._atomic_write_json(sf, data)
+                    except Exception:
+                        pass
+
+            goal = self.get_current_goal()
+            self.write_state(
+                goal=goal,
+                phase="idle",
+                active_tasks=[],
+                blockers=[],
+                default_provider=default_provider
+            )
+            return True
+        return False
+
     def write_state(
         self,
         goal: str,
         phase: str,
         active_tasks: List[Dict[str, Any]],
         blockers: List[str],
-        completed_tasks: Optional[List[str]] = None
+        completed_tasks: Optional[List[str]] = None,
+        default_provider: Optional[str] = None
     ) -> None:
         """
         Write one-page state.md atomically.
@@ -223,11 +267,17 @@ class Hub:
         lines = [
             "# Project State (Foreman Hub)",
             f"*Last Updated: {now_str}*",
-            "",
+            ""
+        ]
+
+        if default_provider:
+            lines.append(f"**Primary AI Provider**: `{default_provider}`")
+
+        lines.extend([
             f"**Goal**: {goal}",
             f"**Current Phase**: `{phase}`",
             ""
-        ]
+        ])
 
         # Active Tasks Table
         lines.append("## Active Tasks & Workers")
