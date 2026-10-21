@@ -45,11 +45,13 @@ class OrchestratorEngine:
         # Adapters cache
         self.adapters: Dict[str, BaseCLIAdapter] = {}
         vis_mode = getattr(config, "visual_terminal", True)
+        effort = getattr(config, "effort", "medium")
         for p_name, p_cfg in config.providers.items():
             ad = create_adapter(
                 p_name,
                 p_cfg,
-                timeout_sec=config.budget.max_time_per_task_sec
+                timeout_sec=config.budget.max_time_per_task_sec,
+                effort=effort
             )
             ad.visual_mode = vis_mode
             self.adapters[p_name] = ad
@@ -414,13 +416,17 @@ class OrchestratorEngine:
                 send_desktop_notification(
                     "Foreman Sprint Complete",
                     f"✓ Succeeded {completed_count}/{len(tasks)} tasks in {int(total_elapsed)}s\nGoal: {goal[:60]}",
-                    urgency="normal"
+                    urgency="normal",
+                    sound=True,
+                    sound_name="complete"
                 )
             else:
                 send_desktop_notification(
                     "Foreman Sprint Alert",
                     f"⚠️ Sprint finished with {len(self.blockers)} alert(s)\nGoal: {goal[:60]}",
-                    urgency="critical"
+                    urgency="critical",
+                    sound=True,
+                    sound_name="dialog-warning"
                 )
         except Exception:
             pass

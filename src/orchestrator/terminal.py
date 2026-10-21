@@ -218,9 +218,13 @@ class VisualSession:
     script_path: str
     proc: Optional[subprocess.Popen] = None
     pid: Optional[int] = None
+    _closed: bool = False
 
     def is_alive(self) -> bool:
         """Return True if the terminal window process or bash runner is still alive."""
+        if self._closed:
+            return False
+
         if self.proc is not None and self.proc.poll() is not None:
             return False
 
@@ -250,6 +254,7 @@ class VisualSession:
 
     def close(self) -> None:
         """Gracefully close the terminal window and clean up session directory."""
+        self._closed = True
         close_trigger = os.path.join(self.session_dir, "close_trigger")
         try:
             open(close_trigger, "w").close()
@@ -258,10 +263,11 @@ class VisualSession:
 
         if self.proc is not None:
             try:
-                self.proc.wait(timeout=1.0)
+                self.proc.wait(timeout=0.3)
             except Exception:
                 try:
                     self.proc.terminate()
+                    self.proc.wait(timeout=0.2)
                 except Exception:
                     pass
 
@@ -366,7 +372,7 @@ while true; do
         if [ -f "$SESSION_DIR/close_trigger" ]; then
             echo ""
             echo -e "${{YELLOW}}👋 Session closed by Orchestrator. Exiting window...${{RESET}}"
-            sleep 1
+            sleep 0.1
             exit 0
         fi
         if [ -f "$SESSION_DIR/task_trigger" ]; then
@@ -1124,11 +1130,56 @@ def close_all_spawned_terminals() -> None:
 get_active_spawned_terminals = list_active_terminals
 
 
-def send_desktop_notification(title: str, message: str, urgency: str = "normal") -> None:
+def play_notification_sound(sound_name: str = "complete") -> None:
+    """
+    Play a brief desktop audio chime on task/sprint completion.
+    Non-blocking, non-failing fallback across canberra-gtk-play, paplay, pw-play, aplay.
+    """
+    try:
+        # 1. Try canberra-gtk-play (standard desktop theme sound)
+        canberra = shutil.which("canberra-gtk-play")
+        if canberra and os.path.isfile(canberra):
+            subprocess.Popen(
+                [canberra, "-i", sound_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            return
+
+        # 2. Try freedesktop sound files via paplay / pw-play / aplay
+        sound_path = f"/usr/share/sounds/freedesktop/stereo/{sound_name}.oga"
+        if not os.path.exists(sound_path):
+            sound_path = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+
+        if os.path.exists(sound_path):
+            for player in ["paplay", "pw-play", "aplay"]:
+                player_bin = shutil.which(player)
+                if player_bin and os.path.isfile(player_bin):
+                    subprocess.Popen(
+                        [player_bin, sound_path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    return
+    except Exception:
+        pass
+
+
+def send_desktop_notification(
+    title: str,
+    message: str,
+    urgency: str = "normal",
+    sound: bool = False,
+    sound_name: str = "complete"
+) -> None:
     """
     Send subtle desktop notification using notify-send on Linux/X11/Wayland if available.
+    Optionally play an audio chime on completion.
     Does not block or fail if desktop display or notify-send is absent.
     """
+    if sound:
+        play_notification_sound(sound_name)
+
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not has_display:
         return

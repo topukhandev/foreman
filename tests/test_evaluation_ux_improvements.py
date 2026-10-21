@@ -57,7 +57,7 @@ visual_terminal: false
     def test_send_desktop_notification_safe_fallback(self):
         """Test send_desktop_notification runs safely without raising exceptions."""
         try:
-            send_desktop_notification("Test Alert", "This is a test notification", urgency="normal")
+            send_desktop_notification("Test Alert", "This is a test notification", urgency="normal", sound=True)
         except Exception as e:
             self.fail(f"send_desktop_notification raised exception: {e}")
 

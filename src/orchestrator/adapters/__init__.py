@@ -9,17 +9,17 @@ from orchestrator.adapters.mock import MockAdapter
 from orchestrator.config import ProviderConfig
 
 
-def create_adapter(provider_name: str, config: ProviderConfig, timeout_sec: int = 300) -> BaseCLIAdapter:
+def create_adapter(provider_name: str, config: ProviderConfig, timeout_sec: int = 300, effort: str = "medium") -> BaseCLIAdapter:
     """Factory to instantiate the appropriate CLI adapter."""
     cmd = config.command.strip()
     if provider_name == "antigravity_cli":
-        return AntigravityAdapter(base_command=cmd or "agy -p", timeout_sec=timeout_sec)
+        return AntigravityAdapter(base_command=cmd or "agy -p", timeout_sec=timeout_sec, effort=effort)
     elif provider_name == "claude_code":
-        return ClaudeCodeAdapter(base_command=cmd or "claude -p", timeout_sec=timeout_sec)
+        return ClaudeCodeAdapter(base_command=cmd or "claude -p", timeout_sec=timeout_sec, effort=effort)
     elif provider_name == "opencode":
-        return OpenCodeAdapter(base_command=cmd or "opencode run", timeout_sec=timeout_sec)
+        return OpenCodeAdapter(base_command=cmd or "opencode run", timeout_sec=timeout_sec, effort=effort)
     elif provider_name == "mock" or cmd.startswith("mock"):
         return MockAdapter(name=provider_name, timeout_sec=timeout_sec)
     else:
         # Fallback to base adapter using the provided command
-        return BaseCLIAdapter(name=provider_name, base_command=cmd, timeout_sec=timeout_sec)
+        return BaseCLIAdapter(name=provider_name, base_command=cmd, timeout_sec=timeout_sec, effort=effort)

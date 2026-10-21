@@ -22,11 +22,12 @@ class ExecutionResult:
 class BaseCLIAdapter:
     """Base class for spawning local AI CLI tools with security, timeout, and process group guards."""
 
-    def __init__(self, name: str, base_command: str, timeout_sec: int = 300, visual_mode: bool = True):
+    def __init__(self, name: str, base_command: str, timeout_sec: int = 300, visual_mode: bool = True, effort: str = "medium"):
         self.name = name
         self.base_command = base_command
         self.timeout_sec = timeout_sec
         self.visual_mode = visual_mode
+        self.effort = effort if effort in ("low", "medium", "high") else "medium"
 
     def build_command(self, prompt: str, session_id: Optional[str] = None, extra_flags: Optional[List[str]] = None) -> List[str]:
         """Convert base_command and prompt into argument list."""

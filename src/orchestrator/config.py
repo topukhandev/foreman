@@ -47,6 +47,7 @@ class OrchestratorConfig:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     default_provider: str = ""
     visual_terminal: bool = True
+    effort: str = "medium"
 
 
 DEFAULT_PROVIDERS_TEMPLATE = """# Orchestrator Local Providers Configuration
@@ -212,6 +213,9 @@ def load_config(config_path: str) -> OrchestratorConfig:
     default_p = str(data.get("default_provider", "")).strip()
     runtime_data = data.get("runtime", {})
     vis_term = bool(runtime_data.get("visual_terminal", data.get("visual_terminal", True)))
+    effort_val = str(runtime_data.get("effort", data.get("effort", "medium"))).lower().strip()
+    if effort_val not in ("low", "medium", "high"):
+        effort_val = "medium"
 
     return OrchestratorConfig(
         machine=machine,
@@ -220,5 +224,6 @@ def load_config(config_path: str) -> OrchestratorConfig:
         routing=routing,
         budget=budget,
         default_provider=default_p,
-        visual_terminal=vis_term
+        visual_terminal=vis_term,
+        effort=effort_val
     )

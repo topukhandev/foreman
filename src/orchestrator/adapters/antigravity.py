@@ -9,13 +9,13 @@ from orchestrator.finder import find_tool_executable
 class AntigravityAdapter(BaseCLIAdapter):
     """Adapter for Antigravity CLI (agy / antigravity)."""
 
-    def __init__(self, base_command: str = "agy -p", timeout_sec: int = 300):
+    def __init__(self, base_command: str = "agy -p", timeout_sec: int = 300, effort: str = "medium"):
         parts = base_command.strip().split()
         bin_name = parts[0] if parts else "agy"
         resolved = find_tool_executable(bin_name, ["agy", "antigravity"])
         if resolved:
             base_command = base_command.replace(bin_name, resolved, 1)
-        super().__init__(name="antigravity_cli", base_command=base_command, timeout_sec=timeout_sec)
+        super().__init__(name="antigravity_cli", base_command=base_command, timeout_sec=timeout_sec, effort=effort)
 
     def build_command(self, prompt: str, session_id: Optional[str] = None, extra_flags: Optional[List[str]] = None) -> List[str]:
         parts = self.base_command.strip().split()
@@ -23,6 +23,8 @@ class AntigravityAdapter(BaseCLIAdapter):
         cmd = [bin_path]
         if extra_flags:
             cmd.extend(extra_flags)
+        if getattr(self, "effort", None):
+            cmd.append(f"--effort={self.effort}")
         if session_id:
             if session_id == "continue":
                 cmd.append("--continue")

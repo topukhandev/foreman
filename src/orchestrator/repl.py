@@ -134,6 +134,8 @@ class InteractiveShell:
         self.config = load_config(self.config_path)
         self.config_mtime = os.path.getmtime(self.config_path) if os.path.exists(self.config_path) else 0.0
         self.visual_mode = getattr(self.config, "visual_terminal", True)
+        self.effort = getattr(self.config, "effort", "medium")
+        self.last_duration_sec: Optional[float] = None
         self.active_pack = "developer"
         self.session_id = str(uuid.uuid4())
         self.session_turns = 0
@@ -151,6 +153,7 @@ class InteractiveShell:
                     self.config = load_config(self.config_path)
                     self.config_mtime = curr_mtime
                     self.visual_mode = getattr(self.config, "visual_terminal", True)
+                    self.effort = getattr(self.config, "effort", "medium")
             except Exception:
                 pass
 
@@ -201,6 +204,7 @@ class InteractiveShell:
         print(" 🎛️  FOREMAN ORCHESTRATOR — Front-Desk Session")
         print(f" Directory  : {self.project_dir}")
         print(f" Primary AI : {active_p}")
+        print(f" Effort     : {self.effort.upper()} (switch via /effort)")
         print(f" Visual Term: {vis_str}")
         print(f" Tools Found: {', '.join(available_tools) or 'None'}")
         print(f" Workspaces : {services_str}")
@@ -337,6 +341,63 @@ class InteractiveShell:
                 print("   ⚠️  Warning: No desktop display or terminal emulator detected (will fall back to headless).")
         else:
             print("   AI workers will execute completely under the hood (headless in background).")
+
+    def handle_effort_menu(self, choice_arg: str = "") -> None:
+        """Interactive reasoning effort level selector (low, medium, high) or direct switch."""
+        options_map = {
+            "1": "low", "low": "low", "l": "low", "fast": "low",
+            "2": "medium", "medium": "medium", "med": "medium", "m": "medium", "normal": "medium", "default": "medium",
+            "3": "high", "high": "high", "h": "high", "deep": "high", "max": "high"
+        }
+        choice = choice_arg.lower().strip()
+        if choice in options_map:
+            new_effort = options_map[choice]
+        else:
+            options = [
+                ("1", f"low    - Fast, lightweight reasoning & low token cost {'[ACTIVE]' if self.effort == 'low' else ''}".strip()),
+                ("2", f"medium - Balanced reasoning & execution (Default)     {'[ACTIVE]' if self.effort == 'medium' else ''}".strip()),
+                ("3", f"high   - Deep reasoning & exhaustive verification     {'[ACTIVE]' if self.effort == 'high' else ''}".strip())
+            ]
+            pick = select_from_menu(f"? Select AI Reasoning Effort Level (Current: {self.effort.upper()}):", options)
+            if not pick:
+                return
+            new_effort = options_map.get(pick, "medium")
+
+        self.effort = new_effort
+        # Persist effort in providers.yaml
+        try:
+            cfg_dict = {}
+            if os.path.exists(self.config_path):
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    cfg_dict = yaml.safe_load(f) or {}
+            cfg_dict["effort"] = self.effort
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg_dict, f, sort_keys=False)
+            self.config = load_config(self.config_path)
+            self.config_mtime = os.path.getmtime(self.config_path)
+        except Exception:
+            pass
+
+        effort_desc = {
+            "low": "Fast reasoning mode (Flash-Lite / Haiku / low token cost)",
+            "medium": "Balanced reasoning mode (Flash / Sonnet / standard execution)",
+            "high": "Deep thinking mode (Pro / Reasoning / exhaustive edge-case verification)"
+        }
+        print(f"\n\033[1;32m[OK]\033[0m Reasoning effort set to: \033[1;34m{self.effort.upper()}\033[0m — {effort_desc.get(self.effort, '')}\n")
+
+    def handle_close_terminals(self) -> None:
+        """Instantly close all active desktop terminal windows and persistent sessions."""
+        start_t = time.time()
+        from orchestrator.terminal import close_all_visual_sessions, close_all_spawned_terminals, list_active_terminals
+        try:
+            active_cnt = len(list_active_terminals())
+        except Exception:
+            active_cnt = 0
+        close_all_visual_sessions()
+        close_all_spawned_terminals()
+        elapsed = time.time() - start_t
+        self.last_duration_sec = elapsed
+        print(f"\n\033[1;32m✓ Closed all active terminal window(s)\033[0m ({active_cnt} window(s) closed in {elapsed:.2f}s).\n")
 
     def _detect_visual_intent(self, text: str) -> Optional[str]:
         """Detect natural language intent to configure visual worker terminal windows."""
@@ -671,11 +732,32 @@ class InteractiveShell:
             content = (
                 f"### 👋 Foreman Orchestrator — Front-Desk Bridge & Conductor\n"
                 f"* **Active AI Worker**: `{active_p}`\n"
+                f"* **Reasoning Effort**: `{self.effort.upper()}`\n"
                 f"* **Direct AI Chat**: Ask questions, brainstorm, or explore codebase naturally.\n"
                 f"* **Autonomous Sprint**: Run `/run <goal>` to dispatch a complete 4-agent sprint.\n"
-                f"* **Menu & Tools**: Type `/` to open live dropdown (`/provider`, `/status`, `/link`, `/doctor`)."
+                f"* **Menu & Tools**: Type `/` to open live dropdown (`/effort`, `/close`, `/provider`, `/status`, `/link`, `/doctor`)."
             )
             print("\n" + render_markdown(content))
+            return True
+
+        # Close active worker terminals (Instant local execution in < 0.05s)
+        close_triggers = [
+            "close terminals", "close all terminals", "close terminal", "close windows",
+            "kill terminals", "exit terminals", "stop terminals", "shut terminals",
+            "close the terminals", "close the terminal", "close all open terminals",
+            "close the windows", "close all windows",
+            "টার্মিনাল বন্ধ করো", "সব টার্মিনাল বন্ধ করো", "টার্মিনালগুলো বন্ধ করে দাও",
+            "টার্মিনালগুলো বন্ধ করো", "টার্মিনাল বন্ধ", "উইন্ডো বন্ধ করো", "সব উইন্ডো বন্ধ করো"
+        ]
+        if any(tr in q for tr in close_triggers) or q in ("/close", "close"):
+            self.handle_close_terminals()
+            return True
+
+        # Reasoning Effort Level
+        if q in ("effort", "reasoning effort", "effort level", "change effort") or q.startswith("effort "):
+            parts = q.split()
+            arg = parts[1] if len(parts) > 1 else ""
+            self.handle_effort_menu(arg)
             return True
 
         return False
@@ -709,9 +791,16 @@ class InteractiveShell:
         except Exception:
             pass
 
+        effort_instruction = {
+            "low": "Reasoning Effort: LOW (Fast & Concise Mode). Prioritize brevity, speed, and execute directly with minimal overhead.",
+            "medium": "Reasoning Effort: MEDIUM (Balanced Mode). Balanced depth, standard analysis, and clear execution.",
+            "high": "Reasoning Effort: HIGH (Deep Reasoning Mode). Rigorously explore edge cases, verify all assumptions, and provide deep architectural precision."
+        }.get(self.effort, "Reasoning Effort: MEDIUM.")
+
         if self.session_turns > 0:
             prompt = (
                 f"[Workspace Update: {self.project_dir} | State: {state_content[:600]}]\n"
+                f"{effort_instruction}\n\n"
                 f"User Request: {query}\n\n"
                 f"Instructions:\n"
                 f"You are the intelligent AI agent for Foreman Orchestrator.\n"
@@ -726,6 +815,7 @@ class InteractiveShell:
                 f"Project Directory: {self.project_dir}\n"
                 f"Connected Workspaces: {links_summary}\n"
                 f"Current Project State:\n{state_content[:2000]}{desktop_info}\n\n"
+                f"{effort_instruction}\n\n"
                 f"User Request: {query}\n\n"
                 f"Instructions:\n"
                 f"1. You are an autonomous intelligent agent acting on behalf of the user. You have full command execution and tool access.\n"
@@ -740,7 +830,7 @@ class InteractiveShell:
             )
             session_arg = self.session_id if p_name == "claude_code" else None
 
-        adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec)
+        adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec, effort=self.effort)
         adapter.visual_mode = self.visual_mode
         stream_mode = (not self.visual_mode)
         result = adapter.run(
@@ -752,6 +842,8 @@ class InteractiveShell:
             progress_label=p_name,
             stream_output=stream_mode
         )
+
+        self.last_duration_sec = result.duration_sec
 
         if result.success and result.output:
             self.session_turns += 1
@@ -773,6 +865,10 @@ class InteractiveShell:
             print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}\n")
         elif not stream_mode:
             print("\n(No response received from AI worker.)\n")
+
+        # Explicit execution completion footer displaying exact time taken
+        if result.duration_sec > 0:
+            print(f"\n\033[90m─── (⏱️  Completed in {result.duration_sec:.1f}s • Provider: {p_name} • Effort: {self.effort.upper()}) ───\033[0m")
 
     def execute_goal(self, goal: str) -> None:
         """Execute full multi-agent workflow sprint on user goal with confirmation."""
@@ -858,12 +954,14 @@ class InteractiveShell:
             active_cnt = 0
 
         p_badge = f"\033[1;36mProvider:\033[0m {active_p}"
+        e_badge = f"\033[1;34mEffort:\033[0m {self.effort.upper()}"
+        last_badge = f" [\033[1;33mLast:\033[0m {self.last_duration_sec:.1f}s]" if self.last_duration_sec is not None else ""
         r_badge = f"{health_color}RAM:\033[0m {ram_str}"
         c_badge = f"\033[90mCPU:\033[0m {cpu_str}"
         w_badge = f"\033[1;33mWorkers:\033[0m {active_cnt} active"
         v_badge = f"\033[1;35mVisual:\033[0m {vis_str}"
 
-        return f"\033[90m┌─\033[0m [{p_badge}] [{r_badge}] [{c_badge}] [{w_badge}] [{v_badge}]"
+        return f"\033[90m┌─\033[0m [{p_badge}] [{e_badge}]{last_badge} [{r_badge}] [{c_badge}] [{w_badge}] [{v_badge}]"
 
     def run(self) -> None:
         """Main interactive REPL loop."""
@@ -905,7 +1003,7 @@ class InteractiveShell:
 
                     # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
                     all_cmds = [
-                        "/run", "/spawn", "/new", "/provider", "/visual", "/status",
+                        "/run", "/effort", "/close", "/spawn", "/new", "/provider", "/visual", "/status",
                         "/system", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"
                     ]
                     matches = [c for c in all_cmds if c.startswith(cmd)]
@@ -915,6 +1013,10 @@ class InteractiveShell:
                     if cmd in ("/exit", "/quit"):
                         print("Exiting orchestrator. Goodbye!")
                         break
+                    elif cmd in ("/effort", "/thinking"):
+                        self.handle_effort_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
+                    elif cmd in ("/close", "/terminals", "/kill-terminals"):
+                        self.handle_close_terminals()
                     elif cmd == "/run":
                         self.handle_run_command(arg)
                     elif cmd == "/spawn":

@@ -55,6 +55,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_effort(args: argparse.Namespace) -> int:
+    import yaml
+    target_dir = os.path.abspath(getattr(args, "path", ".") or ".")
+    config_path = os.path.join(target_dir, "providers.yaml")
+    level = args.level.lower().strip() if getattr(args, "level", None) else ""
+    if level not in ("low", "medium", "high"):
+        print("Usage: orchestrator effort [low|medium|high]")
+        return 1
+    cfg_dict = {}
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg_dict = yaml.safe_load(f) or {}
+    cfg_dict["effort"] = level
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg_dict, f, sort_keys=False)
+    print(f"[OK] AI reasoning effort level set to: {level.upper()}")
+    return 0
+
+
 def cmd_mcp(args: argparse.Namespace) -> int:
     target_dir = os.path.abspath(args.project or ".")
     server = MCPServer(default_project_dir=target_dir)
@@ -172,6 +191,12 @@ def main() -> None:
     p_mcp = subparsers.add_parser("mcp", help="Start local Model Context Protocol (MCP) server over stdio")
     p_mcp.add_argument("--project", default=".", help="Project directory")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    # effort
+    p_effort = subparsers.add_parser("effort", help="Set AI reasoning effort level (low, medium, high)")
+    p_effort.add_argument("level", choices=["low", "medium", "high"], help="Reasoning effort level")
+    p_effort.add_argument("--path", default=".", help="Project directory")
+    p_effort.set_defaults(func=cmd_effort)
 
     # run
     p_run = subparsers.add_parser("run", help="Run a multi-agent workflow on a goal")
