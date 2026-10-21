@@ -518,6 +518,57 @@ class TestInputReader(unittest.TestCase):
             self.assertEqual(os.waitstatus_to_exitcode(status), 0)
             self.assertIn(b"RESULT:git status -s", output)
 
+    def test_interactive_voice_toggle_shortcut(self):
+        """Test pressing Ctrl+V in PTY triggers toggle_voice without NameError."""
+        from unittest.mock import patch, MagicMock
+
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+
+            with patch("orchestrator.voice.VoiceRecorder") as mock_vr, \
+                 patch("orchestrator.voice.get_recording_tool", return_value="arecord"), \
+                 patch("orchestrator.voice.transcribe_audio", return_value=(True, "transcribed input")):
+                mock_inst = MagicMock()
+                mock_inst.start.return_value = True
+                mock_inst.stop.return_value = "/tmp/dummy.wav"
+                mock_vr.return_value = mock_inst
+
+                res = read_interactive_line()
+                print(f"RESULT:{res}")
+                os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            # Press Ctrl+V (\x16), Enter to stop recording, Enter to submit line
+            os.write(master, b"\x16\r\r")
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.5)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 1024)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertIn(b"RESULT:transcribed input", output)
+
 
 if __name__ == "__main__":
     unittest.main()
