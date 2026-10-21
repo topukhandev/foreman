@@ -54,14 +54,30 @@ class LiveWorkerStreamer:
         self.is_running = True
         self.known_files: Dict[str, float] = {}
 
+    def _is_safe_workspace(self) -> bool:
+        """Ensure file watching is only active on scoped project workspaces, never home/system root."""
+        home = os.path.expanduser("~")
+        real = os.path.realpath(self.cwd)
+        # Never watch entire home directory or system root
+        if real in (home, "/", "/tmp", "/var", "/etc"):
+            return False
+        return True
+
     def _init_workspace_files(self) -> None:
         """Snapshot current files in cwd to detect newly created or modified files."""
+        if not self._is_safe_workspace():
+            return
         try:
             for root, dirs, files in os.walk(self.cwd):
-                # Ignore noisy directories
-                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "hub", "dist", ".cache", ".next", ".turbo")]
+                # Prune ALL hidden directories (.git, .config, .gemini, etc.) and build caches
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.startswith(".") and d not in (
+                        "node_modules", "hub", "dist", "build", "__pycache__", ".cache", ".next", ".turbo", "venv"
+                    )
+                ]
                 for f in files:
-                    if f.endswith((".log", ".pid", ".tmp")):
+                    if f.startswith(".") or f.endswith((".log", ".pid", ".tmp", ".db", ".db-wal", ".db-shm", ".sqlite", ".bin", ".lock")):
                         continue
                     full_p = os.path.join(root, f)
                     try:
@@ -73,12 +89,19 @@ class LiveWorkerStreamer:
 
     def _check_workspace_updates(self) -> List[str]:
         """Detect any newly created or recently modified files in the workspace."""
+        if not self._is_safe_workspace():
+            return []
         updated: List[str] = []
         try:
             for root, dirs, files in os.walk(self.cwd):
-                dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "hub", "dist", ".cache", ".next", ".turbo")]
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.startswith(".") and d not in (
+                        "node_modules", "hub", "dist", "build", "__pycache__", ".cache", ".next", ".turbo", "venv"
+                    )
+                ]
                 for f in files:
-                    if f.endswith((".log", ".pid", ".tmp")):
+                    if f.startswith(".") or f.endswith((".log", ".pid", ".tmp", ".db", ".db-wal", ".db-shm", ".sqlite", ".bin", ".lock")):
                         continue
                     full_p = os.path.join(root, f)
                     try:
