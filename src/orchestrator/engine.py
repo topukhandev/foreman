@@ -140,6 +140,17 @@ class OrchestratorEngine:
             title = task_spec.title
             role = task_spec.role
 
+            # Check if this task was already completed and approved
+            existing_stat = self.hub.get_task_status(task_id)
+            if existing_stat and existing_stat.state == "done":
+                existing_doc = self.hub.read_task_spec(task_id)
+                if existing_doc:
+                    self.progress.set_task_status(task_id, "done", summary=existing_stat.one_line_summary)
+                    self._notify_progress(f"\033[1;32m✓ [{role.capitalize()}]\033[0m Task #{task_id} already completed: '{title}' (Reusing verified output)")
+                    previous_output = existing_doc
+                    completed_count += 1
+                    continue
+
             # Format base prompt with context
             base_prompt = task_spec.prompt_template.format(
                 goal=goal,

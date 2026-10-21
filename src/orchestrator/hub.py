@@ -174,6 +174,18 @@ class Hub:
         )
         self._atomic_write_json(status_file, asdict(stat))
 
+    def get_task_status(self, task_id: str) -> Optional[TaskStatus]:
+        """Load single task status if exists."""
+        status_file = self.status_dir / f"{task_id}.json"
+        if status_file.exists():
+            try:
+                with open(status_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return TaskStatus(**data)
+            except Exception:
+                return None
+        return None
+
     def get_all_task_statuses(self) -> List[TaskStatus]:
         """Load all task statuses safely."""
         statuses: List[TaskStatus] = []
