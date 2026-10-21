@@ -23,6 +23,8 @@ class AntigravityAdapter(BaseCLIAdapter):
         cmd = [bin_path]
         if extra_flags:
             cmd.extend(extra_flags)
+        if "--dangerously-skip-permissions" not in cmd and "--dangerously-skip-permissions" not in self.base_command:
+            cmd.append("--dangerously-skip-permissions")
         if getattr(self, "effort", None):
             cmd.append(f"--effort={self.effort}")
         if session_id:
