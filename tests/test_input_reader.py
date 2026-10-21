@@ -254,6 +254,143 @@ class TestInputReader(unittest.TestCase):
             self.assertIn(b"RESULT:None", output)
             self.assertNotIn(b"^[", output)
 
+    def test_paste_long_text_does_not_cascade_prompts(self):
+        """Test that pasting text longer than terminal width does NOT duplicate prompts."""
+        import fcntl
+        import struct
+        import termios
+
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+            # Set virtual terminal size to 75 columns, 24 rows
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 75, 0, 0))
+            prompt = "\033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[opencode]\033[0m › "
+            res = read_interactive_line(prompt=prompt)
+            print(f"RESULT:{res}")
+            os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            # 122 characters string that spans across multiple wrapped lines on a 75-col terminal
+            long_text = "I need to generate a README file for the orchestrator repository with comprehensive installation steps and architecture."
+            os.write(master, (long_text + "\r").encode("utf-8"))
+
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 4096)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            # Verify prompt is never cascaded across multiple lines
+            self.assertEqual(output.count(b"[opencode]"), 1)
+            self.assertIn(f"RESULT:{long_text}".encode("utf-8"), output)
+
+    def test_bracketed_paste_with_embedded_newlines(self):
+        """Test that bracketed paste mode handles text with newlines without premature execution."""
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+            prompt = "\033[1;36m❯\033[0m \033[1morchestrator\033[0m › "
+            res = read_interactive_line(prompt=prompt)
+            print(f"RESULT:{res}")
+            os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            # Bracketed paste containing multiple lines
+            pasted = "\x1b[200~First line\r\nSecond line\nThird line\x1b[201~\r"
+            os.write(master, pasted.encode("utf-8"))
+
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 4096)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertIn(b"RESULT:First line Second line Third line", output)
+
+    def test_read_input_with_esc_long_paste(self):
+        """Test read_input_with_esc with long wrapped pasted text."""
+        from orchestrator.input_reader import read_input_with_esc
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+            res = read_input_with_esc("Goal: ")
+            print(f"RESULT:{res}")
+            os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            long_goal = "Create a multi-agent dashboard with real-time analytics and automatic health checks for all external worker CLIs."
+            os.write(master, (long_goal + "\r").encode("utf-8"))
+
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 4096)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertIn(f"RESULT:{long_goal}".encode("utf-8"), output)
+
 
 if __name__ == "__main__":
     unittest.main()
+
