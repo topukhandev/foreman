@@ -23,7 +23,6 @@ COMMANDS: List[Tuple[str, str]] = [
     ("/new",       "Start a fresh conversation thread with active AI worker"),
     ("/provider",  "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
     ("/visual",    "Toggle visible desktop terminal windows for AI workers (on/off)"),
-    ("/spawn",     "Open dedicated desktop terminal window(s) for worker sessions"),
     ("/status",    "View single-page project state (state.md) & active workers"),
     ("/system",    "View real-time System Resource Guard metrics (RAM, CPU, Disk)"),
     ("/tasks",     "Inspect recent tasks, specs, and reviewer verdicts"),
@@ -44,6 +43,7 @@ def get_command_matches(prefix: str) -> List[Tuple[str, str]]:
 def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int, Optional[str]]:
     """
     Render floating dropdown box with arrow selection pointer.
+    Guaranteed to fit terminal width without line wrapping or row desynchronization.
     Returns: (rendered_ansi_string, number_of_lines, currently_selected_command)
     """
     matches = get_command_matches(prefix)
@@ -54,17 +54,35 @@ def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int,
     selected_index = max(0, min(selected_index, len(matches) - 1))
     selected_cmd = matches[selected_index][0]
 
-    lines = ["\n  ╭─ Commands (↑/↓ to navigate, Enter to select, Esc to cancel) ──────╮"]
-    matches_to_show = matches[:15]
-    for i, (cmd, desc) in enumerate(matches_to_show):
-        if i == selected_index:
-            # Highlighted item in bright cyan with pointer
-            lines.append(f"  │ \033[1;36m❯ {cmd:<11} {desc:<51}\033[0m │")
-        else:
-            lines.append(f"  │   {cmd:<11} {desc:<51} │")
-    lines.append("  ╰───────────────────────────────────────────────────────────────────╯")
+    cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+    if cols < 20:
+        cols = 80
+    box_width = max(30, min(cols - 4, 72))
 
-    return "\n".join(lines), len(lines), selected_cmd
+    title = " Commands (↑/↓ to navigate, Enter to select, Esc to cancel) "
+    if len(title) > box_width - 4:
+        title = " Commands "
+    dash_total = max(2, box_width - 2 - len(title))
+    dashes_left = dash_total // 2
+    dashes_right = dash_total - dashes_left
+    top_border = f"  ╭{'─' * dashes_left}{title}{'─' * dashes_right}╮"
+    bottom_border = f"  ╰{'─' * (box_width - 2)}╯"
+
+    inner_w = box_width - 4
+    cmd_w = 11
+    desc_w = max(10, inner_w - cmd_w - 4)
+
+    lines = [top_border]
+    matches_to_show = matches[:7]
+    for i, (cmd, desc) in enumerate(matches_to_show):
+        clean_desc = desc if len(desc) <= desc_w else desc[:desc_w - 3] + "..."
+        if i == selected_index:
+            lines.append(f"  │ \033[1;36m❯ {cmd:<{cmd_w}} {clean_desc:<{desc_w}}\033[0m │")
+        else:
+            lines.append(f"  │   {cmd:<{cmd_w}} {clean_desc:<{desc_w}} │")
+    lines.append(bottom_border)
+
+    return "\n" + "\n".join(lines), len(lines), selected_cmd
 
 
 _HISTORY_FILE = os.path.expanduser("~/.foreman_history")
@@ -160,14 +178,13 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
         if cols < 20:
             cols = 80
 
-        # If dropdown was visible previously, cursor was already restored to prompt row.
-        # Otherwise, move cursor up by previously rendered wrapped cursor rows.
-        if dropdown_lines > 0:
-            dropdown_lines = 0
-        elif last_rendered_cursor_row > 0:
+        # Restore cursor to prompt base row if previous text wrapped across rows
+        if last_rendered_cursor_row > 0:
             sys.stdout.write(f"\033[{last_rendered_cursor_row}A")
+            last_rendered_cursor_row = 0
 
         curr_text = "".join(buf)
+        # Move to column 0 and clear from cursor to bottom of screen (erasing previous prompt and dropdown)
         sys.stdout.write("\r\033[J" + prompt + curr_text)
 
         total_len = clean_prompt_len + len(curr_text)
@@ -178,8 +195,10 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
             box_str, num_lines, _ = render_dropdown_box(curr_text, selected_idx)
             dropdown_lines = num_lines
             sys.stdout.write(box_str)
-            # Move cursor back up to the end_row
+            # Move cursor back up from bottom of dropdown to end_row
             sys.stdout.write(f"\033[{num_lines}A")
+        else:
+            dropdown_lines = 0
 
         # Position cursor at cursor_pos
         cursor_total = clean_prompt_len + cursor_pos

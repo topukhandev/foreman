@@ -519,10 +519,14 @@ def _launch_oneshot_visual_worker(
                 elapsed = time.time() - start_time
                 if elapsed > timeout_sec:
                     break
-                sys.stdout.write(
-                    f"\r\033[K\033[1;36m{spinner[idx % len(spinner)]} [{lbl}]\033[0m "
-                    f"Running in visible terminal ({emulator.name})... ({elapsed:.1f}s)"
-                )
+                cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                spin_ch = spinner[idx % len(spinner)]
+                full_desc = f"Running ({emulator.name})... ({elapsed:.1f}s)"
+                if len(f"{spin_ch} [{lbl}] {full_desc}") >= cols - 1:
+                    full_desc = f"Running... ({elapsed:.1f}s)"
+                    if len(f"{spin_ch} [{lbl}] {full_desc}") >= cols - 1:
+                        full_desc = f"({elapsed:.1f}s)"
+                sys.stdout.write(f"\r\033[K\033[1;36m{spin_ch} [{lbl}]\033[0m {full_desc}")
                 sys.stdout.flush()
                 idx += 1
                 time.sleep(0.1)
@@ -739,10 +743,14 @@ exit $EXIT_CODE
                 if not session.is_alive():
                     break
 
-                sys.stdout.write(
-                    f"\r\033[K\033[1;36m{spinner[idx % len(spinner)]} [{lbl}]\033[0m "
-                    f"Running in visible terminal ({emulator.name})... ({elapsed:.1f}s)"
-                )
+                cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                spin_ch = spinner[idx % len(spinner)]
+                full_desc = f"Running ({emulator.name})... ({elapsed:.1f}s)"
+                if len(f"{spin_ch} [{lbl}] {full_desc}") >= cols - 1:
+                    full_desc = f"Running... ({elapsed:.1f}s)"
+                    if len(f"{spin_ch} [{lbl}] {full_desc}") >= cols - 1:
+                        full_desc = f"({elapsed:.1f}s)"
+                sys.stdout.write(f"\r\033[K\033[1;36m{spin_ch} [{lbl}]\033[0m {full_desc}")
                 sys.stdout.flush()
                 idx += 1
                 time.sleep(0.1)
@@ -866,6 +874,8 @@ exit $EXIT_CODE
         )
 
 
+
+
 # ---------------------------------------------------------------------------
 # Multi-Terminal Interactive Spawner & Tracker
 # ---------------------------------------------------------------------------
@@ -936,11 +946,8 @@ class SpawnedTerminalTracker:
 
         # Resolve directory
         target_dir = os.path.abspath(os.path.expanduser(cwd))
-        if not os.path.exists(target_dir):
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except Exception as e:
-                return None, f"Cannot create directory '{target_dir}': {e}"
+        if not os.path.isdir(target_dir):
+            return None, f"Directory does not exist: '{target_dir}'"
 
         # Resolve tool executable
         tool_clean = tool.lower().strip()

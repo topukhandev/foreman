@@ -17,7 +17,7 @@ from orchestrator.terminal import (
     list_active_terminals,
     close_all_spawned_terminals,
 )
-from orchestrator.repl import InteractiveShell, parse_spawn_args, extract_spawn_directives
+from orchestrator.repl import InteractiveShell
 
 
 class TestSystemGuardAndSpawner(unittest.TestCase):
@@ -200,88 +200,21 @@ budget:
                 shell.open_requested_terminals(specs)
                 self.assertEqual(len(list_active_terminals()), 2)
 
-    def test_parse_spawn_args(self):
-        """Verify parse_spawn_args handles aliases, counts, and directory paths."""
-        res1 = parse_spawn_args("opencode /home/user/Desktop/Orcastrator")
-        self.assertIsNotNone(res1)
-        self.assertEqual(res1["provider"], "opencode")
-        self.assertEqual(res1["count"], 1)
-        self.assertEqual(res1["dir"], "/home/user/Desktop/Orcastrator")
-
-        res2 = parse_spawn_args(r"agy /home/user/projects/ai\ projects")
-        self.assertIsNotNone(res2)
-        self.assertEqual(res2["provider"], "antigravity_cli")
-        self.assertEqual(res2["count"], 1)
-        self.assertEqual(res2["dir"], "/home/user/projects/ai projects")
-
-        res3 = parse_spawn_args("2 claude /tmp")
-        self.assertIsNotNone(res3)
-        self.assertEqual(res3["provider"], "claude_code")
-        self.assertEqual(res3["count"], 2)
-        self.assertEqual(res3["dir"], "/tmp")
-
-        res4 = parse_spawn_args("3", default_provider="antigravity_cli", default_dir=self.test_dir)
-        self.assertIsNotNone(res4)
-        self.assertEqual(res4["provider"], "antigravity_cli")
-        self.assertEqual(res4["count"], 3)
-        self.assertEqual(res4["dir"], self.test_dir)
-
-    def test_extract_spawn_directives_from_ai_markdown(self):
-        """Verify extract_spawn_directives extracts directives from AI markdown output."""
-        ai_response = """To open these worker sessions in their respective directories, you can launch them directly using Foreman's spawn command:
-
-1. OpenCode Interpreter / CLI in the Desktop Orchestrator test directory:
-```bash
-/spawn opencode /home/topukhan/Desktop/Orcastrator
-```
-2. Antigravity CLI (agy) in the AI Projects directory:
-```bash
-/spawn agy /home/topukhan/projects/ai\\ projects
-```
-3. Claude Code CLI in the Desktop Image directory:
-```bash
-/spawn claude /home/topukhan/Desktop/image
-```
-*(Foreman supports up to 10-15 concurrent workers governed dynamically by the System Resource Guard. You can also run `/spawn [tool] [dir]` directly in the Foreman prompt at any time to open additional worker terminals.)*"""
-
-        specs = extract_spawn_directives(ai_response)
-        self.assertEqual(len(specs), 3)
-        self.assertEqual(specs[0]["provider"], "opencode")
-        self.assertEqual(specs[0]["dir"], "/home/topukhan/Desktop/Orcastrator")
-        self.assertEqual(specs[1]["provider"], "antigravity_cli")
-        self.assertEqual(specs[1]["dir"], "/home/topukhan/projects/ai projects")
-        self.assertEqual(specs[2]["provider"], "claude_code")
-        self.assertEqual(specs[2]["dir"], "/home/topukhan/Desktop/image")
-
-    def test_bridge_to_ai_provider_auto_spawns_terminals(self):
-        """Verify bridge_to_ai_provider executes emitted /spawn directives automatically without user bash prompts."""
+    def test_bridge_to_ai_provider_forwards_directly(self):
+        """Verify bridge_to_ai_provider forwards user natural language directly to AI adapter without regex interception."""
         shell = InteractiveShell(project_dir=self.test_dir)
         from orchestrator.adapters.base import ExecutionResult
-        ai_output = "Opening requested session:\n/spawn opencode /tmp"
+        ai_output = "I have located your project at ~/projects/AI-Projects and launched the terminal."
 
         with patch("orchestrator.repl.create_adapter") as mock_adapter_create:
             mock_adapter = MagicMock()
             mock_adapter.run.return_value = ExecutionResult(success=True, output=ai_output)
             mock_adapter_create.return_value = mock_adapter
 
-            with patch.object(shell, "open_requested_terminals") as mock_open:
-                shell.bridge_to_ai_provider("open terminal in opencode in /tmp")
-                mock_open.assert_called_once()
-                specs = mock_open.call_args[0][0]
-                self.assertEqual(len(specs), 1)
-                self.assertEqual(specs[0]["provider"], "opencode")
-                self.assertEqual(specs[0]["dir"], "/tmp")
-
-    def test_slash_spawn_command(self):
-        """Verify /spawn slash command invokes open_requested_terminals directly."""
-        shell = InteractiveShell(project_dir=self.test_dir)
-        with patch.object(shell, "open_requested_terminals") as mock_open:
-            with patch("orchestrator.repl.read_interactive_line", side_effect=["/spawn opencode /tmp", EOFError]):
-                shell.run()
-            mock_open.assert_called_once()
-            specs = mock_open.call_args[0][0]
-            self.assertEqual(specs[0]["provider"], "opencode")
-            self.assertEqual(specs[0]["dir"], "/tmp")
+            shell.bridge_to_ai_provider("open terminal in ai projects")
+            mock_adapter.run.assert_called_once()
+            call_kwargs = mock_adapter.run.call_args[1]
+            self.assertIn("open terminal in ai projects", call_kwargs["prompt"])
 
 
 if __name__ == "__main__":

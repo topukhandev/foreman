@@ -125,11 +125,17 @@ class BaseCLIAdapter:
                 spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
                 lbl = progress_label or self.name
                 idx = 0
+                import shutil
                 while process.poll() is None:
                     elapsed = time.time() - start_time
                     if elapsed > self.timeout_sec:
                         break
-                    sys.stdout.write(f"\r\033[K\033[1;36m{spinner[idx % len(spinner)]} [{lbl}]\033[0m Thinking... ({elapsed:.1f}s)")
+                    cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                    spin_ch = spinner[idx % len(spinner)]
+                    desc = f"Thinking... ({elapsed:.1f}s)"
+                    if len(f"{spin_ch} [{lbl}] {desc}") >= cols - 1:
+                        desc = f"({elapsed:.1f}s)"
+                    sys.stdout.write(f"\r\033[K\033[1;36m{spin_ch} [{lbl}]\033[0m {desc}")
                     sys.stdout.flush()
                     idx += 1
                     time.sleep(0.1)

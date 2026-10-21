@@ -25,89 +25,6 @@ from orchestrator.input_reader import (
 )
 
 
-def parse_spawn_args(raw_str: str, default_provider: str = "antigravity_cli", default_dir: str = ".") -> Optional[Dict[str, Any]]:
-    """
-    Parse a single spawn specification string into {"provider": str, "count": int, "dir": str}.
-    Handles inputs like:
-      - "opencode /home/user/Desktop/project"
-      - "agy /home/user/projects/ai\\ projects"
-      - "claude ~/Desktop/image"
-      - "2 opencode"
-      - "3"
-      - "/home/user/projects"
-    """
-    raw_str = raw_str.strip()
-    if not raw_str:
-        return None
-
-    try:
-        parts = shlex.split(raw_str)
-    except Exception:
-        parts = raw_str.split()
-
-    if not parts:
-        return None
-
-    tool_aliases = {
-        "opencode": "opencode", "opencode_ai": "opencode", "ওপেনকোড": "opencode", "ওপেন কোড": "opencode",
-        "agy": "antigravity_cli", "antigravity": "antigravity_cli", "antigravity_cli": "antigravity_cli",
-        "এজিআই": "antigravity_cli", "অ্যান্টিগ্রাভিটি": "antigravity_cli",
-        "claude": "claude_code", "claude_code": "claude_code", "cluade": "claude_code",
-        "ক্লড": "claude_code",
-        "bash": "bash", "terminal": "bash", "shell": "bash", "sh": "bash"
-    }
-
-    count = 1
-    tool = default_provider
-    dir_path = default_dir
-
-    idx = 0
-    # 1. Check if first token is a count
-    if idx < len(parts) and parts[idx].isdigit():
-        count = max(1, int(parts[idx]))
-        idx += 1
-
-    # 2. Check if current token is a tool
-    if idx < len(parts) and parts[idx].lower().rstrip(":,") in tool_aliases:
-        tool = tool_aliases[parts[idx].lower().rstrip(":,")]
-        idx += 1
-        # Check if count comes after tool: e.g. "opencode 2 /path"
-        if idx < len(parts) and parts[idx].isdigit():
-            count = max(1, int(parts[idx]))
-            idx += 1
-
-    # 3. Remaining tokens represent directory path
-    if idx < len(parts):
-        dir_candidate = " ".join(parts[idx:]).strip()
-        dir_candidate = dir_candidate.strip("'\"").replace("\\ ", " ")
-        if dir_candidate:
-            dir_path = os.path.abspath(os.path.expanduser(dir_candidate))
-
-    return {
-        "provider": tool,
-        "count": count,
-        "dir": os.path.abspath(os.path.expanduser(dir_path))
-    }
-
-
-def extract_spawn_directives(text: str, default_provider: str = "antigravity_cli", default_dir: str = ".") -> List[Dict[str, Any]]:
-    """
-    Extract all /spawn or ACTION: SPAWN commands from text output.
-    Supports markdown blocks, bulleted lists, and inline directives.
-    """
-    pattern = r"(?:/spawn|ACTION:\s*SPAWN)\s+([^\n\r`\"]+)"
-    specs: List[Dict[str, Any]] = []
-
-    for match in re.finditer(pattern, text, re.IGNORECASE):
-        raw = match.group(1).strip()
-        # Ignore template placeholders like [tool] [dir] or [count]
-        if "[" in raw or "]" in raw or "<" in raw:
-            continue
-        spec = parse_spawn_args(raw, default_provider=default_provider, default_dir=default_dir)
-        if spec:
-            specs.append(spec)
-
-    return specs
 
 
 class InteractiveShell:
@@ -424,40 +341,9 @@ class InteractiveShell:
             print(f"\n\033[1;32m✓ Opened {len(spawned)} terminal window(s):\033[0m {', '.join(parts)}")
 
     def handle_spawn_command(self, arg_str: str = "") -> None:
-        """Open worker terminal window(s) via /spawn [count] [tool] [dir] or interactive menu."""
-        arg_clean = arg_str.strip()
-        if not arg_clean:
-            options = [
-                ("1", "antigravity_cli (agy)"),
-                ("2", "claude_code (claude)"),
-                ("3", "opencode"),
-                ("4", "bash / system shell")
-            ]
-            choice = select_from_menu("? Select tool to spawn terminal for:", options)
-            if not choice:
-                return
-            tool_map = {"1": "antigravity_cli", "2": "claude_code", "3": "opencode", "4": "bash"}
-            tool = tool_map.get(choice, "antigravity_cli")
-
-            cnt_str = read_input_with_esc("Number of terminals to open [default: 1]: ")
-            if cnt_str is None:
-                return
-            count = int(cnt_str.strip()) if cnt_str.strip().isdigit() else 1
-
-            dir_str = read_input_with_esc(f"Working directory [default: {self.project_dir}]: ")
-            if dir_str is None:
-                return
-            cwd = os.path.abspath(os.path.expanduser(dir_str.strip())) if dir_str.strip() else self.project_dir
-
-            specs = [{"provider": tool, "count": count, "dir": cwd}]
-            self.open_requested_terminals(specs)
-            return
-
-        spec = parse_spawn_args(arg_clean, default_provider=self._get_active_provider_name(), default_dir=self.project_dir)
-        if spec:
-            self.open_requested_terminals([spec])
-        else:
-            print("[!] Could not parse spawn arguments. Usage: /spawn [count] [tool] [dir]")
+        """Forward spawn request directly to active AI provider."""
+        query = f"Open worker terminal: {arg_str}".strip() if arg_str else "Open an AI worker terminal on my desktop."
+        self.bridge_to_ai_provider(query)
 
     def handle_system_status(self) -> None:
         """Display real-time System Resource Guard metrics."""
@@ -660,7 +546,8 @@ class InteractiveShell:
     def bridge_to_ai_provider(self, query: str) -> None:
         """
         Send user query/instruction directly to active AI provider (agy, claude, opencode)
-        with workspace context and live elapsed timer.
+        with workspace context and live elapsed timer. All intelligence and tool execution
+        resides with the AI provider.
         """
         if not self.check_or_prompt_ai_provider():
             return
@@ -676,12 +563,23 @@ class InteractiveShell:
         services = self.links.list_links()
         links_summary = ", ".join([f"{s.name} at {s.path}" for s in services]) if services else "None"
 
+        desktop_info = ""
+        try:
+            from orchestrator.terminal import detect_desktop_terminal
+            term_emulator = detect_desktop_terminal()
+            if term_emulator:
+                desktop_info = f"\nDesktop Terminal Emulator: {term_emulator.name} ({term_emulator.executable})"
+        except Exception:
+            pass
+
         if self.session_turns > 0:
             prompt = (
                 f"[Workspace Update: {self.project_dir} | State: {state_content[:600]}]\n"
                 f"User Request: {query}\n\n"
-                f"Note: If the user asks to open, launch, or spawn worker terminals/sessions in any directory or project, "
-                f"emit '/spawn <tool> <directory>' on its own line for each terminal so Foreman automatically opens them."
+                f"Instructions:\n"
+                f"You are the intelligent AI agent for Foreman Orchestrator.\n"
+                f"You have full command execution and filesystem tools available.\n"
+                f"Respond directly, search/inspect files if needed, and execute any requested actions."
             )
             session_arg = self.session_id if p_name == "claude_code" else "continue"
         else:
@@ -689,19 +587,17 @@ class InteractiveShell:
                 f"You are the Front-Desk AI Worker for Foreman Orchestrator.\n"
                 f"Project Directory: {self.project_dir}\n"
                 f"Connected Workspaces: {links_summary}\n"
-                f"Current Project State:\n{state_content[:2000]}\n\n"
-                f"User Inquiry / Request: {query}\n\n"
+                f"Current Project State:\n{state_content[:2000]}{desktop_info}\n\n"
+                f"User Request: {query}\n\n"
                 f"Instructions:\n"
-                f"1. Answer the user directly, clearly, and concisely based on the project context above.\n"
-                f"2. If the user asks about project state or progress, summarize accurately from the state above.\n"
-                f"3. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, "
-                f"and inform them they can run '/run <goal>' to trigger a complete 4-agent sprint.\n"
-                f"4. If the user asks to open, spawn, create, or launch worker terminals or AI CLI sessions "
-                f"(e.g. for opencode, agy/antigravity, claude, or bash) in any directory or project:\n"
-                f"   - Accurately resolve the requested tool, target directory, and terminal count from their query.\n"
-                f"   - Emit the directive `/spawn <tool> <directory>` on its own line for each requested terminal.\n"
-                f"   - Foreman Orchestrator automatically captures these directives and launches the desktop terminal windows immediately.\n"
-                f"   - Do NOT tell the user to manually run bash commands; Foreman executes the spawn directives directly on their desktop."
+                f"1. You are an autonomous intelligent agent acting on behalf of the user. You have full command execution and tool access.\n"
+                f"2. Answer the user directly, clearly, and concisely based on the project context.\n"
+                f"3. If the user asks you to locate, search, inspect, or open projects, folders, or terminal sessions (e.g. for opencode, agy/antigravity, claude, or bash):\n"
+                f"   - Search the filesystem to find the actual directory (e.g. using `find` or `ls` in `~`, `~/Desktop`, `~/projects`). Do not guess or fail if the user's wording is approximate or has typos.\n"
+                f"   - If the user asks to open/launch terminal windows on desktop, run the command in background (e.g. using `gnome-terminal --working-directory=\"<path>\" -- <tool> &` or the available terminal emulator).\n"
+                f"   - Report back clearly to the user what you found and what actions you executed.\n"
+                f"4. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, and inform them they can run '/run <goal>' to trigger a complete multi-agent sprint.\n"
+                f"5. All intelligence resides with you; execute tools and report results directly."
             )
             session_arg = self.session_id if p_name == "claude_code" else None
 
@@ -718,21 +614,8 @@ class InteractiveShell:
 
         if result.success and result.output:
             self.session_turns += 1
-            # Check for spawn directives emitted by AI worker
-            specs = extract_spawn_directives(
-                result.output,
-                default_provider=p_name,
-                default_dir=self.project_dir
-            )
-
             formatted = render_markdown(result.output.strip())
             print(formatted)
-
-            # If the AI emitted spawn directives, launch them automatically on desktop!
-            if specs:
-                print("\n\033[1;36m[Foreman Conductor]\033[0m Launching requested worker terminals on desktop...")
-                self.open_requested_terminals(specs)
-
         elif result.error:
             print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}\n")
         else:
