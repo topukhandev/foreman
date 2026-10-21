@@ -150,7 +150,8 @@ def transcribe_audio_groq(wav_path: str, api_key: str) -> Tuple[bool, str]:
             data=data,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}"
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             }
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -184,7 +185,8 @@ def transcribe_audio_openai(wav_path: str, api_key: str) -> Tuple[bool, str]:
             data=data,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}"
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
             }
         )
         with urllib.request.urlopen(req, timeout=12) as resp:
@@ -228,7 +230,10 @@ def transcribe_audio_gemini(wav_path: str, api_key: str) -> Tuple[bool, str]:
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"}
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+            }
         )
         with urllib.request.urlopen(req, timeout=12) as resp:
             res_obj = json.loads(resp.read().decode("utf-8"))
@@ -242,39 +247,58 @@ def transcribe_audio_gemini(wav_path: str, api_key: str) -> Tuple[bool, str]:
         return False, f"Gemini Audio error: {str(e)}"
 
 
+def get_configured_voice_key(preferred_key: Optional[str] = None) -> Optional[str]:
+    """Retrieve voice API key from argument, environment, or providers.yaml."""
+    if preferred_key:
+        return preferred_key
+    env_key = (
+        os.environ.get("GROQ_API_KEY")
+        or os.environ.get("GROQ_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+    )
+    if env_key:
+        return env_key
+    for p_cand in [
+        os.path.join(os.getcwd(), "providers.yaml"),
+        os.path.expanduser("~/Desktop/Orcastrator/providers.yaml")
+    ]:
+        if os.path.exists(p_cand):
+            try:
+                import yaml
+                with open(p_cand, "r", encoding="utf-8") as f:
+                    cfg_data = yaml.safe_load(f) or {}
+                k = cfg_data.get("voice", {}).get("api_key")
+                if k:
+                    return k
+            except Exception:
+                pass
+    return None
+
+
 def transcribe_audio(wav_path: str, preferred_key: Optional[str] = None) -> Tuple[bool, str]:
     """
     Intelligently transcribe WAV file using available API keys:
-    1. Groq (if GROQ_API_KEY set -> 0.2s ultra-fast)
+    1. Groq (if GROQ_API_KEY set or in providers.yaml -> 0.2s ultra-fast)
     2. OpenAI (if OPENAI_API_KEY set)
     3. Gemini (if GEMINI_API_KEY set)
     """
-    groq_key = preferred_key or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_KEY")
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    gemini_key = os.environ.get("GEMINI_API_KEY")
+    active_key = get_configured_voice_key(preferred_key)
+    if not active_key:
+        return False, (
+            "No Voice API Key configured.\n"
+            "To enable ultra-fast voice transcription (0.2s):\n"
+            "  • Run: export GROQ_API_KEY=gsk_... (Free & fastest at https://console.groq.com)\n"
+            "  • Or:  export GEMINI_API_KEY=AIza... (Google Gemini Audio)\n"
+            "  • Or:  /voice key <your_api_key>"
+        )
 
-    if groq_key and not groq_key.startswith("AIza") and not groq_key.startswith("sk-proj-"):
-        return transcribe_audio_groq(wav_path, groq_key)
+    if not os.path.exists(wav_path):
+        return False, f"Audio file not found: {wav_path}"
 
-    if gemini_key:
-        return transcribe_audio_gemini(wav_path, gemini_key)
-
-    if openai_key:
-        return transcribe_audio_openai(wav_path, openai_key)
-
-    # If key was passed directly, try it
-    if preferred_key:
-        if preferred_key.startswith("gsk_"):
-            return transcribe_audio_groq(wav_path, preferred_key)
-        elif preferred_key.startswith("AIza"):
-            return transcribe_audio_gemini(wav_path, preferred_key)
-        else:
-            return transcribe_audio_groq(wav_path, preferred_key)
-
-    return False, (
-        "No Voice API Key configured.\n"
-        "To enable ultra-fast voice transcription (0.2s):\n"
-        "  • Run: export GROQ_API_KEY=gsk_... (Free & fastest at https://console.groq.com)\n"
-        "  • Or:  export GEMINI_API_KEY=AIza... (Google Gemini Audio)\n"
-        "  • Or:  /voice key <your_api_key>"
-    )
+    if active_key.startswith("AIza"):
+        return transcribe_audio_gemini(wav_path, active_key)
+    elif active_key.startswith("sk-proj-"):
+        return transcribe_audio_openai(wav_path, active_key)
+    else:
+        return transcribe_audio_groq(wav_path, active_key)

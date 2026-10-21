@@ -1048,15 +1048,15 @@ class InteractiveShell:
                 os.environ["GROQ_API_KEY"] = new_key
                 try:
                     import yaml
-                    with open(self.config.config_path, "r") as f:
+                    with open(self.config_path, "r", encoding="utf-8") as f:
                         cfg_data = yaml.safe_load(f) or {}
                     if "voice" not in cfg_data:
                         cfg_data["voice"] = {}
                     cfg_data["voice"]["api_key"] = new_key
-                    with open(self.config.config_path, "w") as f:
-                        yaml.dump(cfg_data, f)
-                    print(f"\n\033[1;32m[OK]\033[0m Voice transcription API key saved and activated.\n")
-                except Exception:
+                    with open(self.config_path, "w", encoding="utf-8") as f:
+                        yaml.dump(cfg_data, f, default_flow_style=False)
+                    print(f"\n\033[1;32m[OK]\033[0m Voice transcription API key saved to providers.yaml and activated.\n")
+                except Exception as ex:
                     print(f"\n\033[1;32m[OK]\033[0m Voice API key active for this session.\n")
             else:
                 print("\n[!] Usage: /voice key <your_api_key>\n")

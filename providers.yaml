@@ -67,3 +67,8 @@ budget:
   loop_detect_threshold: 3
   max_files_per_project: 1000
   max_project_size_mb: 500
+voice:
+  enabled: true
+  shortcut: "ctrl+v"
+  api_key: "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"
+

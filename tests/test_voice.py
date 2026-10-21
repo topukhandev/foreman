@@ -21,13 +21,13 @@ class TestVoiceModule(unittest.TestCase):
         self.assertEqual(rec.output_path, "/tmp/test_rec.wav")
         self.assertFalse(rec.is_recording)
 
-    def test_transcribe_audio_no_key_returns_instructions(self):
+    @patch("orchestrator.voice.get_configured_voice_key", return_value=None)
+    def test_transcribe_audio_no_key_returns_instructions(self, mock_key):
         """Verify helpful setup instructions returned when no key is configured."""
-        with patch.dict(os.environ, {}, clear=True):
-            ok, msg = transcribe_audio("/tmp/fake.wav")
-            self.assertFalse(ok)
-            self.assertIn("No Voice API Key configured", msg)
-            self.assertIn("GROQ_API_KEY", msg)
+        ok, msg = transcribe_audio("/tmp/fake.wav")
+        self.assertFalse(ok)
+        self.assertIn("No Voice API Key configured", msg)
+        self.assertIn("GROQ_API_KEY", msg)
 
     @patch("urllib.request.urlopen")
     def test_transcribe_audio_groq_mock(self, mock_urlopen):
