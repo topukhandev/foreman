@@ -386,8 +386,11 @@ class InteractiveShell:
             "dir": self.project_dir
         }]
 
-    def handle_spawn_command(self, arg: str = "", parsed_specs: Optional[List[Dict[str, Any]]] = None) -> None:
-        """Spawn independent desktop worker terminal windows."""
+    def open_requested_terminals(self, specs: List[Dict[str, Any]]) -> None:
+        """
+        Intelligently open requested worker terminals without rigid menus, commands, or fake wrappers.
+        Directly checks System Resource Guard and launches clean desktop terminals.
+        """
         from orchestrator.terminal import spawn_terminals_batch, detect_desktop_terminal
         from orchestrator.system_guard import SystemGuard
 
@@ -397,61 +400,18 @@ class InteractiveShell:
             print("Cannot launch visible desktop terminal windows in headless mode (no DISPLAY / WAYLAND).")
             return
 
-        specs = parsed_specs or []
-        default_p = self._get_active_provider_name()
-        if default_p == "mock":
-            default_p = "antigravity_cli"
-
         if not specs:
-            arg_clean = arg.strip()
-            parts = arg_clean.split()
-            if len(parts) == 1 and parts[0].isdigit():
-                specs = [{"provider": default_p, "count": int(parts[0]), "dir": self.project_dir}]
-            elif len(parts) == 1 and parts[0].lower() in ("agy", "antigravity", "claude", "opencode", "bash"):
-                specs = [{"provider": parts[0].lower(), "count": 1, "dir": self.project_dir}]
-            elif len(parts) >= 2 and parts[1].isdigit():
-                target_dir = parts[2] if len(parts) > 2 else self.project_dir
-                specs = [{"provider": parts[0], "count": int(parts[1]), "dir": os.path.abspath(os.path.expanduser(target_dir))}]
-            elif len(parts) >= 2 and parts[0].isdigit():
-                target_dir = parts[2] if len(parts) > 2 else self.project_dir
-                specs = [{"provider": parts[1], "count": int(parts[0]), "dir": os.path.abspath(os.path.expanduser(target_dir))}]
-            elif arg_clean:
-                specs = self._detect_spawn_terminals_intent(arg_clean) or []
-
-        if not specs:
-            options = [
-                ("1", f"Active provider ({default_p}) - 1 terminal in current project"),
-                ("2", f"Active provider ({default_p}) - 4 terminals in current project"),
-                ("3", "Custom (select provider, count, and directory)")
-            ]
-            choice = select_from_menu("? Launch Desktop Worker Terminal(s):", options)
-            if not choice:
-                return
-            if choice == "1":
-                specs = [{"provider": default_p, "count": 1, "dir": self.project_dir}]
-            elif choice == "2":
-                specs = [{"provider": default_p, "count": 4, "dir": self.project_dir}]
-            elif choice == "3":
-                p_choice = select_from_menu("? Select AI Tool for Terminal:", [
-                    ("1", "antigravity_cli (agy)"),
-                    ("2", "claude_code (claude)"),
-                    ("3", "opencode (opencode)"),
-                    ("4", "bash / shell")
-                ])
-                p_map = {"1": "antigravity_cli", "2": "claude_code", "3": "opencode", "4": "bash"}
-                p_name = p_map.get(p_choice, default_p)
-                count_str = read_input_with_esc("Number of terminals to open [default: 1]: ", default="1")
-                try:
-                    count_val = max(1, int(count_str or 1))
-                except ValueError:
-                    count_val = 1
-                dir_str = read_input_with_esc(f"Target directory [default: {self.project_dir}]: ", default=self.project_dir)
-                target_dir = os.path.abspath(os.path.expanduser(dir_str or self.project_dir))
-                specs = [{"provider": p_name, "count": count_val, "dir": target_dir}]
+            return
 
         total_terminals = sum(s.get("count", 1) for s in specs)
+        target_dir = specs[0].get("dir", self.project_dir)
 
-        print(f"\n🛡️ Checking System Resource Guard before spawning {total_terminals} terminal(s)...")
+        # Pre-flight hardware guard check to prevent machine freezing / crashing
+        can_spawn, guard_msg = SystemGuard.can_spawn(total_terminals, target_dir=target_dir)
+        if not can_spawn:
+            print(f"\n{guard_msg}\n")
+            return
+
         spawned, errors = spawn_terminals_batch(specs)
 
         if errors:
@@ -459,48 +419,11 @@ class InteractiveShell:
                 print(f"\n{err}")
 
         if spawned:
-            print(f"\n\033[1;32m✓ Successfully spawned {len(spawned)} desktop terminal window(s):\033[0m")
-            for idx, term in enumerate(spawned, 1):
-                print(f"   • [{idx}] \033[1;36m{term.tool_name}\033[0m (PID: {term.pid}) @ \033[1;33m{term.cwd}\033[0m")
-            print("\n💡 These terminal windows are active on your desktop. Type /terminals to inspect or close them.\n")
-        elif not errors:
-            print("\n(No terminals were spawned.)\n")
-
-    def handle_terminals_command(self) -> None:
-        """Inspect and manage spawned desktop worker terminal windows."""
-        from orchestrator.terminal import list_active_terminals, close_all_spawned_terminals
-
-        active = list_active_terminals()
-        if not active:
-            print("\n[!] No standalone desktop worker terminals currently active.")
-            print("    Use /spawn [count/tool/dir] to open worker terminal windows.")
-            return
-
-        print(f"\nActive Desktop Worker Terminals ({len(active)} open):")
-        for idx, term in enumerate(active, 1):
-            uptime = max(0.0, time.time() - term.created_at)
-            print(f"  [{idx}] {term.tool_name} (PID: {term.pid}) @ {term.cwd} [Uptime: {uptime:.0f}s]")
-
-        options = [
-            ("1", "Keep all running (Back)"),
-            ("2", "Close all spawned terminal windows"),
-            ("3", "Close a specific terminal by number")
-        ]
-        choice = select_from_menu("? Terminal Window Management:", options)
-        if choice == "2":
-            close_all_spawned_terminals()
-            print("[OK] Closed all spawned desktop terminal windows.")
-        elif choice == "3":
-            idx_str = read_input_with_esc("Enter terminal number to close: ")
-            try:
-                pick = int(idx_str)
-                if 1 <= pick <= len(active):
-                    active[pick - 1].close()
-                    print(f"[OK] Closed terminal #{pick} ({active[pick - 1].tool_name}).")
-                else:
-                    print("Invalid terminal number.")
-            except Exception:
-                pass
+            counts: Dict[str, int] = {}
+            for t in spawned:
+                counts[t.tool_name] = counts.get(t.tool_name, 0) + 1
+            parts = [f"{cnt}x {tool}" for tool, cnt in counts.items()]
+            print(f"\n\033[1;32m✓ Opened {len(spawned)} terminal window(s):\033[0m {', '.join(parts)}")
 
     def handle_system_status(self) -> None:
         """Display real-time System Resource Guard metrics."""
@@ -851,8 +774,8 @@ class InteractiveShell:
 
                     # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
                     all_cmds = [
-                        "/run", "/spawn", "/terminals", "/system", "/new", "/provider",
-                        "/visual", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"
+                        "/run", "/new", "/provider", "/visual", "/status",
+                        "/system", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"
                     ]
                     matches = [c for c in all_cmds if c.startswith(cmd)]
                     if len(matches) == 1:
@@ -863,10 +786,6 @@ class InteractiveShell:
                         break
                     elif cmd == "/run":
                         self.handle_run_command(arg)
-                    elif cmd in ("/spawn", "/open", "/terminal"):
-                        self.handle_spawn_command(arg)
-                    elif cmd in ("/terminals", "/sessions"):
-                        self.handle_terminals_command()
                     elif cmd in ("/system", "/guard", "/hardware"):
                         self.handle_system_status()
                     elif cmd == "/new":
@@ -909,10 +828,10 @@ class InteractiveShell:
                         self.handle_visual_toggle(visual_intent)
                         continue
 
-                    # 3. Check for natural language terminal spawn intent (e.g. "চারটা টার্মিনাল ওপেন করো", "open 4 terminals")
+                    # 3. Check for natural language terminal open intent (e.g. "তিনটা টার্মিনাল ওপেন করো", "দুইটা টার্মিনাল ক্লোডে ওপেন করো, দুইটা ওপেন কোডে")
                     spawn_intent = self._detect_spawn_terminals_intent(line)
                     if spawn_intent is not None:
-                        self.handle_spawn_command(parsed_specs=spawn_intent)
+                        self.open_requested_terminals(spawn_intent)
                         continue
 
                     # 4. Fast local operational query (who are you, where am i)

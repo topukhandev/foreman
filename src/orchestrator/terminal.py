@@ -979,27 +979,7 @@ class SpawnedTerminalTracker:
         script_content = f"""#!/bin/bash
 cd {quoted_cwd} || exit 1
 echo $$ > "{pid_file}"
-
-CYAN='\\033[1;36m'
-YELLOW='\\033[1;33m'
-GREEN='\\033[1;32m'
-GRAY='\\033[90m'
-RESET='\\033[0m'
-
-echo -e "${{CYAN}}╔════════════════════════════════════════════════════════════════════════════╗${{RESET}}"
-echo -e "${{CYAN}}║${{RESET}}  ${{YELLOW}}🤖 FOREMAN AI WORKER TERMINAL : [{display_name}]${{RESET}}"
-echo -e "${{CYAN}}║${{RESET}}  Directory : ${{GREEN}}{target_dir}${{RESET}}"
-echo -e "${{CYAN}}║${{RESET}}  Status    : ACTIVE & INTERACTIVE"
-echo -e "${{CYAN}}╚════════════════════════════════════════════════════════════════════════════╝${{RESET}}"
-echo ""
-
-{quoted_bin}
-EXIT_CODE=$?
-
-echo ""
-echo -e "${{GRAY}}────────────────────────────────────────────────────────────────────────────${{RESET}}"
-echo -e "${{GRAY}}[Worker process finished with exit code $EXIT_CODE. Press Enter to close window]${{RESET}}"
-read -r
+exec {quoted_bin}
 """
         with open(launcher_sh, "w", encoding="utf-8") as f:
             f.write(script_content)

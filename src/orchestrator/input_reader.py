@@ -23,8 +23,6 @@ COMMANDS: List[Tuple[str, str]] = [
     ("/new",       "Start a fresh conversation thread with active AI worker"),
     ("/provider",  "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
     ("/visual",    "Toggle visible desktop terminal windows for AI workers (on/off)"),
-    ("/spawn",     "Open independent desktop worker terminal(s) [count/tool/dir]"),
-    ("/terminals", "List or manage active spawned desktop terminal windows"),
     ("/status",    "View single-page project state (state.md) & active workers"),
     ("/system",    "View real-time System Resource Guard metrics (RAM, CPU, Disk)"),
     ("/tasks",     "Inspect recent tasks, specs, and reviewer verdicts"),

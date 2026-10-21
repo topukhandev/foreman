@@ -212,6 +212,26 @@ budget:
                 close_all_spawned_terminals()
                 self.assertEqual(len(list_active_terminals()), 0)
 
+    def test_repl_open_requested_terminals_natural(self):
+        """Verify open_requested_terminals launches cleanly."""
+        shell = InteractiveShell(project_dir=self.test_dir)
+        mock_emulator = TerminalEmulatorInfo(
+            name="mock-term",
+            executable="/bin/bash",
+            args_builder=lambda title, script: ["bash", script],
+            nowait_args_builder=lambda title, script: ["bash", script]
+        )
+        with patch("orchestrator.terminal.detect_desktop_terminal", return_value=mock_emulator):
+            with patch("subprocess.Popen") as mock_popen:
+                mock_proc = MagicMock()
+                mock_proc.pid = 1234
+                mock_proc.poll.return_value = None
+                mock_popen.return_value = mock_proc
+
+                specs = [{"provider": "claude_code", "count": 2, "dir": self.test_dir}]
+                shell.open_requested_terminals(specs)
+                self.assertEqual(len(list_active_terminals()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
