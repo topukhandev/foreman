@@ -161,6 +161,10 @@ def render_markdown(text: str, indent: str = "  ", width: Optional[int] = None) 
     if not text:
         return ""
 
+    # Sanitize any raw or orphaned ANSI artifacts from incoming LLM text
+    text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+    text = re.sub(r'(?<!\w)(?:\[)?[0-9]{1,2}(?:;[0-9]{1,2})+m', '', text)
+
     if width is None:
         width = get_terminal_width()
 
@@ -319,3 +323,50 @@ def render_markdown(text: str, indent: str = "  ", width: Optional[int] = None) 
         out.pop()
 
     return "\n".join(out)
+
+
+def render_user_message(query: str, width: Optional[int] = None) -> str:
+    """Render a clean, modern user message card with clear boundaries."""
+    if width is None:
+        width = get_terminal_width()
+    box_w = min(width - 2, 85)
+    inner_w = max(20, box_w - 4)
+
+    title = " 👤 You "
+    top = f"\033[90m╭─\033[1;36m{title}\033[0;90m{'─' * max(0, box_w - 2 - len(title) - 2)}╮\033[0m"
+    bot = f"\033[90m╰{'─' * (box_w - 2)}╯\033[0m"
+
+    lines = [top]
+    for l in query.splitlines() or [""]:
+        wrapped = textwrap.wrap(l, width=inner_w) or [""]
+        for wl in wrapped:
+            pad = " " * max(0, inner_w - len(wl))
+            lines.append(f"\033[90m│\033[0m  \033[1;37m{wl}\033[0m{pad}\033[90m│\033[0m")
+    lines.append(bot)
+    return "\n".join(lines)
+
+
+def render_assistant_response(text: str, provider: str, duration_sec: Optional[float] = None, width: Optional[int] = None) -> str:
+    """Render a distinct, clean assistant response container."""
+    if width is None:
+        width = get_terminal_width()
+    box_w = min(width - 2, 85)
+    inner_w = max(20, box_w - 4)
+
+    title = f" 🤖 Foreman ({provider}) "
+    dur_tag = f" Responded in {duration_sec:.1f}s " if duration_sec else ""
+    top = f"\033[90m╭─\033[1;32m{title}\033[0;90m{'─' * max(0, box_w - 2 - len(title) - 2)}╮\033[0m"
+
+    if dur_tag:
+        bot_fill = max(0, box_w - 2 - len(dur_tag) - 3)
+        bot = f"\033[90m╰{'─' * bot_fill} \033[90m{dur_tag}\033[0;90m──╯\033[0m"
+    else:
+        bot = f"\033[90m╰{'─' * (box_w - 2)}╯\033[0m"
+
+    rendered_body = render_markdown(text, indent="  ", width=inner_w)
+    out = [top]
+    for bl in rendered_body.splitlines():
+        out.append(f"\033[90m│\033[0m{bl}")
+    out.append(bot)
+    return "\n".join(out)
+

@@ -37,14 +37,11 @@ visual_terminal: false
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_status_bar_rendering(self):
-        """Test persistent single-line status bar contains provider, RAM, CPU, workers, and visual mode."""
+        """Test persistent single-line status bar contains provider and effort."""
         shell = InteractiveShell(project_dir=self.test_dir)
         bar = shell._render_status_bar()
         self.assertIn("Provider:", bar)
-        self.assertIn("RAM:", bar)
-        self.assertIn("CPU:", bar)
-        self.assertIn("Workers:", bar)
-        self.assertIn("Visual:", bar)
+        self.assertIn("Effort:", bar)
 
     def test_stream_output_in_adapter(self):
         """Test BaseCLIAdapter.run with stream_output=True."""

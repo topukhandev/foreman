@@ -23,6 +23,7 @@ COMMANDS: List[Tuple[str, str]] = [
     ("/new",       "Start a fresh conversation thread with active AI worker"),
     ("/provider",  "Select or switch default AI worker (Antigravity, Claude, OpenCode)"),
     ("/effort",    "Set AI reasoning effort & model tier (low, medium, high)"),
+    ("/voice",     "Toggle voice command recording or set API key (/voice key <key>)"),
     ("/visual",    "Toggle visible desktop terminal windows for AI workers (on/off)"),
     ("/close",     "Instantly close all active desktop terminal windows"),
     ("/status",    "View single-page project state (state.md) & active workers"),
@@ -161,6 +162,44 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
     in_bracketed_paste = False
 
     clean_prompt_len = get_clean_prompt_len(prompt)
+
+    voice_active = False
+    recorder = None
+
+    def toggle_voice():
+        nonlocal voice_active, recorder, cursor_pos, buf
+        if not voice_active:
+            from orchestrator.voice import VoiceRecorder, get_recording_tool
+            tool = get_recording_tool()
+            if not tool:
+                sys.stdout.write("\r\033[K\033[1;31m[!] Neither arecord nor ffmpeg installed for audio recording.\033[0m\n")
+                redraw()
+                return
+
+            recorder = VoiceRecorder()
+            if recorder.start():
+                voice_active = True
+                sys.stdout.write("\r\033[K\033[1;31m🎙️  [Recording Audio...]\033[0m \033[1;37mSpeak now!\033[0m \033[90m(Press Ctrl+V, Ctrl+M, or Enter to stop)\033[0m")
+                sys.stdout.flush()
+        else:
+            sys.stdout.write("\r\033[K\033[1;33m⏳ Transcribing audio...\033[0m")
+            sys.stdout.flush()
+            wav_file = recorder.stop() if recorder else None
+            voice_active = False
+            recorder = None
+
+            if wav_file:
+                from orchestrator.voice import transcribe_audio
+                ok, transcript = transcribe_audio(wav_file)
+                if ok and transcript:
+                    clean_text = transcript.strip()
+                    for ch in clean_text:
+                        buf.insert(cursor_pos, ch)
+                        cursor_pos += 1
+                else:
+                    sys.stdout.write(f"\r\033[K\033[1;33m[Voice Info]\033[0m {transcript}\n")
+            update_matches()
+            redraw()
 
     def update_matches():
         nonlocal active_matches_count, current_selected_cmd, selected_idx
@@ -353,6 +392,10 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
 
                 # Enter (\r or \n)
                 elif text[i] in ("\r", "\n"):
+                    if voice_active:
+                        toggle_voice()
+                        i += 1
+                        continue
                     # Inside a paste or if followed by more characters in the same chunk,
                     # convert newline to space so paste doesn't trigger premature execution.
                     if in_bracketed_paste or i < len(text) - 1:
@@ -466,6 +509,12 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                         update_matches()
                     i += 1
 
+                # Ctrl+V (\x16) or Ctrl+G (\x07): Toggle Voice Command
+                elif text[i] in ("\x16", "\x07"):
+                    toggle_voice()
+                    i += 1
+                    continue
+
                 # Printable characters
                 elif text[i] >= " ":
                     buf.insert(cursor_pos, text[i])
@@ -480,6 +529,11 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
             redraw()
 
     finally:
+        if voice_active and recorder:
+            try:
+                recorder.stop()
+            except Exception:
+                pass
         sys.stdout.write("\033[?2004l")
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)

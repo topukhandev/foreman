@@ -924,6 +924,9 @@ class InteractiveShell:
             )
             session_arg = self.session_id if p_name == "claude_code" else None
 
+        from orchestrator.markdown import render_user_message, render_assistant_response
+        print("\n" + render_user_message(query))
+
         adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec, effort=self.effort)
         adapter.visual_mode = self.visual_mode
         stream_mode = (not self.visual_mode)
@@ -941,11 +944,17 @@ class InteractiveShell:
 
         if result.success and result.output:
             self.session_turns += 1
+            clean_output = clean_user_facing_output(result.output)
             if not stream_mode:
-                clean_output = clean_user_facing_output(result.output)
                 if clean_output:
-                    formatted = render_markdown(clean_output)
-                    print(formatted)
+                    formatted = render_assistant_response(clean_output, provider=p_name, duration_sec=result.duration_sec)
+                    print("\n" + formatted)
+            else:
+                cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                box_w = min(cols - 2, 85)
+                dur_tag = f" Responded in {result.duration_sec:.1f}s "
+                bot_fill = max(0, box_w - 2 - len(dur_tag) - 3)
+                print(f"\n\033[90m╰{'─' * bot_fill} \033[90m{dur_tag}\033[0;90m──╯\033[0m")
 
             # Check for spawn directives emitted by AI worker
             specs = extract_spawn_directives(
@@ -960,10 +969,6 @@ class InteractiveShell:
             print_claude_error(result.error)
         elif not stream_mode:
             print("\n\033[90m(No response received from AI worker.)\033[0m\n")
-
-        # Claude Code style execution completion footer
-        if result.duration_sec > 0:
-            print(f"\n\033[90m⏺ \033[1;36m{p_name}\033[0m \033[90m• effort: \033[1;34m{self.effort.upper()}\033[0m \033[90m• duration: \033[0m{result.duration_sec:.1f}s\033[0m")
 
     def execute_goal(self, goal: str) -> None:
         """Execute full multi-agent workflow sprint on user goal with confirmation."""
@@ -1034,36 +1039,61 @@ class InteractiveShell:
 
         self.execute_goal(goal)
 
+    def handle_voice_command(self, arg: str = "") -> None:
+        """Handle /voice commands (interactive recording or setting API key)."""
+        arg_parts = arg.strip().split()
+        if arg_parts and arg_parts[0].lower() in ("key", "set-key", "token"):
+            if len(arg_parts) > 1:
+                new_key = arg_parts[1].strip()
+                os.environ["GROQ_API_KEY"] = new_key
+                try:
+                    import yaml
+                    with open(self.config.config_path, "r") as f:
+                        cfg_data = yaml.safe_load(f) or {}
+                    if "voice" not in cfg_data:
+                        cfg_data["voice"] = {}
+                    cfg_data["voice"]["api_key"] = new_key
+                    with open(self.config.config_path, "w") as f:
+                        yaml.dump(cfg_data, f)
+                    print(f"\n\033[1;32m[OK]\033[0m Voice transcription API key saved and activated.\n")
+                except Exception:
+                    print(f"\n\033[1;32m[OK]\033[0m Voice API key active for this session.\n")
+            else:
+                print("\n[!] Usage: /voice key <your_api_key>\n")
+            return
+
+        from orchestrator.voice import VoiceRecorder, transcribe_audio, get_recording_tool
+        tool = get_recording_tool()
+        if not tool:
+            print("\n\033[1;31m[!] Neither arecord nor ffmpeg installed for audio recording.\033[0m\n")
+            return
+
+        rec = VoiceRecorder()
+        print("\n\033[1;31m🎙️  [Recording Audio...]\033[0m Speak now! (Press Enter when finished)")
+        rec.start()
+        try:
+            input()
+        except (KeyboardInterrupt, EOFError):
+            pass
+        wav_file = rec.stop()
+        print("\033[1;33m⏳ Transcribing audio...\033[0m")
+        if wav_file:
+            ok, text = transcribe_audio(wav_file)
+            if ok and text:
+                print(f"\n\033[1;32m✓ Transcribed:\033[0m \"{text}\"\n")
+                self.bridge_to_ai_provider(text)
+            else:
+                print(f"\n\033[1;33m[Voice Info]\033[0m {text}\n")
+        else:
+            print("\n[!] No audio captured.\n")
+
     def _render_status_bar(self) -> str:
-        """Render a single-line status bar with provider, system health, active workers, and visual mode."""
+        """Render a clean, low-verbosity status bar with active provider, effort, and voice hint."""
         active_p = self._get_active_provider_name()
-        try:
-            from orchestrator.system_guard import SystemGuard
-            metrics = SystemGuard.get_metrics(self.project_dir)
-            ram_str = f"{metrics.ram_used_percent:.0f}%"
-            cpu_str = f"{metrics.cpu_percent:.0f}%"
-            health_color = "\033[1;32m" if metrics.is_healthy else "\033[1;33m"
-        except Exception:
-            ram_str = "N/A"
-            cpu_str = "N/A"
-            health_color = "\033[1;32m"
-
-        vis_str = "\033[1;32mON\033[0m" if self.visual_mode else "\033[90mOFF\033[0m"
-        try:
-            from orchestrator.terminal import get_active_spawned_terminals
-            active_cnt = len(get_active_spawned_terminals())
-        except Exception:
-            active_cnt = 0
-
         p_badge = f"\033[1;36mProvider:\033[0m {active_p}"
         e_badge = f"\033[1;34mEffort:\033[0m {self.effort.upper()}"
-        last_badge = f" \033[90m──\033[0m [\033[1;33mLast:\033[0m {self.last_duration_sec:.1f}s]" if self.last_duration_sec is not None else ""
-        r_badge = f"{health_color}RAM:\033[0m {ram_str}"
-        c_badge = f"\033[90mCPU:\033[0m {cpu_str}"
-        w_badge = f"\033[1;33mWorkers:\033[0m {active_cnt} active"
-        v_badge = f"\033[1;35mVisual:\033[0m {vis_str}"
-
-        return f"\033[90m╭─\033[0m [{p_badge}] \033[90m──\033[0m [{e_badge}] \033[90m──\033[0m [{r_badge}] \033[90m──\033[0m [{c_badge}] \033[90m──\033[0m [{w_badge}] \033[90m──\033[0m [{v_badge}]{last_badge}"
+        voice_hint = "\033[90m•\033[0m \033[33m🎙️  [Ctrl+V for Voice]\033[0m"
+        return f"\033[90m╭─\033[0m [ {p_badge} \033[90m•\033[0m {e_badge} ] {voice_hint}"
 
     def run(self) -> None:
         """Main interactive REPL loop."""
@@ -1085,8 +1115,11 @@ class InteractiveShell:
         try:
             while True:
                 try:
+                    cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                    divider_w = min(cols - 2, 85)
+                    print(f"\n\033[90m{'─' * divider_w}\033[0m")
                     status_line = self._render_status_bar()
-                    print(f"\n{status_line}")
+                    print(f"{status_line}")
                     prompt = "\033[90m╰─\033[1;36m❯\033[0m "
                     line = read_interactive_line(prompt=prompt)
                 except (EOFError, KeyboardInterrupt):
@@ -1104,7 +1137,7 @@ class InteractiveShell:
 
                     # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
                     all_cmds = [
-                        "/run", "/effort", "/close", "/spawn", "/new", "/provider", "/visual", "/status",
+                        "/run", "/effort", "/close", "/spawn", "/voice", "/new", "/provider", "/visual", "/status",
                         "/system", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"
                     ]
                     matches = [c for c in all_cmds if c.startswith(cmd)]
@@ -1122,6 +1155,8 @@ class InteractiveShell:
                         self.handle_run_command(arg)
                     elif cmd == "/spawn":
                         self.handle_spawn_command(arg)
+                    elif cmd in ("/voice", "/mic"):
+                        self.handle_voice_command(arg)
                     elif cmd in ("/system", "/guard", "/hardware"):
                         self.handle_system_status()
                     elif cmd == "/new":

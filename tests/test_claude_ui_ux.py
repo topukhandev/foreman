@@ -119,15 +119,11 @@ effort: medium
             sys.stdout = old_stdout
 
     def test_status_bar_and_prompt_style(self):
-        """Verify status bar maintains all required metrics while using connected Claude-style connectors."""
+        """Verify status bar maintains required metrics while using connected Claude-style connectors."""
         shell = InteractiveShell(project_dir=self.test_dir)
         bar = shell._render_status_bar()
         self.assertIn("Provider:", bar)
         self.assertIn("Effort:", bar)
-        self.assertIn("RAM:", bar)
-        self.assertIn("CPU:", bar)
-        self.assertIn("Workers:", bar)
-        self.assertIn("Visual:", bar)
         self.assertIn("╭─", bar)
 
     @patch("orchestrator.terminal.spawn_terminals_batch")
