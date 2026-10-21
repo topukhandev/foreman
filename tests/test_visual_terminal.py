@@ -70,6 +70,69 @@ class TestVisualTerminal(unittest.TestCase):
         self.assertTrue(res.success)
         self.assertIn("hello", res.output)
 
+    def test_persistent_visual_session_multiturn(self):
+        """Verify that visual terminal session stays open across multiple turns and preserves context."""
+        from unittest.mock import patch
+        from orchestrator.terminal import (
+            TerminalEmulatorInfo,
+            VisualSessionManager,
+            launch_visual_worker,
+            close_all_visual_sessions
+        )
+
+        mock_emulator = TerminalEmulatorInfo(
+            name="mock-terminal",
+            executable="/bin/bash",
+            args_builder=lambda title, script: ["bash", script]
+        )
+
+        with patch("orchestrator.terminal.detect_desktop_terminal", return_value=mock_emulator):
+            manager = VisualSessionManager.get_instance()
+            close_all_visual_sessions()
+
+            # Turn 1: Create files
+            res1 = launch_visual_worker(
+                cmd=["echo", "Turn 1: architecture.md created"],
+                cwd=self.test_dir,
+                title="Create architecture file",
+                worker_name="opencode_test",
+                task_id="turn_1",
+                role="worker",
+                show_progress=False
+            )
+
+            self.assertIsNotNone(res1)
+            self.assertTrue(res1.success)
+            self.assertIn("Turn 1: architecture.md created", res1.output)
+
+            # Assert session is STILL ALIVE and window did not close!
+            session = manager.get_session("opencode_test")
+            self.assertIsNotNone(session)
+            self.assertTrue(session.is_alive())
+
+            # Turn 2: Commit files in the SAME session without closing or recreating window
+            res2 = launch_visual_worker(
+                cmd=["echo", "Turn 2: committed to git"],
+                cwd=self.test_dir,
+                title="Commit files",
+                worker_name="opencode_test",
+                task_id="turn_2",
+                role="worker",
+                show_progress=False
+            )
+
+            self.assertIsNotNone(res2)
+            self.assertTrue(res2.success)
+            self.assertIn("Turn 2: committed to git", res2.output)
+
+            # Assert session is STILL ALIVE after Turn 2!
+            self.assertTrue(session.is_alive())
+
+            # Now close session (as in /new or /exit)
+            close_all_visual_sessions()
+            self.assertFalse(session.is_alive())
+
 
 if __name__ == "__main__":
     unittest.main()
+

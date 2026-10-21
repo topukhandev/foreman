@@ -1,8 +1,10 @@
-"""Desktop visual terminal emulator manager and worker session launcher.
+"""Desktop visual terminal emulator manager and persistent worker session launcher.
 Spawns visible terminal windows (e.g. GNOME Terminal, x-terminal-emulator, Konsole)
-so users can visually inspect AI CLI workers running in real time.
+that stay open across conversation turns so AI context is retained and users can visually
+inspect AI CLI workers in real time.
 """
 
+import atexit
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -91,7 +93,6 @@ def detect_desktop_terminal() -> Optional[TerminalEmulatorInfo]:
 
 def can_launch_visual_terminal() -> bool:
     """Return True if visual terminal execution is enabled and supported in this environment."""
-    # Check env override
     env_override = os.environ.get("FOREMAN_VISUAL_TERMINAL", "1").strip().lower()
     if env_override in ("0", "false", "no", "off"):
         return False
@@ -121,7 +122,6 @@ def create_visual_runner_script(
     quoted_code = shlex.quote(code_path)
     quoted_pid = shlex.quote(pid_path)
 
-    # Ensure PATH inside the visual terminal includes user bin and NVM
     current_path = os.environ.get("PATH", "")
     home = os.path.expanduser("~")
     path_extras = [
@@ -159,12 +159,10 @@ echo ""
 export PATH="{extended_path}"
 cd {quoted_cwd} || exit 1
 
-# Execute command in background so we can record its PID and handle interrupts
 ({quoted_cmd}) 2>&1 | tee {quoted_out} &
 MAIN_PID=$!
 echo $MAIN_PID > {quoted_pid}
 
-# Wait for worker process to complete
 wait $MAIN_PID
 EXIT_CODE=$?
 echo $EXIT_CODE > {quoted_code}
@@ -188,7 +186,278 @@ fi
     return script_path
 
 
-def launch_visual_worker(
+def _read_file_text(path: str) -> str:
+    """Safely read and return text from file."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+@dataclass
+class VisualSession:
+    """Represents a persistent desktop visual terminal session for an AI worker."""
+    key: str
+    worker_name: str
+    session_dir: str
+    script_path: str
+    proc: Optional[subprocess.Popen] = None
+    pid: Optional[int] = None
+
+    def is_alive(self) -> bool:
+        """Return True if the terminal window process or bash runner is still alive."""
+        if self.proc is not None and self.proc.poll() is not None:
+            return False
+
+        pid_file = os.path.join(self.session_dir, "session.pid")
+        if os.path.exists(pid_file):
+            try:
+                pid = int(_read_file_text(pid_file))
+                self.pid = pid
+                os.kill(pid, 0)
+                return True
+            except (ValueError, ProcessLookupError, PermissionError):
+                return False
+
+        return self.proc is not None and self.proc.poll() is None
+
+    def kill_active_task(self) -> None:
+        """Kill the currently active inner task process if any."""
+        pid_file = os.path.join(self.session_dir, "task.pid")
+        if os.path.exists(pid_file):
+            try:
+                tpid = int(_read_file_text(pid_file))
+                os.kill(tpid, signal.SIGTERM)
+                time.sleep(0.1)
+                os.kill(tpid, signal.SIGKILL)
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Gracefully close the terminal window and clean up session directory."""
+        close_trigger = os.path.join(self.session_dir, "close_trigger")
+        try:
+            open(close_trigger, "w").close()
+        except Exception:
+            pass
+
+        if self.proc is not None:
+            try:
+                self.proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self.proc.terminate()
+                except Exception:
+                    pass
+
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except Exception:
+                pass
+
+        try:
+            shutil.rmtree(self.session_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+class VisualSessionManager:
+    """Singleton manager tracking persistent desktop terminal windows across turns."""
+
+    _instance: Optional["VisualSessionManager"] = None
+
+    def __init__(self):
+        self._sessions: Dict[str, VisualSession] = {}
+
+    @classmethod
+    def get_instance(cls) -> "VisualSessionManager":
+        if cls._instance is None:
+            cls._instance = VisualSessionManager()
+        return cls._instance
+
+    def get_session(self, key: str) -> Optional[VisualSession]:
+        session = self._sessions.get(key)
+        if session and session.is_alive():
+            return session
+        if session:
+            session.close()
+            del self._sessions[key]
+        return None
+
+    def start_session(
+        self,
+        key: str,
+        worker_name: str,
+        cwd: str,
+        title: Optional[str] = None
+    ) -> Optional[VisualSession]:
+        emulator = detect_desktop_terminal()
+        if not emulator:
+            return None
+
+        if key in self._sessions:
+            self._sessions[key].close()
+            del self._sessions[key]
+
+        session_dir = tempfile.mkdtemp(prefix=f"foreman_vsession_{worker_name}_")
+        window_title = title or f"Foreman AI Worker: [{worker_name}]"
+
+        current_path = os.environ.get("PATH", "")
+        home = os.path.expanduser("~")
+        path_extras = [
+            os.path.join(home, ".local/bin"),
+            os.path.join(home, ".nvm/versions/node/v24.14.1/bin"),
+        ]
+        extended_path = ":".join(path_extras + [current_path])
+        quoted_cwd = shlex.quote(cwd)
+
+        runner_script_content = f"""#!/bin/bash
+# Foreman Orchestrator - Persistent AI Worker Terminal Session
+set -o pipefail
+
+CYAN='\\033[1;36m'
+GREEN='\\033[1;32m'
+YELLOW='\\033[1;33m'
+RED='\\033[1;31m'
+GRAY='\\033[90m'
+WHITE='\\033[1;37m'
+RESET='\\033[0m'
+
+export PATH="{extended_path}"
+cd {quoted_cwd} || exit 1
+
+SESSION_DIR="{session_dir}"
+echo $$ > "$SESSION_DIR/session.pid"
+touch "$SESSION_DIR/ready"
+
+clear
+echo -e "${{CYAN}}╔════════════════════════════════════════════════════════════════════════════╗${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  ${{GREEN}}🤖 FOREMAN AI WORKER — PERSISTENT SESSION${{RESET}} : ${{WHITE}}[{worker_name}]${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  Directory : ${{GRAY}}{cwd}${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  Status    : ${{GREEN}}ACTIVE & READY FOR ORCHESTRATOR TASKS${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  Context   : ${{WHITE}}Preserved Across Turns (Window Kept Open)${{RESET}}"
+echo -e "${{CYAN}}╚════════════════════════════════════════════════════════════════════════════╝${{RESET}}"
+echo ""
+echo -e "${{GRAY}}This terminal window stays open across conversation turns so AI context is retained.${{RESET}}"
+echo -e "${{GRAY}}Foreman commands and agent outputs will run and stream here in real time.${{RESET}}"
+echo ""
+
+while true; do
+    echo -e "${{GRAY}}⏳ Waiting for next instruction from Orchestrator...${{RESET}}"
+    echo "idle" > "$SESSION_DIR/status"
+
+    while true; do
+        if [ -f "$SESSION_DIR/close_trigger" ]; then
+            echo ""
+            echo -e "${{YELLOW}}👋 Session closed by Orchestrator. Exiting window...${{RESET}}"
+            sleep 1
+            exit 0
+        fi
+        if [ -f "$SESSION_DIR/task_trigger" ]; then
+            rm -f "$SESSION_DIR/task_trigger"
+            break
+        fi
+        sleep 0.05
+    done
+
+    TASK_SH="$SESSION_DIR/run_task.sh"
+    if [ ! -f "$TASK_SH" ]; then
+        continue
+    fi
+
+    echo "running" > "$SESSION_DIR/status"
+    chmod +x "$TASK_SH"
+    bash "$TASK_SH"
+    EXIT_CODE=$?
+    echo $EXIT_CODE > "$SESSION_DIR/task_done"
+    echo "idle" > "$SESSION_DIR/status"
+
+    echo ""
+    echo -e "${{GRAY}}────────────────────────────────────────────────────────────────────────────${{RESET}}"
+    if [ $EXIT_CODE -eq 0 ]; then
+        echo -e "${{GREEN}}✓ Task completed successfully.${{RESET}}"
+    else
+        echo -e "${{RED}}✗ Task completed with exit code $EXIT_CODE.${{RESET}}"
+    fi
+    echo -e "${{GRAY}}⏳ Session kept open — waiting for next instruction from Orchestrator...${{RESET}}"
+    echo ""
+done
+"""
+        runner_sh = os.path.join(session_dir, "session_runner.sh")
+        with open(runner_sh, "w", encoding="utf-8") as f:
+            f.write(runner_script_content)
+        os.chmod(runner_sh, stat.S_IRWXU)
+
+        term_cmd = emulator.args_builder(window_title, runner_sh)
+        try:
+            proc = subprocess.Popen(term_cmd)
+        except Exception:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            return None
+
+        ready_file = os.path.join(session_dir, "ready")
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if os.path.exists(ready_file):
+                break
+            if proc.poll() is not None:
+                shutil.rmtree(session_dir, ignore_errors=True)
+                return None
+            time.sleep(0.05)
+
+        if not os.path.exists(ready_file):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            shutil.rmtree(session_dir, ignore_errors=True)
+            return None
+
+        session = VisualSession(
+            key=key,
+            worker_name=worker_name,
+            session_dir=session_dir,
+            script_path=runner_sh,
+            proc=proc
+        )
+        pid_file = os.path.join(session_dir, "session.pid")
+        val = _read_file_text(pid_file)
+        if val:
+            try:
+                session.pid = int(val)
+            except Exception:
+                pass
+
+        self._sessions[key] = session
+        return session
+
+    def close_session(self, key: str) -> None:
+        session = self._sessions.pop(key, None)
+        if session:
+            session.close()
+
+    def close_all(self) -> None:
+        for key in list(self._sessions.keys()):
+            self.close_session(key)
+
+
+def close_all_visual_sessions() -> None:
+    """Close all active persistent visual worker terminal windows."""
+    VisualSessionManager.get_instance().close_all()
+
+
+def close_visual_session(key: str) -> None:
+    """Close a specific persistent visual worker terminal window."""
+    VisualSessionManager.get_instance().close_session(key)
+
+
+# Auto-cleanup on process termination
+atexit.register(close_all_visual_sessions)
+
+
+def _launch_oneshot_visual_worker(
     cmd: List[str],
     cwd: str,
     title: str,
@@ -199,15 +468,11 @@ def launch_visual_worker(
     show_progress: bool = True,
     progress_label: Optional[str] = None
 ) -> Optional[Any]:
-    """
-    Execute a worker command inside a visible desktop terminal window.
-    Returns ExecutionResult or None if desktop terminal is not available.
-    """
+    """Fallback runner for single-shot ephemeral visual terminal."""
     emulator = detect_desktop_terminal()
     if not emulator:
         return None
 
-    # Import ExecutionResult here to avoid circular dependencies
     from orchestrator.adapters.base import ExecutionResult
 
     out_file = tempfile.mktemp(prefix="foreman_out_")
@@ -248,9 +513,7 @@ def launch_visual_worker(
                 idx += 1
                 time.sleep(0.1)
 
-            # Check timeout
             if proc.poll() is None:
-                # Terminate inner worker process using recorded PID
                 if os.path.exists(pid_file):
                     try:
                         pid = int(open(pid_file).read().strip())
@@ -277,7 +540,6 @@ def launch_visual_worker(
             duration = time.time() - start_time
             proc.wait()
 
-            # Read exit code from code_file
             exit_code = 0
             if os.path.exists(code_file):
                 try:
@@ -285,7 +547,6 @@ def launch_visual_worker(
                 except Exception:
                     exit_code = 1
             else:
-                # Window was closed manually before exit code written
                 exit_code = 130
 
             output_content = ""
@@ -311,10 +572,8 @@ def launch_visual_worker(
             )
 
         else:
-            # Non-interactive / headless stdout
             proc.wait(timeout=timeout_sec)
             duration = time.time() - start_time
-
             exit_code = 0
             if os.path.exists(code_file):
                 try:
@@ -355,10 +614,239 @@ def launch_visual_worker(
             duration_sec=time.time() - start_time
         )
     finally:
-        # Cleanup temporary files
         for fpath in [script_path, out_file, code_file, pid_file]:
             if os.path.exists(fpath):
                 try:
                     os.remove(fpath)
                 except Exception:
                     pass
+
+
+def launch_visual_worker(
+    cmd: List[str],
+    cwd: str,
+    title: str,
+    worker_name: str,
+    task_id: str = "general",
+    role: str = "worker",
+    timeout_sec: int = 300,
+    show_progress: bool = True,
+    progress_label: Optional[str] = None,
+    session_id: Optional[str] = None
+) -> Optional[Any]:
+    """
+    Execute a worker command inside a visible desktop terminal window.
+    Maintains a persistent terminal window across turns so AI context is retained.
+    Returns ExecutionResult or None if desktop terminal is not available.
+    """
+    emulator = detect_desktop_terminal()
+    if not emulator:
+        return None
+
+    from orchestrator.adapters.base import ExecutionResult
+
+    manager = VisualSessionManager.get_instance()
+    session_key = worker_name
+
+    session = manager.get_session(session_key)
+    if not session:
+        session = manager.start_session(
+            key=session_key,
+            worker_name=worker_name,
+            cwd=cwd,
+            title=f"Foreman Worker: [{worker_name}]"
+        )
+        if not session:
+            return _launch_oneshot_visual_worker(
+                cmd=cmd, cwd=cwd, title=title, worker_name=worker_name,
+                task_id=task_id, role=role, timeout_sec=timeout_sec,
+                show_progress=show_progress, progress_label=progress_label
+            )
+
+    session_dir = session.session_dir
+    task_done_file = os.path.join(session_dir, "task_done")
+    task_out_file = os.path.join(session_dir, "task_out.log")
+    task_pid_file = os.path.join(session_dir, "task.pid")
+    task_trigger = os.path.join(session_dir, "task_trigger")
+
+    for p in [task_done_file, task_out_file]:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    quoted_cmd = " ".join(shlex.quote(arg) for arg in cmd)
+    display_cmd = quoted_cmd if len(quoted_cmd) <= 80 else quoted_cmd[:77] + "..."
+    quoted_cwd = shlex.quote(cwd)
+
+    task_script = f"""#!/bin/bash
+cd {quoted_cwd} || exit 1
+CYAN='\\033[1;36m'
+YELLOW='\\033[1;33m'
+WHITE='\\033[1;37m'
+GRAY='\\033[90m'
+RESET='\\033[0m'
+
+echo -e "${{CYAN}}╔════════════════════════════════════════════════════════════════════════════╗${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  ${{YELLOW}}▶ [{role.upper()}]${{RESET}} Task #{task_id}: ${{WHITE}}{title[:45]}${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  Command : ${{GRAY}}{display_cmd}${{RESET}}"
+echo -e "${{CYAN}}╚════════════════════════════════════════════════════════════════════════════╝${{RESET}}"
+echo ""
+
+({quoted_cmd}) 2>&1 | tee "{task_out_file}" &
+MAIN_PID=$!
+echo $MAIN_PID > "{task_pid_file}"
+wait $MAIN_PID
+EXIT_CODE=${{PIPESTATUS[0]}}
+rm -f "{task_pid_file}"
+exit $EXIT_CODE
+"""
+    task_sh = os.path.join(session_dir, "run_task.sh")
+    with open(task_sh, "w", encoding="utf-8") as f:
+        f.write(task_script)
+    os.chmod(task_sh, stat.S_IRWXU)
+
+    # Signal persistent session loop to execute task
+    open(task_trigger, "w").close()
+
+    start_time = time.time()
+    lbl = progress_label or worker_name
+
+    try:
+        if show_progress and sys.stdout.isatty():
+            spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            idx = 0
+            while not os.path.exists(task_done_file):
+                elapsed = time.time() - start_time
+                if elapsed > timeout_sec:
+                    break
+
+                if not session.is_alive():
+                    break
+
+                sys.stdout.write(
+                    f"\r\033[K\033[1;36m{spinner[idx % len(spinner)]} [{lbl}]\033[0m "
+                    f"Running in visible terminal ({emulator.name})... ({elapsed:.1f}s)"
+                )
+                sys.stdout.flush()
+                idx += 1
+                time.sleep(0.1)
+
+            elapsed = time.time() - start_time
+
+            if not os.path.exists(task_done_file):
+                if not session.is_alive():
+                    sys.stdout.write(f"\r\033[K\033[1;33m! [{lbl}]\033[0m Visual window was closed by user.\n\n")
+                    sys.stdout.flush()
+                    manager.close_session(session_key)
+                    return ExecutionResult(
+                        success=False,
+                        output="",
+                        error="Visual worker terminal was closed.",
+                        exit_code=130,
+                        duration_sec=elapsed
+                    )
+                else:
+                    session.kill_active_task()
+                    sys.stdout.write(f"\r\033[K\033[1;31m✗ [{lbl}]\033[0m Timed out after {timeout_sec}s\n\n")
+                    sys.stdout.flush()
+                    return ExecutionResult(
+                        success=False,
+                        output="",
+                        error=f"Visual worker timed out after {timeout_sec}s",
+                        exit_code=124,
+                        duration_sec=elapsed
+                    )
+
+            exit_code = 0
+            code_str = _read_file_text(task_done_file)
+            if code_str:
+                try:
+                    exit_code = int(code_str)
+                except Exception:
+                    exit_code = 1
+
+            output_content = ""
+            if os.path.exists(task_out_file):
+                try:
+                    with open(task_out_file, "r", encoding="utf-8", errors="replace") as f:
+                        output_content = f.read()
+                except Exception:
+                    pass
+
+            if exit_code == 0:
+                sys.stdout.write(f"\r\033[K\033[1;32m✓ [{lbl}]\033[0m Responded in {elapsed:.1f}s\n\n")
+            else:
+                sys.stdout.write(f"\r\033[K\033[1;31m✗ [{lbl}]\033[0m Finished with code {exit_code} ({elapsed:.1f}s)\n\n")
+            sys.stdout.flush()
+
+            return ExecutionResult(
+                success=(exit_code == 0),
+                output=output_content,
+                error=None if exit_code == 0 else f"Visual worker exited with code {exit_code}",
+                exit_code=exit_code,
+                duration_sec=elapsed
+            )
+
+        else:
+            deadline = time.time() + timeout_sec
+            while time.time() < deadline:
+                if os.path.exists(task_done_file):
+                    break
+                if not session.is_alive():
+                    break
+                time.sleep(0.1)
+
+            elapsed = time.time() - start_time
+            if not os.path.exists(task_done_file):
+                if not session.is_alive():
+                    manager.close_session(session_key)
+                    return ExecutionResult(
+                        success=False,
+                        output="",
+                        error="Visual worker terminal was closed.",
+                        exit_code=130,
+                        duration_sec=elapsed
+                    )
+                session.kill_active_task()
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    error=f"Visual worker timed out after {timeout_sec}s",
+                    exit_code=124,
+                    duration_sec=elapsed
+                )
+
+            exit_code = 0
+            code_str = _read_file_text(task_done_file)
+            if code_str:
+                try:
+                    exit_code = int(code_str)
+                except Exception:
+                    exit_code = 1
+
+            output_content = ""
+            if os.path.exists(task_out_file):
+                try:
+                    with open(task_out_file, "r", encoding="utf-8", errors="replace") as f:
+                        output_content = f.read()
+                except Exception:
+                    pass
+
+            return ExecutionResult(
+                success=(exit_code == 0),
+                output=output_content,
+                error=None if exit_code == 0 else f"Visual worker exited with code {exit_code}",
+                exit_code=exit_code,
+                duration_sec=elapsed
+            )
+
+    except Exception as e:
+        return ExecutionResult(
+            success=False,
+            output="",
+            error=f"Visual worker error: {str(e)}",
+            exit_code=-1,
+            duration_sec=time.time() - start_time
+        )

@@ -169,6 +169,8 @@ class InteractiveShell:
                 blockers=[],
                 default_provider=new_active
             )
+            from orchestrator.terminal import close_all_visual_sessions
+            close_all_visual_sessions()
             self.session_id = str(uuid.uuid4())
             self.session_turns = 0
             print(f"\n\033[1;32m[OK]\033[0m Switched default AI provider to: \033[1;36m{new_active}\033[0m\n")
@@ -209,6 +211,10 @@ class InteractiveShell:
                 self.config_mtime = os.path.getmtime(self.config_path)
             except Exception:
                 pass
+
+        if not self.visual_mode:
+            from orchestrator.terminal import close_all_visual_sessions
+            close_all_visual_sessions()
 
         # Update hub/state.md with worker visibility
         self.hub.write_state(
@@ -282,6 +288,8 @@ class InteractiveShell:
 
     def handle_new_session(self) -> None:
         """Start a fresh conversation thread with active AI worker."""
+        from orchestrator.terminal import close_all_visual_sessions
+        close_all_visual_sessions()
         self.session_id = str(uuid.uuid4())
         self.session_turns = 0
         print("\n\033[1;32m[OK]\033[0m Started a fresh conversation thread with active AI worker.\n")
@@ -597,94 +605,98 @@ class InteractiveShell:
         """Main interactive REPL loop."""
         self.render_banner()
 
-        while True:
-            try:
-                print()
-                active_p = self._get_active_provider_name()
-                prompt = f"\033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[{active_p}]\033[0m › "
-                line = read_interactive_line(prompt=prompt)
-            except (EOFError, KeyboardInterrupt):
-                print("\nExiting orchestrator. Goodbye!")
-                break
-
-            if not line:
-                continue
-
-            # Slash commands
-            if line.startswith("/"):
-                cmd_parts = line.split()
-                cmd = cmd_parts[0].lower()
-                arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
-
-                # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
-                all_cmds = ["/run", "/new", "/provider", "/visual", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
-                matches = [c for c in all_cmds if c.startswith(cmd)]
-                if len(matches) == 1:
-                    cmd = matches[0]
-
-                if cmd in ("/exit", "/quit"):
-                    print("Exiting orchestrator. Goodbye!")
+        try:
+            while True:
+                try:
+                    print()
+                    active_p = self._get_active_provider_name()
+                    prompt = f"\033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[{active_p}]\033[0m › "
+                    line = read_interactive_line(prompt=prompt)
+                except (EOFError, KeyboardInterrupt):
+                    print("\nExiting orchestrator. Goodbye!")
                     break
-                elif cmd == "/run":
-                    self.handle_run_command(arg)
-                elif cmd == "/new":
-                    self.handle_new_session()
-                elif cmd == "/clear":
-                    os.system("clear" if os.name != "nt" else "cls")
-                    self.render_banner()
-                elif cmd == "/help":
-                    self.print_slash_menu()
-                elif cmd == "/status":
-                    state = self.hub.read_state()
-                    print("\n" + render_markdown(state or "No active state found."))
-                elif cmd == "/tasks":
-                    self.handle_tasks_menu()
-                elif cmd == "/provider":
-                    self.handle_provider_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
-                elif cmd == "/visual":
-                    self.handle_visual_toggle(cmd_parts[1] if len(cmd_parts) > 1 else "")
-                elif cmd == "/link":
-                    self.handle_link_menu(cmd_parts[1:])
-                elif cmd == "/pack":
-                    self.handle_pack_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
-                elif cmd == "/doctor":
-                    report = SetupDoctor.render_report(self.config)
-                    print("\n" + report)
+
+                if not line:
+                    continue
+
+                # Slash commands
+                if line.startswith("/"):
+                    cmd_parts = line.split()
+                    cmd = cmd_parts[0].lower()
+                    arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
+
+                    # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
+                    all_cmds = ["/run", "/new", "/provider", "/visual", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
+                    matches = [c for c in all_cmds if c.startswith(cmd)]
+                    if len(matches) == 1:
+                        cmd = matches[0]
+
+                    if cmd in ("/exit", "/quit"):
+                        print("Exiting orchestrator. Goodbye!")
+                        break
+                    elif cmd == "/run":
+                        self.handle_run_command(arg)
+                    elif cmd == "/new":
+                        self.handle_new_session()
+                    elif cmd == "/clear":
+                        os.system("clear" if os.name != "nt" else "cls")
+                        self.render_banner()
+                    elif cmd == "/help":
+                        self.print_slash_menu()
+                    elif cmd == "/status":
+                        state = self.hub.read_state()
+                        print("\n" + render_markdown(state or "No active state found."))
+                    elif cmd == "/tasks":
+                        self.handle_tasks_menu()
+                    elif cmd == "/provider":
+                        self.handle_provider_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
+                    elif cmd == "/visual":
+                        self.handle_visual_toggle(cmd_parts[1] if len(cmd_parts) > 1 else "")
+                    elif cmd == "/link":
+                        self.handle_link_menu(cmd_parts[1:])
+                    elif cmd == "/pack":
+                        self.handle_pack_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
+                    elif cmd == "/doctor":
+                        report = SetupDoctor.render_report(self.config)
+                        print("\n" + report)
+                    else:
+                        print(f"Unknown command '{cmd}'. Available commands:")
+                        self.print_slash_menu(cmd)
+
                 else:
-                    print(f"Unknown command '{cmd}'. Available commands:")
-                    self.print_slash_menu(cmd)
-
-            else:
-                # 1. Check for natural language provider switch/selection intent
-                provider_intent = self._detect_provider_intent(line)
-                if provider_intent is not None:
-                    self.handle_provider_menu(provider_intent)
-                    continue
-
-                # 2. Check for natural language visual terminal configuration intent
-                visual_intent = self._detect_visual_intent(line)
-                if visual_intent is not None:
-                    self.handle_visual_toggle(visual_intent)
-                    continue
-
-                # 3. Fast local operational query (who are you, where am i)
-                if self.handle_lightweight_query(line):
-                    continue
-
-                # 3. If user specifically asks to run/build/implement a full project feature:
-                lower = line.strip().lower()
-                if (lower.startswith("run ") or lower.startswith("build ") or 
-                    lower.startswith("implement ") or lower.startswith("create a ")):
-                    options = [
-                        ("1", "Run full 4-agent sprint (Planner -> Critic -> Builder -> Reviewer)"),
-                        ("2", "Ask AI worker directly (Chat / Consult)")
-                    ]
-                    choice = select_from_menu(f"? Detected action request: '{line}'", options, default_index=1)
-                    if not choice:
-                        continue
-                    if choice == "1":
-                        self.execute_goal(line)
+                    # 1. Check for natural language provider switch/selection intent
+                    provider_intent = self._detect_provider_intent(line)
+                    if provider_intent is not None:
+                        self.handle_provider_menu(provider_intent)
                         continue
 
-                # 4. Natural Language query -> Bridge directly to active AI Provider!
-                self.bridge_to_ai_provider(line)
+                    # 2. Check for natural language visual terminal configuration intent
+                    visual_intent = self._detect_visual_intent(line)
+                    if visual_intent is not None:
+                        self.handle_visual_toggle(visual_intent)
+                        continue
+
+                    # 3. Fast local operational query (who are you, where am i)
+                    if self.handle_lightweight_query(line):
+                        continue
+
+                    # 3. If user specifically asks to run/build/implement a full project feature:
+                    lower = line.strip().lower()
+                    if (lower.startswith("run ") or lower.startswith("build ") or 
+                        lower.startswith("implement ") or lower.startswith("create a ")):
+                        options = [
+                            ("1", "Run full 4-agent sprint (Planner -> Critic -> Builder -> Reviewer)"),
+                            ("2", "Ask AI worker directly (Chat / Consult)")
+                        ]
+                        choice = select_from_menu(f"? Detected action request: '{line}'", options, default_index=1)
+                        if not choice:
+                            continue
+                        if choice == "1":
+                            self.execute_goal(line)
+                            continue
+
+                    # 4. Natural Language query -> Bridge directly to active AI Provider!
+                    self.bridge_to_ai_provider(line)
+        finally:
+            from orchestrator.terminal import close_all_visual_sessions
+            close_all_visual_sessions()

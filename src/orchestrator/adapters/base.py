@@ -96,7 +96,8 @@ class BaseCLIAdapter:
                         role=role,
                         timeout_sec=self.timeout_sec,
                         show_progress=show_progress,
-                        progress_label=lbl
+                        progress_label=lbl,
+                        session_id=session_id
                     )
                     if vis_res is not None:
                         return vis_res
