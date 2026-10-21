@@ -390,6 +390,134 @@ class TestInputReader(unittest.TestCase):
             self.assertEqual(os.waitstatus_to_exitcode(status), 0)
             self.assertIn(f"RESULT:{long_goal}".encode("utf-8"), output)
 
+    def test_horizontal_cursor_movement_and_insertion(self):
+        """Test moving cursor left with arrow keys and inserting character into middle of text."""
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+            res = read_interactive_line()
+            print(f"RESULT:{res}")
+            os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            # Type "hell world", Left Arrow 6 times, type "o", Enter
+            # Cursor was at pos 10, left 6 -> pos 4 (after 'hell'), type 'o' -> 'hello world'
+            seq = b"hell world\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[Do\r"
+            os.write(master, seq)
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 1024)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertIn(b"RESULT:hello world", output)
+
+    def test_backspace_and_delete_at_cursor(self):
+        """Test Backspace and Delete keys at specific cursor positions."""
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+            res = read_interactive_line()
+            print(f"RESULT:{res}")
+            os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            # Type "heXllo", Left Arrow 3 times (after 'X'), Backspace (deletes 'X'), Enter
+            seq = b"heXllo\x1b[D\x1b[D\x1b[D\x7f\r"
+            os.write(master, seq)
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 1024)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertIn(b"RESULT:hello", output)
+
+    def test_up_arrow_command_history_recall(self):
+        """Test recalling previously executed commands using Up Arrow."""
+        from orchestrator.input_reader import SESSION_HISTORY
+        SESSION_HISTORY.clear()
+        SESSION_HISTORY.append("echo first command")
+        SESSION_HISTORY.append("git status -s")
+
+        master, slave = pty.openpty()
+        pid = os.fork()
+
+        if pid == 0:
+            os.close(master)
+            os.setsid()
+            os.dup2(slave, 0)
+            os.dup2(slave, 1)
+            os.dup2(slave, 2)
+            os.close(slave)
+            res = read_interactive_line()
+            print(f"RESULT:{res}")
+            os._exit(0)
+        else:
+            os.close(slave)
+            import time
+            time.sleep(0.05)
+            # Press Up Arrow (\x1b[A) to recall "git status -s", then Enter (\r)
+            os.write(master, b"\x1b[A\r")
+            output = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 1.0)
+                if not r:
+                    break
+                try:
+                    d = os.read(master, 1024)
+                    if not d:
+                        break
+                    output += d
+                    if b"RESULT:" in output:
+                        break
+                except OSError:
+                    break
+            os.close(master)
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+            self.assertIn(b"RESULT:git status -s", output)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -769,7 +769,7 @@ exit $EXIT_CODE
                         success=False,
                         output="",
                         error=f"Visual worker timed out after {timeout_sec}s",
-                        exit_code=124,
+                        exit_code=-1,
                         duration_sec=elapsed
                     )
 
@@ -828,7 +828,7 @@ exit $EXIT_CODE
                     success=False,
                     output="",
                     error=f"Visual worker timed out after {timeout_sec}s",
-                    exit_code=124,
+                    exit_code=-1,
                     duration_sec=elapsed
                 )
 

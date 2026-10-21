@@ -286,25 +286,100 @@ class InteractiveShell:
             return ""  # Trigger interactive selector menu
         return None
 
+    def resolve_folder_path(self, text: str, default_dir: str) -> Optional[str]:
+        """
+        Resolve target directory from explicit paths (~/foo, /bar, ./baz) or natural language expressions
+        (e.g. 'home dir have a projects folder', 'in projects folder', 'desktop', 'documents', 'downloads').
+        """
+        import re
+        t_clean = text.strip()
+        if not t_clean:
+            return None
+
+        # 1. Explicit path match: /path, ~/path, ./path, C:\path
+        path_match = re.search(r'(?:^|\s|["\'])(~?/[\w\.\-/]+|\./[\w\.\-/]+|[A-Za-z]:\\[\w\.\-\\]+)', t_clean)
+        if path_match:
+            candidate = path_match.group(1).strip(" \t\n\r\"'?,.;:!")
+            return os.path.abspath(os.path.expanduser(candidate))
+
+        t_lower = t_clean.lower()
+        home_dir = os.path.expanduser("~")
+
+        # 2. "Here" / "current" / "এই প্রজেক্ট"
+        if re.search(r'\b(here|current\s*dir(?:ectory)?|this\s*dir(?:ectory)?|this\s*project)\b', t_lower) or \
+           re.search(r'(এখানে|এই\s*(?:প্রজেক্ট|ডিরেক্টরি|ফোল্ডার))', t_clean):
+            return default_dir
+
+        # 3. "projects" / "project" folder / "প্রজেক্ট"
+        if re.search(r'\bprojects?\b', t_lower) or "প্রজেক্ট" in t_clean:
+            candidates = [
+                os.path.join(home_dir, "projects"),
+                os.path.join(home_dir, "Projects"),
+                os.path.join(home_dir, "Desktop", "projects"),
+                os.path.join(default_dir, "projects")
+            ]
+            for c in candidates:
+                if os.path.isdir(c):
+                    return c
+            return os.path.join(home_dir, "projects")
+
+        # 4. "desktop" / "ডেস্কটপ"
+        if "desktop" in t_lower or "ডেস্কটপ" in t_clean:
+            return os.path.join(home_dir, "Desktop")
+
+        # 5. "downloads" / "ডাউনলোড"
+        if "download" in t_lower or "ডাউনলোড" in t_clean:
+            return os.path.join(home_dir, "Downloads")
+
+        # 6. "documents" / "ডকুমেন্ট"
+        if "document" in t_lower or "ডকুমেন্ট" in t_clean:
+            return os.path.join(home_dir, "Documents")
+
+        # 7. "development" / "dev"
+        if "development" in t_lower or "ডেভেলপমেন্ট" in t_clean:
+            c = os.path.join(home_dir, "development")
+            if os.path.isdir(c):
+                return c
+
+        # 8. Named folder under home directory
+        folder_match = re.search(r'(?:in|folder|directory|ফোল্ডার|ডিরেক্টরি)\s+([a-zA-Z0-9_\-]+)', t_clean, re.IGNORECASE)
+        if folder_match:
+            name = folder_match.group(1).strip()
+            if name.lower() not in ("a", "an", "the", "that", "this", "some", "my", "our", "one", "two", "three", "four", "five", "dir", "directory", "folder"):
+                home_sub = os.path.join(home_dir, name)
+                if os.path.isdir(home_sub):
+                    return home_sub
+
+        # 9. "home" / "হোম"
+        if re.search(r'\bhome\s*(?:dir(?:ectory)?)?\b', t_lower) or "হোম" in t_clean:
+            return home_dir
+
+        return None
+
     def _detect_spawn_terminals_intent(self, text: str) -> Optional[List[Dict[str, Any]]]:
         """
         Detect natural language request to open one or more worker terminal windows.
-        Supports Bengali and English phrasings, numbers, providers, and target directories.
+        Supports Bengali and English phrasings, numbers, providers, and per-tool target directories.
         """
         import re
         t = text.strip()
         t_lower = t.lower()
 
         # Check triggers
-        en_match = bool(re.search(r'\b(open|spawn|launch|start)\b.*?\b(terminals?|sessions?|windows?)\b', t_lower))
-        bn_match = bool(re.search(r'(টার্মিনাল|সেশন|উইন্ডো).*?(ওপেন|খোল|চালু|চালাও)', t) or re.search(r'(ওপেন|খোল|চালু).*?(টার্মিনাল|সেশন|উইন্ডো)', t))
+        en_match = bool(
+            re.search(r'\b(open|spawn|launch|start)\b.*?\b(terminals?|sessions?|windows?|claude|antigravity|agy|opencode|bash)\b', t_lower)
+        )
+        bn_match = bool(
+            re.search(r'(টার্মিনাল|সেশন|উইন্ডো|ক্লড|এজিআই|অ্যান্টিগ্রাভিটি|ওপেনকোড|ওপেন\s*কোড).*?(ওপেন|খোল|চালু|চালাও)', t) or
+            re.search(r'(ওপেন|খোল|চালু).*?(টার্মিনাল|সেশন|উইন্ডো|ক্লড|এজিআই|অ্যান্টিগ্রাভিটি|ওপেনকোড|ওপেন\s*কোড)', t)
+        )
 
         if not (en_match or bn_match):
             return None
 
         # Number map
         num_map = {
-            "এক": 1, "একটা": 1, "একটি": 1, "১": 1, "১টা": 1, "১টি": 1, "one": 1, "1": 1, "a": 1, "an": 1,
+            "এক": 1, "একটা": 1, "একটি": 1, "১": 1, "১টা": 1, "১টি": 1, "one": 1, "1": 1,
             "দুই": 2, "দুইটা": 2, "দুটো": 2, "দুটি": 2, "২": 2, "২টা": 2, "২টি": 2, "two": 2, "2": 2,
             "তিন": 3, "তিনটা": 3, "তিনটি": 3, "৩": 3, "৩টা": 3, "৩টি": 3, "three": 3, "3": 3,
             "চার": 4, "চারটা": 4, "চারটি": 4, "৪": 4, "৪টা": 4, "৪টি": 4, "four": 4, "4": 4,
@@ -326,51 +401,73 @@ class InteractiveShell:
             "bash": "bash", "shell": "bash"
         }
 
+        def _extract_count(clause_str: str) -> Tuple[int, bool]:
+            m_digit = re.search(r'\b(\d+)\b', clause_str)
+            if m_digit:
+                return int(m_digit.group(1)), True
+            for k, v in num_map.items():
+                if re.search(r'(^|\s|[^\w])' + re.escape(k) + r'($|\s|[^\w])', clause_str, re.IGNORECASE):
+                    return v, True
+            if re.search(r'\b(a|an)\s+(?:' + '|'.join(re.escape(k) for k in provider_map.keys()) + r'|terminal|session|window|worker)\b', clause_str, re.IGNORECASE):
+                return 1, True
+            return 1, False
+
         default_provider = self._get_active_provider_name()
         if default_provider == "mock":
             default_provider = "antigravity_cli"
 
-        clauses = re.split(r'[,;]|\band\b|\bএবং\b|\bআর\b', t)
+        clauses = re.split(r'[,;?!]|\band\b|\bএবং\b|\bআর\b|\n', t)
+        clauses_clean = [c.strip() for c in clauses if c.strip()]
+
+        # 1. Pre-scan for modifier clauses (clauses that bind a tool to a folder without specifying a count)
+        # e.g. "opencode will be open in home dir have a projects folder on that"
+        tool_dir_map: Dict[str, str] = {}
+        for c in clauses_clean:
+            c_low = c.lower()
+            _, has_cnt = _extract_count(c)
+            if not has_cnt:
+                c_dir = self.resolve_folder_path(c, self.project_dir)
+                if c_dir:
+                    for p_key, p_val in provider_map.items():
+                        if p_key in c_low or p_key in c:
+                            tool_dir_map[p_val] = c_dir
+
+        # 2. Extract requested terminals
         results = []
-
-        for c in clauses:
-            c_clean = c.strip()
-            if not c_clean:
-                continue
-
-            found_count = 1
-            has_explicit_count = False
-            m_digit = re.search(r'\b(\d+)\b', c_clean)
-            if m_digit:
-                found_count = int(m_digit.group(1))
-                has_explicit_count = True
-            else:
-                for k, v in num_map.items():
-                    if re.search(r'(^|\s|[^\w])' + re.escape(k) + r'($|\s|[^\w])', c_clean, re.IGNORECASE):
-                        found_count = v
-                        has_explicit_count = True
-                        break
+        for c_clean in clauses_clean:
+            found_count, has_explicit_count = _extract_count(c_clean)
 
             c_lower = c_clean.lower()
             detected_provider = default_provider
             has_explicit_provider = False
             for p_key, p_val in provider_map.items():
-                if p_key in c_lower:
+                if p_key in c_lower or p_key in c_clean:
                     detected_provider = p_val
                     has_explicit_provider = True
                     break
 
-            detected_dir = self.project_dir
-            path_match = re.search(r'(/[\w\.\-/~]+|~/[\w\.\-/~]+|[A-Za-z]:\\[\w\.\-\\]+)', c_clean)
-            if path_match:
-                detected_dir = os.path.abspath(os.path.expanduser(path_match.group(1)))
+            clause_dir = self.resolve_folder_path(c_clean, self.project_dir)
+
+            # If this clause was a pure modifier clause for a tool, don't spawn an extra terminal
+            if not has_explicit_count and has_explicit_provider and clause_dir:
+                for s in results:
+                    if s["provider"] == detected_provider:
+                        s["dir"] = clause_dir
+                continue
+
+            target_dir = clause_dir or tool_dir_map.get(detected_provider, self.project_dir)
 
             if has_explicit_count or has_explicit_provider or "টার্মিনাল" in c_clean or "terminal" in c_lower or "সেশন" in c_clean or "session" in c_lower:
                 results.append({
                     "provider": detected_provider,
                     "count": found_count,
-                    "dir": detected_dir
+                    "dir": target_dir
                 })
+
+        # Final pass: apply tool_dir_map if any result is still pointing to default
+        for r in results:
+            if r["dir"] == self.project_dir and r["provider"] in tool_dir_map:
+                r["dir"] = tool_dir_map[r["provider"]]
 
         if results:
             return results
@@ -380,10 +477,11 @@ class InteractiveShell:
             if re.search(r'(^|\s|[^\w])' + re.escape(k) + r'($|\s|[^\w])', t, re.IGNORECASE):
                 overall_count = v
                 break
+        overall_dir = self.resolve_folder_path(t, self.project_dir) or self.project_dir
         return [{
             "provider": default_provider,
             "count": overall_count,
-            "dir": self.project_dir
+            "dir": overall_dir
         }]
 
     def open_requested_terminals(self, specs: List[Dict[str, Any]]) -> None:
@@ -420,9 +518,21 @@ class InteractiveShell:
 
         if spawned:
             counts: Dict[str, int] = {}
+            tool_dirs: Dict[str, str] = {}
             for t in spawned:
                 counts[t.tool_name] = counts.get(t.tool_name, 0) + 1
-            parts = [f"{cnt}x {tool}" for tool, cnt in counts.items()]
+                tool_dirs[t.tool_name] = t.cwd
+            parts = []
+            home = os.path.expanduser("~")
+            for tool, cnt in counts.items():
+                cwd = tool_dirs.get(tool, self.project_dir)
+                if cwd == self.project_dir:
+                    pretty_cwd = os.path.basename(cwd)
+                elif cwd.startswith(home):
+                    pretty_cwd = "~" + cwd[len(home):]
+                else:
+                    pretty_cwd = cwd
+                parts.append(f"{cnt}x {tool} ({pretty_cwd})")
             print(f"\n\033[1;32m✓ Opened {len(spawned)} terminal window(s):\033[0m {', '.join(parts)}")
 
     def handle_system_status(self) -> None:

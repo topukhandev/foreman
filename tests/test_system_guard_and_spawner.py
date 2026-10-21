@@ -176,10 +176,33 @@ budget:
         self.assertIsNotNone(r3)
         self.assertEqual(r3[0]["count"], 4)
 
-        # Query 4: Regular inquiry should return None
-        q4 = "How does the system work?"
+        # Query 4: User prompt with natural language directory mapping
+        q4 = "can you open 2 opencode and 1 agy terminal? opencode will be open in home dir have a projects folder on that"
         r4 = shell._detect_spawn_terminals_intent(q4)
-        self.assertIsNone(r4)
+        self.assertIsNotNone(r4)
+        self.assertEqual(len(r4), 2)
+        # Find opencode spec
+        oc_spec = [s for s in r4 if s["provider"] == "opencode"][0]
+        agy_spec = [s for s in r4 if s["provider"] == "antigravity_cli"][0]
+        self.assertEqual(oc_spec["count"], 2)
+        self.assertTrue(oc_spec["dir"].endswith("projects"))
+        self.assertEqual(agy_spec["count"], 1)
+        self.assertEqual(agy_spec["dir"], self.test_dir)
+
+        # Query 5: Natural language project folder and desktop
+        q5 = "open 2 opencode in projects folder and 1 claude in desktop"
+        r5 = shell._detect_spawn_terminals_intent(q5)
+        self.assertIsNotNone(r5)
+        self.assertEqual(len(r5), 2)
+        self.assertEqual(r5[0]["provider"], "opencode")
+        self.assertTrue(r5[0]["dir"].endswith("projects"))
+        self.assertEqual(r5[1]["provider"], "claude_code")
+        self.assertTrue(r5[1]["dir"].endswith("Desktop"))
+
+        # Query 6: Regular inquiry should return None
+        q6 = "How does the system work?"
+        r6 = shell._detect_spawn_terminals_intent(q6)
+        self.assertIsNone(r6)
 
     def test_spawn_terminals_batch_execution(self):
         """Verify batch terminal spawning with mock emulator."""

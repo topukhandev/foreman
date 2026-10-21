@@ -66,12 +66,44 @@ def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int,
     return "\n".join(lines), len(lines), selected_cmd
 
 
+_HISTORY_FILE = os.path.expanduser("~/.foreman_history")
+SESSION_HISTORY: List[str] = []
+
+
+def _load_history() -> None:
+    """Load persistent command history from disk."""
+    global SESSION_HISTORY
+    if not SESSION_HISTORY and os.path.isfile(_HISTORY_FILE):
+        try:
+            with open(_HISTORY_FILE, "r", encoding="utf-8", errors="replace") as f:
+                lines = [line.rstrip("\r\n") for line in f if line.strip()]
+                SESSION_HISTORY = lines[-1000:]
+        except Exception:
+            pass
+
+
+def _append_history(line: str) -> None:
+    """Append a command line to in-memory and persistent history."""
+    line = line.strip()
+    if not line:
+        return
+    if not SESSION_HISTORY or SESSION_HISTORY[-1] != line:
+        SESSION_HISTORY.append(line)
+        try:
+            with open(_HISTORY_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+
 def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrator\033[0m › ") -> str:
     """
     Read line with live character-by-character slash dropdown, arrow key navigation,
+    persistent command history recall (Up/Down arrows), full cursor movement (Left/Right arrows),
     and glitch-free long text pasting across wrapped terminal rows.
     Falls back to sys.stdin.readline() if not a TTY.
     """
+    _load_history()
     # Guarantee prompt never has embedded newlines that would cause scroll-jump during redraw
     prompt = prompt.replace("\r", "").replace("\n", "")
 
@@ -81,7 +113,9 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
         line = sys.stdin.readline()
         if not line:
             raise EOFError
-        return line.strip()
+        ret = line.strip()
+        _append_history(ret)
+        return ret
 
     import termios
     import tty
@@ -89,8 +123,11 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     buf: List[str] = []
+    cursor_pos: int = 0
+    history_index: int = len(SESSION_HISTORY)
+    scratch_buffer: str = ""
     dropdown_lines = 0
-    last_rendered_rows = 0
+    last_rendered_cursor_row = 0
     selected_idx = 0
     active_matches_count = 0
     current_selected_cmd: Optional[str] = None
@@ -117,33 +154,43 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
             current_selected_cmd = None
 
     def redraw():
-        nonlocal dropdown_lines, last_rendered_rows
+        nonlocal dropdown_lines, last_rendered_cursor_row
         cols = shutil.get_terminal_size(fallback=(80, 24)).columns
         if cols < 20:
             cols = 80
 
         # If dropdown was visible previously, cursor was already restored to prompt row.
-        # Otherwise, move cursor up by previously rendered wrapped rows.
+        # Otherwise, move cursor up by previously rendered wrapped cursor rows.
         if dropdown_lines > 0:
             dropdown_lines = 0
-        elif last_rendered_rows > 0:
-            sys.stdout.write(f"\033[{last_rendered_rows}A")
+        elif last_rendered_cursor_row > 0:
+            sys.stdout.write(f"\033[{last_rendered_cursor_row}A")
 
         curr_text = "".join(buf)
         sys.stdout.write("\r\033[J" + prompt + curr_text)
 
         total_len = clean_prompt_len + len(curr_text)
-        last_rendered_rows = (total_len - 1) // cols if total_len > 0 else 0
+        end_row = (total_len - 1) // cols if total_len > 0 else 0
 
         # Render floating dropdown box below cursor if command prefix is active
         if active_matches_count > 0 and curr_text.startswith("/") and not dropdown_dismissed and " " not in curr_text:
             box_str, num_lines, _ = render_dropdown_box(curr_text, selected_idx)
             dropdown_lines = num_lines
             sys.stdout.write(box_str)
-            # Move cursor back up to the input line at correct column
-            target_col = clean_prompt_len + len(curr_text)
-            sys.stdout.write(f"\033[{num_lines}A\r\033[{target_col}C")
+            # Move cursor back up to the end_row
+            sys.stdout.write(f"\033[{num_lines}A")
 
+        # Position cursor at cursor_pos
+        cursor_total = clean_prompt_len + cursor_pos
+        target_row = (cursor_total - 1) // cols if cursor_total > 0 else 0
+        target_col = cursor_total % cols if cols > 0 else cursor_total
+
+        rows_up = end_row - target_row
+        if rows_up > 0:
+            sys.stdout.write(f"\033[{rows_up}A")
+        sys.stdout.write(f"\033[{target_col + 1}G")
+
+        last_rendered_cursor_row = target_row
         sys.stdout.flush()
 
     try:
@@ -193,39 +240,86 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                             if more:
                                 text += more.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
-                    if i + 2 < len(text) and text[i+1] in ("[", "O"):
-                        code = text[i+2]
-                        if code == "A":  # Up Arrow
+                    seq_match = re.match(r'^\x1b(?:\[[0-9;]*[a-zA-Z~]|O[a-zA-Z])', text[i:])
+                    if seq_match:
+                        seq = seq_match.group(0)
+                        seq_len = len(seq)
+
+                        if seq in ("\x1b[A", "\x1bOA"):  # Up Arrow
                             if active_matches_count > 0:
                                 selected_idx = (selected_idx - 1) % active_matches_count
                                 update_matches()
-                            i += 3
-                            continue
-                        elif code == "B":  # Down Arrow
+                            else:
+                                if SESSION_HISTORY and history_index > 0:
+                                    if history_index == len(SESSION_HISTORY):
+                                        scratch_buffer = "".join(buf)
+                                    history_index -= 1
+                                    buf = list(SESSION_HISTORY[history_index])
+                                    cursor_pos = len(buf)
+                                    dropdown_dismissed = True
+                                    update_matches()
+                        elif seq in ("\x1b[B", "\x1bOB"):  # Down Arrow
                             if active_matches_count > 0:
                                 selected_idx = (selected_idx + 1) % active_matches_count
                                 update_matches()
-                            i += 3
-                            continue
-                        elif code in ("C", "D"):  # Left / Right Arrow
-                            i += 3
-                            continue
-                        elif code.isdigit():
-                            # Extended sequence like \x1b[3~ (Delete), \x1b[1~ (Home), etc.
-                            end = i + 2
-                            while end < len(text) and text[end] != "~":
-                                end += 1
-                            i = end + 1 if end < len(text) else len(text)
-                            continue
-                        else:
-                            i += 3
-                            continue
+                            else:
+                                if history_index < len(SESSION_HISTORY):
+                                    history_index += 1
+                                    if history_index == len(SESSION_HISTORY):
+                                        buf = list(scratch_buffer)
+                                    else:
+                                        buf = list(SESSION_HISTORY[history_index])
+                                    cursor_pos = len(buf)
+                                    dropdown_dismissed = True
+                                    update_matches()
+                        elif seq in ("\x1b[D", "\x1bOD"):  # Left Arrow
+                            cursor_pos = max(0, cursor_pos - 1)
+                        elif seq in ("\x1b[C", "\x1bOC"):  # Right Arrow
+                            cursor_pos = min(len(buf), cursor_pos + 1)
+                        elif seq in ("\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~"):  # Home
+                            cursor_pos = 0
+                        elif seq in ("\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~"):  # End
+                            cursor_pos = len(buf)
+                        elif seq == "\x1b[3~":  # Delete
+                            if cursor_pos < len(buf):
+                                buf.pop(cursor_pos)
+                                dropdown_dismissed = False
+                                selected_idx = 0
+                                update_matches()
+                        elif seq in ("\x1b[1;5D", "\x1b[5D"):  # Ctrl+Left (word jump)
+                            while cursor_pos > 0 and buf[cursor_pos - 1] == ' ':
+                                cursor_pos -= 1
+                            while cursor_pos > 0 and buf[cursor_pos - 1] != ' ':
+                                cursor_pos -= 1
+                        elif seq in ("\x1b[1;5C", "\x1b[5C"):  # Ctrl+Right (word jump)
+                            while cursor_pos < len(buf) and buf[cursor_pos] == ' ':
+                                cursor_pos += 1
+                            while cursor_pos < len(buf) and buf[cursor_pos] != ' ':
+                                cursor_pos += 1
+
+                        i += seq_len
+                        continue
+                    elif text[i:i+2] == "\x1bb":  # Alt+B (word jump left)
+                        while cursor_pos > 0 and buf[cursor_pos - 1] == ' ':
+                            cursor_pos -= 1
+                        while cursor_pos > 0 and buf[cursor_pos - 1] != ' ':
+                            cursor_pos -= 1
+                        i += 2
+                        continue
+                    elif text[i:i+2] == "\x1bf":  # Alt+F (word jump right)
+                        while cursor_pos < len(buf) and buf[cursor_pos] == ' ':
+                            cursor_pos += 1
+                        while cursor_pos < len(buf) and buf[cursor_pos] != ' ':
+                            cursor_pos += 1
+                        i += 2
+                        continue
                     else:
                         # Standalone Esc key pressed
                         if dropdown_lines > 0:
                             dropdown_dismissed = True
                         elif buf:
                             buf.clear()
+                            cursor_pos = 0
                         update_matches()
                         i += 1
                         continue
@@ -235,38 +329,96 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                     # Inside a paste or if followed by more characters in the same chunk,
                     # convert newline to space so paste doesn't trigger premature execution.
                     if in_bracketed_paste or i < len(text) - 1:
-                        if buf and buf[-1] != " ":
-                            buf.append(" ")
-                        update_matches()
+                        if not buf or (cursor_pos > 0 and buf[cursor_pos - 1] != " "):
+                            buf.insert(cursor_pos, " ")
+                            cursor_pos += 1
+                            update_matches()
                     else:
                         if dropdown_lines > 0:
                             sys.stdout.write("\033[J")
+                        curr_text = "".join(buf)
+                        total_len = clean_prompt_len + len(curr_text)
+                        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                        if cols < 20:
+                            cols = 80
+                        end_row = (total_len - 1) // cols if total_len > 0 else 0
+                        if last_rendered_cursor_row < end_row:
+                            sys.stdout.write(f"\033[{end_row - last_rendered_cursor_row}B")
                         sys.stdout.write("\n")
                         sys.stdout.flush()
 
-                        curr_text = "".join(buf).strip()
+                        clean_val = curr_text.strip()
+                        ret_cmd = clean_val
                         # If dropdown was active and user selected with arrow keys:
-                        if curr_text.startswith("/") and not dropdown_dismissed and current_selected_cmd:
-                            if curr_text in ("/", "/p", "/s", "/t", "/l", "/d", "/c", "/h", "/e") or " " not in curr_text:
-                                return current_selected_cmd
-                        return curr_text
+                        if clean_val.startswith("/") and not dropdown_dismissed and current_selected_cmd:
+                            if clean_val in ("/", "/p", "/s", "/t", "/l", "/d", "/c", "/h", "/e") or " " not in clean_val:
+                                ret_cmd = current_selected_cmd
+
+                        _append_history(ret_cmd)
+                        return ret_cmd
                     i += 1
 
                 # Tab (Auto-complete to highlighted command)
                 elif text[i] == "\t":
                     if current_selected_cmd:
                         buf = list(current_selected_cmd)
+                        cursor_pos = len(buf)
                         selected_idx = 0
                         update_matches()
                     i += 1
 
                 # Backspace (\x7f or \x08)
                 elif text[i] in ("\x7f", "\x08"):
-                    if buf:
-                        buf.pop()
+                    if cursor_pos > 0:
+                        cursor_pos -= 1
+                        buf.pop(cursor_pos)
                         dropdown_dismissed = False
                         selected_idx = 0
                         update_matches()
+                    i += 1
+
+                # Ctrl+A (Home)
+                elif text[i] == "\x01":
+                    cursor_pos = 0
+                    i += 1
+
+                # Ctrl+E (End)
+                elif text[i] == "\x05":
+                    cursor_pos = len(buf)
+                    i += 1
+
+                # Ctrl+B (Backward character / Left)
+                elif text[i] == "\x02":
+                    cursor_pos = max(0, cursor_pos - 1)
+                    i += 1
+
+                # Ctrl+F (Forward character / Right)
+                elif text[i] == "\x06":
+                    cursor_pos = min(len(buf), cursor_pos + 1)
+                    i += 1
+
+                # Ctrl+K (Kill text to end of line)
+                elif text[i] == "\x0b":
+                    del buf[cursor_pos:]
+                    update_matches()
+                    i += 1
+
+                # Ctrl+U (Kill text to start of line)
+                elif text[i] == "\x15":
+                    del buf[:cursor_pos]
+                    cursor_pos = 0
+                    update_matches()
+                    i += 1
+
+                # Ctrl+W (Kill word backward)
+                elif text[i] == "\x17":
+                    orig = cursor_pos
+                    while cursor_pos > 0 and buf[cursor_pos - 1] == ' ':
+                        cursor_pos -= 1
+                    while cursor_pos > 0 and buf[cursor_pos - 1] != ' ':
+                        cursor_pos -= 1
+                    del buf[cursor_pos:orig]
+                    update_matches()
                     i += 1
 
                 # Ctrl+C
@@ -281,11 +433,16 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                         sys.stdout.write("\n")
                         sys.stdout.flush()
                         raise EOFError
+                    # If line has text, act as Delete at cursor
+                    if cursor_pos < len(buf):
+                        buf.pop(cursor_pos)
+                        update_matches()
                     i += 1
 
                 # Printable characters
                 elif text[i] >= " ":
-                    buf.append(text[i])
+                    buf.insert(cursor_pos, text[i])
+                    cursor_pos += 1
                     dropdown_dismissed = False
                     selected_idx = 0
                     update_matches()
@@ -445,21 +602,33 @@ def read_input_with_esc(prompt: str, default: str = "") -> Optional[str]:
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     buf: List[str] = []
-    last_rendered_rows = 0
+    cursor_pos: int = 0
+    last_rendered_cursor_row = 0
     in_bracketed_paste = False
     clean_prompt_len = get_clean_prompt_len(prompt)
 
     def redraw():
-        nonlocal last_rendered_rows
+        nonlocal last_rendered_cursor_row
         cols = shutil.get_terminal_size(fallback=(80, 24)).columns
         if cols < 20:
             cols = 80
-        if last_rendered_rows > 0:
-            sys.stdout.write(f"\033[{last_rendered_rows}A")
+        if last_rendered_cursor_row > 0:
+            sys.stdout.write(f"\033[{last_rendered_cursor_row}A")
         curr_text = "".join(buf)
         sys.stdout.write("\r\033[J" + prompt + curr_text)
         total_len = clean_prompt_len + len(curr_text)
-        last_rendered_rows = (total_len - 1) // cols if total_len > 0 else 0
+        end_row = (total_len - 1) // cols if total_len > 0 else 0
+
+        cursor_total = clean_prompt_len + cursor_pos
+        target_row = (cursor_total - 1) // cols if cursor_total > 0 else 0
+        target_col = cursor_total % cols if cols > 0 else cursor_total
+
+        rows_up = end_row - target_row
+        if rows_up > 0:
+            sys.stdout.write(f"\033[{rows_up}A")
+        sys.stdout.write(f"\033[{target_col + 1}G")
+
+        last_rendered_cursor_row = target_row
         sys.stdout.flush()
 
     try:
@@ -504,12 +673,47 @@ def read_input_with_esc(prompt: str, default: str = "") -> Optional[str]:
                             if more:
                                 text += more.decode("utf-8", errors="replace").replace("\r\n", "\n")
 
-                    if i + 1 < len(text) and text[i+1] in ("[", "O"):
-                        # Skip arrow / function key escape sequences
+                    seq_match = re.match(r'^\x1b(?:\[[0-9;]*[a-zA-Z~]|O[a-zA-Z])', text[i:])
+                    if seq_match:
+                        seq = seq_match.group(0)
+                        seq_len = len(seq)
+                        if seq in ("\x1b[D", "\x1bOD"):  # Left Arrow
+                            cursor_pos = max(0, cursor_pos - 1)
+                        elif seq in ("\x1b[C", "\x1bOC"):  # Right Arrow
+                            cursor_pos = min(len(buf), cursor_pos + 1)
+                        elif seq in ("\x1b[H", "\x1bOH", "\x1b[1~", "\x1b[7~"):  # Home
+                            cursor_pos = 0
+                        elif seq in ("\x1b[F", "\x1bOF", "\x1b[4~", "\x1b[8~"):  # End
+                            cursor_pos = len(buf)
+                        elif seq == "\x1b[3~":  # Delete
+                            if cursor_pos < len(buf):
+                                buf.pop(cursor_pos)
+                        elif seq in ("\x1b[1;5D", "\x1b[5D"):  # Ctrl+Left
+                            while cursor_pos > 0 and buf[cursor_pos - 1] == ' ':
+                                cursor_pos -= 1
+                            while cursor_pos > 0 and buf[cursor_pos - 1] != ' ':
+                                cursor_pos -= 1
+                        elif seq in ("\x1b[1;5C", "\x1b[5C"):  # Ctrl+Right
+                            while cursor_pos < len(buf) and buf[cursor_pos] == ' ':
+                                cursor_pos += 1
+                            while cursor_pos < len(buf) and buf[cursor_pos] != ' ':
+                                cursor_pos += 1
+
+                        i += seq_len
+                        continue
+                    elif text[i:i+2] == "\x1bb":  # Alt+B
+                        while cursor_pos > 0 and buf[cursor_pos - 1] == ' ':
+                            cursor_pos -= 1
+                        while cursor_pos > 0 and buf[cursor_pos - 1] != ' ':
+                            cursor_pos -= 1
                         i += 2
-                        while i < len(text) and not text[i].isalpha() and text[i] != "~":
-                            i += 1
-                        i += 1
+                        continue
+                    elif text[i:i+2] == "\x1bf":  # Alt+F
+                        while cursor_pos < len(buf) and buf[cursor_pos] == ' ':
+                            cursor_pos += 1
+                        while cursor_pos < len(buf) and buf[cursor_pos] != ' ':
+                            cursor_pos += 1
+                        i += 2
                         continue
                     else:
                         # Standalone Esc pressed -> Cancel immediately!
@@ -524,22 +728,61 @@ def read_input_with_esc(prompt: str, default: str = "") -> Optional[str]:
 
                 elif text[i] in ("\r", "\n"):
                     if in_bracketed_paste or i < len(text) - 1:
-                        if buf and buf[-1] != " ":
-                            buf.append(" ")
+                        if not buf or (cursor_pos > 0 and buf[cursor_pos - 1] != " "):
+                            buf.insert(cursor_pos, " ")
+                            cursor_pos += 1
                     else:
+                        curr_text = "".join(buf)
+                        total_len = clean_prompt_len + len(curr_text)
+                        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+                        if cols < 20:
+                            cols = 80
+                        end_row = (total_len - 1) // cols if total_len > 0 else 0
+                        if last_rendered_cursor_row < end_row:
+                            sys.stdout.write(f"\033[{end_row - last_rendered_cursor_row}B")
                         sys.stdout.write("\n")
                         sys.stdout.flush()
-                        res = "".join(buf).strip()
+                        res = curr_text.strip()
                         return res if res else default
                     i += 1
 
                 elif text[i] in ("\x7f", "\x08"):
-                    if buf:
-                        buf.pop()
+                    if cursor_pos > 0:
+                        cursor_pos -= 1
+                        buf.pop(cursor_pos)
+                    i += 1
+
+                elif text[i] == "\x01":  # Ctrl+A
+                    cursor_pos = 0
+                    i += 1
+                elif text[i] == "\x05":  # Ctrl+E
+                    cursor_pos = len(buf)
+                    i += 1
+                elif text[i] == "\x02":  # Ctrl+B
+                    cursor_pos = max(0, cursor_pos - 1)
+                    i += 1
+                elif text[i] == "\x06":  # Ctrl+F
+                    cursor_pos = min(len(buf), cursor_pos + 1)
+                    i += 1
+                elif text[i] == "\x0b":  # Ctrl+K
+                    del buf[cursor_pos:]
+                    i += 1
+                elif text[i] == "\x15":  # Ctrl+U
+                    del buf[:cursor_pos]
+                    cursor_pos = 0
+                    i += 1
+                elif text[i] == "\x17":  # Ctrl+W
+                    orig = cursor_pos
+                    while cursor_pos > 0 and buf[cursor_pos - 1] == ' ':
+                        cursor_pos -= 1
+                    while cursor_pos > 0 and buf[cursor_pos - 1] != ' ':
+                        cursor_pos -= 1
+                    del buf[cursor_pos:orig]
                     i += 1
 
                 elif text[i] >= " ":
-                    buf.append(text[i])
+                    buf.insert(cursor_pos, text[i])
+                    cursor_pos += 1
                     i += 1
                 else:
                     i += 1
