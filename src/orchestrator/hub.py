@@ -197,6 +197,19 @@ class Hub:
         except Exception:
             pass
 
+    def read_log(self, task_id: str) -> str:
+        """Read content of logs/<task_id>.log if exists."""
+        log_file = self.logs_dir / f"{task_id}.log"
+        if log_file.exists():
+            try:
+                with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except Exception:
+                return ""
+        return ""
+
+    read_task_log = read_log
+
     def archive_task(self, task_id: str, summary: str) -> None:
         """Summarize finished task into archive/ and append to archive index."""
         archive_file = self.archive_dir / f"{task_id}.txt"

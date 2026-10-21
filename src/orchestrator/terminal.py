@@ -745,11 +745,35 @@ exit $EXIT_CODE
 
                 cols = shutil.get_terminal_size(fallback=(80, 24)).columns
                 spin_ch = spinner[idx % len(spinner)]
-                full_desc = f"Running ({emulator.name})... ({elapsed:.1f}s)"
-                if len(f"{spin_ch} [{lbl}] {full_desc}") >= cols - 1:
-                    full_desc = f"Running... ({elapsed:.1f}s)"
-                    if len(f"{spin_ch} [{lbl}] {full_desc}") >= cols - 1:
-                        full_desc = f"({elapsed:.1f}s)"
+
+                last_act = ""
+                if os.path.exists(task_out_file):
+                    try:
+                        with open(task_out_file, "r", encoding="utf-8", errors="replace") as f:
+                            f.seek(0, os.SEEK_END)
+                            size = f.tell()
+                            f.seek(max(0, size - 1024))
+                            lines = [l.strip() for l in f.read().splitlines() if l.strip()]
+                            if lines:
+                                import re
+                                last_act = re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', lines[-1])
+                    except Exception:
+                        pass
+
+                time_str = f"({elapsed:.1f}s)"
+                if last_act:
+                    snippet = last_act if len(last_act) <= 40 else last_act[:37] + "..."
+                    full_desc = f"{time_str} › {snippet}"
+                else:
+                    full_desc = f"Running ({emulator.name})... {time_str}"
+
+                prefix = f"{spin_ch} [{lbl}] "
+                avail = cols - len(prefix) - 1
+                if avail > 5 and len(full_desc) > avail:
+                    full_desc = full_desc[:avail - 3] + "..."
+                elif avail <= 5:
+                    full_desc = time_str
+
                 sys.stdout.write(f"\r\033[K\033[1;36m{spin_ch} [{lbl}]\033[0m {full_desc}")
                 sys.stdout.flush()
                 idx += 1
@@ -1095,6 +1119,32 @@ def list_active_terminals() -> List[SpawnedTerminal]:
 
 def close_all_spawned_terminals() -> None:
     SpawnedTerminalTracker.get_instance().close_all()
+
+
+get_active_spawned_terminals = list_active_terminals
+
+
+def send_desktop_notification(title: str, message: str, urgency: str = "normal") -> None:
+    """
+    Send subtle desktop notification using notify-send on Linux/X11/Wayland if available.
+    Does not block or fail if desktop display or notify-send is absent.
+    """
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if not has_display:
+        return
+    notify_bin = shutil.which("notify-send")
+    if notify_bin and os.path.isfile(notify_bin):
+        try:
+            clean_title = str(title).replace("\n", " ").strip()
+            clean_msg = str(message).strip()
+            urg = urgency if urgency in ("low", "normal", "critical") else "normal"
+            subprocess.Popen(
+                [notify_bin, "-u", urg, "-a", "Foreman Orchestrator", clean_title, clean_msg],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            pass
 
 
 atexit.register(close_all_spawned_terminals)

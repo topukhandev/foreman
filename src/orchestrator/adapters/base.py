@@ -63,7 +63,8 @@ class BaseCLIAdapter:
         session_id: Optional[str] = None,
         extra_flags: Optional[List[str]] = None,
         show_progress: bool = False,
-        progress_label: Optional[str] = None
+        progress_label: Optional[str] = None,
+        stream_output: bool = False
     ) -> ExecutionResult:
         """
         Execute the CLI command securely inside cwd with strict timeout.
@@ -121,7 +122,97 @@ class BaseCLIAdapter:
 
             process = subprocess.Popen(cmd, **popen_kwargs)
 
-            if show_progress and sys.stdout.isatty():
+            if stream_output and sys.stdout.isatty():
+                lbl = progress_label or self.name
+                sys.stdout.write(f"\033[1;36m▶ [{lbl}]\033[0m Streaming live response...\n\n")
+                sys.stdout.flush()
+
+                collected_out: List[str] = []
+                collected_err: List[str] = []
+
+                if os.name != "nt":
+                    import fcntl
+                    for pipe in (process.stdout, process.stderr):
+                        if pipe is not None:
+                            try:
+                                fl = fcntl.fcntl(pipe.fileno(), fcntl.F_GETFL)
+                                fcntl.fcntl(pipe.fileno(), fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                            except Exception:
+                                pass
+
+                while True:
+                    elapsed = time.time() - start_time
+                    if elapsed > self.timeout_sec:
+                        self._kill_process_tree(process)
+                        sys.stdout.write(f"\n\033[1;31m✗ [{lbl}]\033[0m Timed out after {self.timeout_sec}s\n")
+                        sys.stdout.flush()
+                        return ExecutionResult(
+                            success=False,
+                            output="".join(collected_out),
+                            error=f"Execution timed out after {self.timeout_sec} seconds. Process tree terminated.",
+                            exit_code=-1,
+                            duration_sec=elapsed
+                        )
+
+                    ret = process.poll()
+                    has_data = False
+
+                    if process.stdout is not None:
+                        try:
+                            chunk = os.read(process.stdout.fileno(), 4096)
+                            if chunk:
+                                has_data = True
+                                chunk_str = chunk.decode("utf-8", errors="replace")
+                                collected_out.append(chunk_str)
+                                sys.stdout.write(chunk_str)
+                                sys.stdout.flush()
+                        except (BlockingIOError, InterruptedError):
+                            pass
+                        except Exception:
+                            pass
+
+                    if process.stderr is not None:
+                        try:
+                            err_chunk = os.read(process.stderr.fileno(), 4096)
+                            if err_chunk:
+                                has_data = True
+                                collected_err.append(err_chunk.decode("utf-8", errors="replace"))
+                        except (BlockingIOError, InterruptedError):
+                            pass
+                        except Exception:
+                            pass
+
+                    if ret is not None and not has_data:
+                        break
+
+                    if not has_data:
+                        time.sleep(0.02)
+
+                exit_code = process.returncode if process.returncode is not None else 0
+                duration = time.time() - start_time
+                if exit_code == 0:
+                    sys.stdout.write(f"\n\n\033[1;32m✓ [{lbl}]\033[0m Responded in {duration:.1f}s\n\n")
+                else:
+                    sys.stdout.write(f"\n\n\033[1;31m✗ [{lbl}]\033[0m Exited with code {exit_code} ({duration:.1f}s)\n\n")
+                sys.stdout.flush()
+
+                out_str = "".join(collected_out).strip()
+                err_str = "".join(collected_err).strip() if exit_code != 0 else None
+                for pipe in (process.stdout, process.stderr):
+                    if pipe:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
+                return ExecutionResult(
+                    success=(exit_code == 0),
+                    output=out_str,
+                    error=err_str,
+                    exit_code=exit_code,
+                    duration_sec=duration
+                )
+
+            elif show_progress and sys.stdout.isatty():
                 spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
                 lbl = progress_label or self.name
                 idx = 0

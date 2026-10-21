@@ -57,7 +57,12 @@ def render_dropdown_box(prefix: str, selected_index: int = 0) -> Tuple[str, int,
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
     if cols < 20:
         cols = 80
-    box_width = max(30, min(cols - 4, 72))
+
+    if cols < 42:
+        compact_line = f"  \033[1;36m❯ {selected_cmd}\033[0m \033[90m(Enter to run, Esc to back)\033[0m"
+        return "\n" + compact_line, 1, selected_cmd
+
+    box_width = max(34, min(cols - 4, 72))
 
     title = " Commands (↑/↓ to navigate, Enter to select, Esc to cancel) "
     if len(title) > box_width - 4:

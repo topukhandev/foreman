@@ -345,6 +345,11 @@ class OrchestratorEngine:
                         self.blockers.append(blocker_msg)
                         self.progress.set_task_status(task_id, "blocked", blocker_msg)
                         self._notify_progress(f"\033[1;31m⊘ [Loop Blocked]\033[0m Task #{task_id} halted after {bounce_count} bounces")
+                        try:
+                            from orchestrator.terminal import send_desktop_notification
+                            send_desktop_notification("Foreman Loop Alert", f"Task #{task_id} halted after {bounce_count} bounces", urgency="critical")
+                        except Exception:
+                            pass
                         break
 
                     # Prepare prompt for revision
@@ -402,6 +407,23 @@ class OrchestratorEngine:
                 summary_lines.append(f"  - {b}")
 
         report = "\n".join(summary_lines)
+
+        try:
+            from orchestrator.terminal import send_desktop_notification
+            if overall_success:
+                send_desktop_notification(
+                    "Foreman Sprint Complete",
+                    f"✓ Succeeded {completed_count}/{len(tasks)} tasks in {int(total_elapsed)}s\nGoal: {goal[:60]}",
+                    urgency="normal"
+                )
+            else:
+                send_desktop_notification(
+                    "Foreman Sprint Alert",
+                    f"⚠️ Sprint finished with {len(self.blockers)} alert(s)\nGoal: {goal[:60]}",
+                    urgency="critical"
+                )
+        except Exception:
+            pass
 
         return OrchestratorRunResult(
             success=overall_success,

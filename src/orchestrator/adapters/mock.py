@@ -18,7 +18,9 @@ class MockAdapter(BaseCLIAdapter):
         cwd: str,
         task_id: str = "general",
         session_id: Optional[str] = None,
-        extra_flags: Optional[List[str]] = None
+        extra_flags: Optional[List[str]] = None,
+        *args,
+        **kwargs
     ) -> ExecutionResult:
         if self.simulated_delay > 0:
             time.sleep(self.simulated_delay)

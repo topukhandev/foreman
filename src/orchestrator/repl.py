@@ -3,6 +3,7 @@
 import os
 import re
 import shlex
+import signal
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -439,23 +440,33 @@ class InteractiveShell:
                 print(f"[!] Link not found: {del_name}")
 
     def handle_tasks_menu(self) -> None:
-        """Inspect task status and contents interactively."""
+        """Inspect task status and contents interactively with arrow keys."""
         statuses = self.hub.get_all_task_statuses()
         if not statuses:
             print("\n[!] No tasks found in this project workspace yet.")
             return
 
-        print(f"\nTask History ({len(statuses)} tasks):")
+        options = []
         for s in statuses:
-            print(f"  Task #{s.task_id}: {s.title} [{s.role}] -> {s.state.upper()} ({s.one_line_summary})")
+            role_tag = f"[{s.role.upper()}]"
+            state_tag = f"[{s.state.upper()}]"
+            summary_preview = f"({s.one_line_summary[:28]}...)" if len(s.one_line_summary) > 30 else f"({s.one_line_summary})" if s.one_line_summary else ""
+            label = f"{role_tag:<12} {s.title[:28]:<28} {state_tag:<12} {summary_preview}"
+            options.append((s.task_id, label))
 
-        pick = read_input_with_esc("\nEnter Task ID to view full specification & results (or Esc to back): ")
-        if pick:
-            spec = self.hub.read_task_spec(pick)
-            if spec:
-                print("\n" + render_markdown(spec))
-            else:
-                print(f"Task #{pick} not found.")
+        pick = select_from_menu(f"? Select a task to inspect details & verdict ({len(statuses)} tasks):", options)
+        if not pick:
+            return
+
+        spec = self.hub.read_task_spec(pick)
+        if spec:
+            print("\n" + render_markdown(spec))
+            log_content = self.hub.read_task_log(pick)
+            if log_content:
+                lines_cnt = len(log_content.splitlines())
+                print(f"\n\033[90m(Task log: hub/logs/{pick}.log — {lines_cnt} lines recorded)\033[0m")
+        else:
+            print(f"Task #{pick} specification not found.")
 
     def handle_pack_menu(self, choice_arg: str = "") -> None:
         """Select default workflow pack interactively or via argument."""
@@ -603,22 +614,25 @@ class InteractiveShell:
 
         adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec)
         adapter.visual_mode = self.visual_mode
+        stream_mode = (not self.visual_mode)
         result = adapter.run(
             prompt=prompt,
             cwd=self.project_dir,
             task_id="front_desk",
             session_id=session_arg,
             show_progress=True,
-            progress_label=p_name
+            progress_label=p_name,
+            stream_output=stream_mode
         )
 
         if result.success and result.output:
             self.session_turns += 1
-            formatted = render_markdown(result.output.strip())
-            print(formatted)
+            if not stream_mode:
+                formatted = render_markdown(result.output.strip())
+                print(formatted)
         elif result.error:
             print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}\n")
-        else:
+        elif not stream_mode:
             print("\n(No response received from AI worker.)\n")
 
     def execute_goal(self, goal: str) -> None:
@@ -683,16 +697,59 @@ class InteractiveShell:
 
         self.execute_goal(goal)
 
+    def _render_status_bar(self) -> str:
+        """Render a single-line status bar with provider, system health, active workers, and visual mode."""
+        active_p = self._get_active_provider_name()
+        try:
+            from orchestrator.system_guard import SystemGuard
+            metrics = SystemGuard.get_metrics(self.project_dir)
+            ram_str = f"{metrics.ram_used_percent:.0f}%"
+            cpu_str = f"{metrics.cpu_percent:.0f}%"
+            health_color = "\033[1;32m" if metrics.is_healthy else "\033[1;33m"
+        except Exception:
+            ram_str = "N/A"
+            cpu_str = "N/A"
+            health_color = "\033[1;32m"
+
+        vis_str = "\033[1;32mON\033[0m" if self.visual_mode else "\033[90mOFF\033[0m"
+        try:
+            from orchestrator.terminal import get_active_spawned_terminals
+            active_cnt = len(get_active_spawned_terminals())
+        except Exception:
+            active_cnt = 0
+
+        p_badge = f"\033[1;36mProvider:\033[0m {active_p}"
+        r_badge = f"{health_color}RAM:\033[0m {ram_str}"
+        c_badge = f"\033[90mCPU:\033[0m {cpu_str}"
+        w_badge = f"\033[1;33mWorkers:\033[0m {active_cnt} active"
+        v_badge = f"\033[1;35mVisual:\033[0m {vis_str}"
+
+        return f"\033[90m┌─\033[0m [{p_badge}] [{r_badge}] [{c_badge}] [{w_badge}] [{v_badge}]"
+
     def run(self) -> None:
         """Main interactive REPL loop."""
+        def _sig_cleanup(signum, frame):
+            print("\nExiting orchestrator. Cleaning up sessions...")
+            from orchestrator.terminal import close_all_visual_sessions, close_all_spawned_terminals
+            close_all_visual_sessions()
+            close_all_spawned_terminals()
+            sys.exit(0)
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(sig, _sig_cleanup)
+            except Exception:
+                pass
+
         self.render_banner()
 
         try:
             while True:
                 try:
-                    print()
+                    status_line = self._render_status_bar()
+                    print(f"\n{status_line}")
                     active_p = self._get_active_provider_name()
-                    prompt = f"\033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[{active_p}]\033[0m › "
+                    prompt = f"\033[90m└─\033[0m \033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[{active_p}]\033[0m › "
                     line = read_interactive_line(prompt=prompt)
                 except (EOFError, KeyboardInterrupt):
                     print("\nExiting orchestrator. Goodbye!")
