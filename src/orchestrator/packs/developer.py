@@ -23,8 +23,9 @@ class DeveloperPack:
                 "2. Affected files, modules, and API boundaries\n"
                 "3. Dependencies & Data Flow\n"
                 "4. Performance, Scalability & Security Implications\n"
-                "5. Step-by-step Implementation Order\n"
-                "Be technically precise and concise."
+                "5. Step-by-step Implementation Order\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "Be technically precise and compact (under 50 lines total). Avoid conversational filler."
             )
         ),
         PackTaskSpec(
@@ -38,8 +39,9 @@ class DeveloperPack:
                 "Find critical vulnerabilities, anti-patterns, and race conditions:\n"
                 "- Injection risks, auth bypasses, or data exposure\n"
                 "- Concurrency issues, resource leaks, or unhandled exceptions\n"
-                "- Breaking changes or backward incompatibility\n"
-                "List findings by severity (High/Med/Low) with concrete code mitigations."
+                "- Breaking changes or backward incompatibility\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "Keep response compact (under 40 lines total). List top findings by severity (High/Med/Low) with concise 1-line mitigations."
             )
         ),
         PackTaskSpec(
@@ -50,11 +52,13 @@ class DeveloperPack:
                 "You are a Senior Implementation Engineer.\n"
                 "Objective: {goal}\n"
                 "Incorporate the architectural plan and security mitigations:\n{previous_output}\n\n"
-                "Provide:\n"
+                "Tasks:\n"
                 "1. Implement the solution: create all necessary source code files, data models, and assets directly on disk in the project directory.\n"
                 "2. Robust error handling, validation, and modular architecture.\n"
-                "3. Write comprehensive unit test cases and run them to verify they pass.\n"
-                "4. Deliver an implementation report summarizing all created files, test execution results, and instructions to run the application."
+                "3. Write comprehensive unit test cases and run them to verify they pass.\n\n"
+                "CRITICAL TOKEN CONSERVATION RULES:\n"
+                "- Write all source code directly to disk using your tools. Do NOT repeat or dump full file code in your text response.\n"
+                "- Keep your textual response strictly under 30 lines: list created/modified file paths, brief test execution results, and instructions to run the application."
             )
         ),
         PackTaskSpec(
@@ -69,7 +73,7 @@ class DeveloperPack:
                 "- Does the implementation cleanly satisfy the original requirement?\n"
                 "- Are all adversarial audit findings properly resolved?\n"
                 "- Is code maintainable, documented, and test-covered?\n\n"
-                "Output format:\n"
+                "Output format (STRICT: under 100 words total):\n"
                 "Status: [APPROVED / REVISE]\n"
                 "Review Notes: <2-3 sentences max>"
             )

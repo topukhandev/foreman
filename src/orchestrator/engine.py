@@ -151,10 +151,14 @@ class OrchestratorEngine:
                     completed_count += 1
                     continue
 
-            # Format base prompt with context
+            # Format base prompt with context (truncated if overly long to conserve input/output tokens)
+            context_for_prompt = previous_output
+            if len(context_for_prompt) > 6000:
+                context_for_prompt = context_for_prompt[:6000] + "\n... [Remaining context truncated to conserve tokens] ..."
+
             base_prompt = task_spec.prompt_template.format(
                 goal=goal,
-                previous_output=previous_output or "None (initial step)"
+                previous_output=context_for_prompt or "None (initial step)"
             )
 
             # Record task spec in Hub
@@ -306,16 +310,23 @@ class OrchestratorEngine:
                 )
                 self._notify_progress(f"\033[1;35m🔍 [Reviewer]\033[0m Task #{task_id}: Starting independent review via {rev_provider}...")
 
+                # Truncate worker_output if overly large to prevent token explosion in reviewer
+                rev_target = worker_output
+                if len(rev_target) > 8000:
+                    rev_target = rev_target[:8000] + "\n... [Worker output truncated for review to conserve tokens] ..."
+
                 review_prompt = (
                     f"You are an Independent Quality Reviewer.\n"
                     f"Original Task Title: {title}\n"
-                    f"Requirements/Prompt:\n{base_prompt}\n\n"
-                    f"Worker Output under review:\n{worker_output}\n\n"
+                    f"Requirements/Prompt:\n{base_prompt[:2500]}\n\n"
+                    f"Worker Output under review:\n{rev_target}\n\n"
                     f"Instructions:\n"
                     f"Examine the output rigorously against the requirements.\n"
-                    f"If all criteria are met and work is complete, start your response with 'APPROVED'.\n"
-                    f"If any flaws, hallucinations, missing sections, or errors exist, start with 'REVISE:' "
-                    f"followed by numbered feedback of what must be corrected."
+                    f"CRITICAL TOKEN CONSERVATION RULE:\n"
+                    f"Keep response extremely concise (maximum 2-3 sentences, under 100 words total).\n"
+                    f"If all criteria are met and work is complete, start your response with 'APPROVED' followed by a 1-sentence verification note.\n"
+                    f"If any flaws, hallucinations, or errors exist, start with 'REVISE:' "
+                    f"followed by compact numbered bullet points of what must be corrected."
                 )
 
                 rev_adapter = self.adapters.get(rev_provider)
@@ -410,7 +421,8 @@ class OrchestratorEngine:
                         f"{base_prompt}\n\n"
                         f"CRITICAL REVISION INSTRUCTIONS FROM INDEPENDENT REVIEWER:\n"
                         f"Your previous attempt was rejected with the following feedback. Address EVERY point:\n"
-                        f"{review_feedback}\n"
+                        f"{review_feedback[:2500]}\n\n"
+                        f"CRITICAL: Keep your response concise, focus solely on resolving the feedback, and do not repeat unmodified code."
                     )
                     # Loop continues -> worker will re-execute with revision feedback
                     continue

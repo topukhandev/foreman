@@ -23,7 +23,9 @@ class QAPack:
                 "2. Critical User Flows & Happy Path Scenarios\n"
                 "3. Performance, Load & Latency Baselines\n"
                 "4. Environmental & Platform Matrix (OS, browsers, dependencies)\n"
-                "5. Pass/Fail Exit Criteria"
+                "5. Pass/Fail Exit Criteria\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "Keep matrix dense and compact (under 40 lines). No conversational filler."
             )
         ),
         PackTaskSpec(
@@ -38,8 +40,9 @@ class QAPack:
                 "- Malformed, oversized, or empty inputs\n"
                 "- Network dropouts, high latency, and timeouts\n"
                 "- Concurrency collisions, idempotency failures, and deadlocks\n"
-                "- Corrupt state and recovery behaviors\n"
-                "List top failure points with reproduction steps."
+                "- Corrupt state and recovery behaviors\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "List strictly the top edge cases with compact reproduction steps (under 35 lines total)."
             )
         ),
         PackTaskSpec(
@@ -54,7 +57,10 @@ class QAPack:
                 "1. Automated test code (e.g. pytest, unittest, or integration scripts)\n"
                 "2. Mock fixtures, test data generators, and boundary inputs\n"
                 "3. Assertion matrix with clear failure messages\n"
-                "4. Instructions to run the tests locally in CI/CD"
+                "4. Instructions to run the tests locally in CI/CD\n\n"
+                "CRITICAL TOKEN CONSERVATION RULES:\n"
+                "- Write test scripts directly to files on disk in the project directory using your tools.\n"
+                "- Do NOT paste full script code in your text response. Keep terminal summary under 30 lines."
             )
         ),
         PackTaskSpec(
@@ -68,7 +74,7 @@ class QAPack:
                 "Evaluate release readiness:\n"
                 "- Are critical edge cases adequately guarded by tests?\n"
                 "- Is the exit criteria met with acceptable risk tolerance?\n\n"
-                "Output format:\n"
+                "Output format (STRICT: under 100 words total):\n"
                 "Status: [APPROVED / REVISE]\n"
                 "Release Recommendation: [GO / NO-GO] with 2-sentence rationale."
             )

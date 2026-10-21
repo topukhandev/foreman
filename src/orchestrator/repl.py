@@ -881,6 +881,14 @@ class InteractiveShell:
             "high": "Reasoning Effort: HIGH (Deep Reasoning Mode). Rigorously explore edge cases, verify all assumptions, and provide deep architectural precision."
         }.get(self.effort, "Reasoning Effort: MEDIUM.")
 
+        brevity_rules = (
+            "CRITICAL TOKEN CONSERVATION & BREVITY RULES:\n"
+            "- Be extremely concise, direct, and compact (aim for under 150 words).\n"
+            "- Never output conversational filler, pleasantries ('Sure, I can help with that!'), apologies, or bloated conclusions.\n"
+            "- Deliver high-signal bullet points or crisp summaries.\n"
+            "- If modifying or creating files, execute the edits on disk using your tools. Do NOT repeat large code blocks or entire file contents in your text response."
+        )
+
         if self.session_turns > 0:
             prompt = (
                 f"[Workspace Update: {self.project_dir} | State: {state_content[:600]}]\n"
@@ -890,7 +898,8 @@ class InteractiveShell:
                 f"You are the intelligent AI agent for Foreman Orchestrator.\n"
                 f"You have full command execution and filesystem tools available.\n"
                 f"Respond directly, search/inspect files if needed, and execute any requested actions.\n"
-                f"If the user asks to open/launch worker terminals in any directory, emit '/spawn <tool> <directory>' on its own line so Foreman automatically opens them."
+                f"If the user asks to open/launch worker terminals in any directory, emit '/spawn <tool> <directory>' on its own line so Foreman automatically opens them.\n\n"
+                f"{brevity_rules}"
             )
             session_arg = self.session_id if p_name == "claude_code" else "continue"
         else:
@@ -910,7 +919,8 @@ class InteractiveShell:
                 f"   - Do NOT tell the user to manually run bash commands; Foreman executes the spawn directives directly on their desktop.\n"
                 f"   - Report back clearly to the user what you found and what actions you executed.\n"
                 f"4. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, and inform them they can run '/run <goal>' to trigger a complete multi-agent sprint.\n"
-                f"5. All intelligence resides with you; execute tools and report results directly."
+                f"5. All intelligence resides with you; execute tools and report results directly.\n\n"
+                f"{brevity_rules}"
             )
             session_arg = self.session_id if p_name == "claude_code" else None
 

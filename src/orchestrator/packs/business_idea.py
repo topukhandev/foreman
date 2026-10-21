@@ -33,8 +33,9 @@ class BusinessIdeaPack:
                 "4. Cost Structure (Hosting, tooling, team, marketing)\n"
                 "5. Legal, Regulatory & Compliance Risks\n"
                 "6. Competitor Landscape & Key Data Sources to monitor\n"
-                "7. Minimum Viable Product (MVP) Scope (Must-have vs nice-to-have)\n"
-                "Keep it clear, concise, and actionable."
+                "7. Minimum Viable Product (MVP) Scope (Must-have vs nice-to-have)\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "Keep checklist concise and actionable (under 45 lines). No conversational filler."
             )
         ),
         PackTaskSpec(
@@ -48,8 +49,9 @@ class BusinessIdeaPack:
                 "Find all critical flaws, weak assumptions, hidden expenses, or failure modes:\n"
                 "- What fatal blind spots are in this plan?\n"
                 "- What are the most likely reasons this idea fails in year 1?\n"
-                "- Which assumptions must be proven true before spending money?\n"
-                "List the top 3-5 risks and concrete mitigations for each."
+                "- Which assumptions must be proven true before spending money?\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "List strictly the top 3-5 risks and concrete 1-2 line mitigations for each (under 35 lines total)."
             )
         ),
         PackTaskSpec(
@@ -64,7 +66,9 @@ class BusinessIdeaPack:
                 "1. Recommended Pricing Model & Breakeven Estimate\n"
                 "2. 30-Day Go-To-Market Execution Plan (Week-by-week)\n"
                 "3. Tech Stack / Tooling Recommendation for lowest overhead\n"
-                "4. Day-1 Action Checklist (Immediate 3 steps to take)"
+                "4. Day-1 Action Checklist (Immediate 3 steps to take)\n\n"
+                "CRITICAL TOKEN CONSERVATION RULE:\n"
+                "Keep blueprint high-signal and compact (under 50 lines total). Avoid boilerplate text."
             )
         ),
         PackTaskSpec(
@@ -79,7 +83,7 @@ class BusinessIdeaPack:
                 "- Are the unit economics realistic?\n"
                 "- Were the critic's risks properly addressed?\n"
                 "- Is the 30-day plan directly actionable by a single founder or small team?\n\n"
-                "Output format:\n"
+                "Output format (STRICT: under 100 words total):\n"
                 "Status: [APPROVED / REVISE]\n"
                 "Feedback / Summary: <2-3 sentences max>"
             )
