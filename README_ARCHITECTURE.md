@@ -149,7 +149,7 @@ Each pack defines a sequence of tasks with role assignments. The engine dispatch
 
 | Limit | Default | Configured In |
 |-------|---------|---------------|
-| Max parallel workers | 2 | `providers.yaml` per provider |
+| Max parallel workers | 10 (dynamically 10–15) | System Resource Guard / `providers.yaml` |
 | Max runs/day per provider | 50 (paid), 20 (free) | `providers.yaml` |
 | Max task runtime | 300s | `budget.py` constant |
 | Max review bounces | 3 | `budget.py` constant |

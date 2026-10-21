@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "orchestrator"
 version = "0.1.0"
 description = "Local AI Orchestrator (Foreman / Quorum)"
-readme = "orchestrator_blueprint.md"
+readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "pyyaml>=6.0"
