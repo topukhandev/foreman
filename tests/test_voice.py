@@ -49,6 +49,25 @@ class TestVoiceModule(unittest.TestCase):
             if os.path.exists(temp_wav):
                 os.remove(temp_wav)
 
+    def test_voice_recording_animation_frame(self):
+        """Verify format_voice_recording_frame outputs animated equalizer, timer, and indicator."""
+        from orchestrator.voice import format_voice_recording_frame, AUDIO_WAVE_FRAMES, SPINNER_FRAMES, REC_PULSE_FRAMES
+
+        self.assertGreater(len(AUDIO_WAVE_FRAMES), 0)
+        self.assertGreater(len(SPINNER_FRAMES), 0)
+        self.assertGreater(len(REC_PULSE_FRAMES), 0)
+
+        frame0 = format_voice_recording_frame(0, 0.0)
+        self.assertIn("🎙️", frame0)
+        self.assertIn("REC", frame0)
+        self.assertIn("(0.0s)", frame0)
+        self.assertIn("Listening...", frame0)
+
+        frame5 = format_voice_recording_frame(5, 2.5)
+        self.assertIn("(2.5s)", frame5)
+        self.assertIn("Listening...", frame5)
+        self.assertIn("\r\033[K", frame5)
+
 
 class TestMessageContainersUI(unittest.TestCase):
     """Test clean UI section containers for user and assistant."""

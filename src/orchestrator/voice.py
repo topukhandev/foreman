@@ -25,6 +25,44 @@ def get_recording_tool() -> Optional[str]:
     return None
 
 
+AUDIO_WAVE_FRAMES = [
+    " ▂▄▆█▇▆▄▂ ",
+    "  ▂▃▅▆▇▆▅ ",
+    " ▂▃▅▆▅▃▂  ",
+    "  ▂▄▆▇▆▄▂ ",
+    " ▂▄▆██▆▄▂ ",
+    " ▃▅▇█▇▅▃▂ ",
+    " ▂▃▅▇▆▅▃▂ ",
+    "  ▂▃▅▇▆▄▂ ",
+    " ▂▄▆█▇▆▄▂ ",
+    " ▃▅▆▇██▇▆ ",
+]
+
+SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+REC_PULSE_FRAMES = [
+    "\033[1;31m● REC\033[0m",
+    "\033[1;31m● REC\033[0m",
+    "\033[31m◉ REC\033[0m",
+    "\033[90m○ REC\033[0m",
+    "\033[31m◉ REC\033[0m",
+]
+
+
+def format_voice_recording_frame(frame_idx: int, elapsed_sec: float) -> str:
+    """Format an active, animated audio recording status indicator for the terminal."""
+    wave = AUDIO_WAVE_FRAMES[frame_idx % len(AUDIO_WAVE_FRAMES)]
+    spin = SPINNER_FRAMES[frame_idx % len(SPINNER_FRAMES)]
+    rec = REC_PULSE_FRAMES[frame_idx % len(REC_PULSE_FRAMES)]
+    return (
+        f"\r\033[K🎙️  {rec} \033[1;36m{spin}\033[0m "
+        f"\033[1;32m{wave}\033[0m "
+        f"\033[1;37m({elapsed_sec:.1f}s)\033[0m "
+        f"\033[1;37mListening...\033[0m "
+        f"\033[90m• [Press Enter or Ctrl+V to finish]\033[0m"
+    )
+
+
 class VoiceRecorder:
     """Manages audio recording via arecord / ffmpeg subprocess."""
 

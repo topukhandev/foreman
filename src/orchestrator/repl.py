@@ -2,6 +2,7 @@
 
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -1062,21 +1063,63 @@ class InteractiveShell:
                 print("\n[!] Usage: /voice key <your_api_key>\n")
             return
 
-        from orchestrator.voice import VoiceRecorder, transcribe_audio, get_recording_tool
+        from orchestrator.voice import VoiceRecorder, transcribe_audio, get_recording_tool, format_voice_recording_frame
         tool = get_recording_tool()
         if not tool:
             print("\n\033[1;31m[!] Neither arecord nor ffmpeg installed for audio recording.\033[0m\n")
             return
 
         rec = VoiceRecorder()
-        print("\n\033[1;31m🎙️  [Recording Audio...]\033[0m Speak now! (Press Enter when finished)")
-        rec.start()
-        try:
-            input()
-        except (KeyboardInterrupt, EOFError):
-            pass
+        if not rec.start():
+            print("\n\033[1;31m[!] Failed to start audio recording.\033[0m\n")
+            return
+
+        print()
+        start_t = time.time()
+        frame_idx = 0
+        cancelled = False
+
+        fd = sys.stdin.fileno()
+        is_tty = os.isatty(fd)
+
+        if is_tty:
+            import termios, tty
+            old_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            try:
+                sys.stdout.write(format_voice_recording_frame(0, 0.0))
+                sys.stdout.flush()
+                while True:
+                    r, _, _ = select.select([fd], [], [], 0.08)
+                    if not r:
+                        frame_idx += 1
+                        elapsed = time.time() - start_t
+                        sys.stdout.write(format_voice_recording_frame(frame_idx, elapsed))
+                        sys.stdout.flush()
+                        continue
+                    ch = os.read(fd, 1024)
+                    if b"\x03" in ch or b"\x1b" in ch:
+                        cancelled = True
+                    break
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        else:
+            sys.stdout.write(format_voice_recording_frame(0, 0.0))
+            sys.stdout.flush()
+            try:
+                input()
+            except (KeyboardInterrupt, EOFError):
+                cancelled = True
+
         wav_file = rec.stop()
-        print("\033[1;33m⏳ Transcribing audio...\033[0m")
+        if cancelled:
+            sys.stdout.write("\r\033[K\033[90m[Voice recording cancelled]\033[0m\n\n")
+            sys.stdout.flush()
+            return
+
+        sys.stdout.write("\r\033[K\033[1;33m⏳ Transcribing audio...\033[0m\n")
+        sys.stdout.flush()
+
         if wav_file:
             ok, text = transcribe_audio(wav_file)
             if ok and text:

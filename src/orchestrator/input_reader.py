@@ -164,12 +164,14 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
     clean_prompt_len = get_clean_prompt_len(prompt)
 
     voice_active = False
+    voice_start_time = 0.0
+    voice_frame_idx = 0
     recorder = None
 
     def toggle_voice():
-        nonlocal voice_active, recorder, cursor_pos, buf
+        nonlocal voice_active, recorder, cursor_pos, buf, voice_start_time, voice_frame_idx
         if not voice_active:
-            from orchestrator.voice import VoiceRecorder, get_recording_tool
+            from orchestrator.voice import VoiceRecorder, get_recording_tool, format_voice_recording_frame
             tool = get_recording_tool()
             if not tool:
                 sys.stdout.write("\r\033[K\033[1;31m[!] Neither arecord nor ffmpeg installed for audio recording.\033[0m\n")
@@ -179,7 +181,9 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
             recorder = VoiceRecorder()
             if recorder.start():
                 voice_active = True
-                sys.stdout.write("\r\033[K\033[1;31m🎙️  [Recording Audio...]\033[0m \033[1;37mSpeak now!\033[0m \033[90m(Press Ctrl+V, Ctrl+M, or Enter to stop)\033[0m")
+                voice_start_time = time.time()
+                voice_frame_idx = 0
+                sys.stdout.write(format_voice_recording_frame(0, 0.0))
                 sys.stdout.flush()
         else:
             sys.stdout.write("\r\033[K\033[1;33m⏳ Transcribing audio...\033[0m")
@@ -267,7 +271,18 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
         sys.stdout.flush()
 
         while True:
-            chunk = os.read(fd, 4096)
+            if voice_active:
+                r, _, _ = select.select([fd], [], [], 0.08)
+                if not r:
+                    voice_frame_idx += 1
+                    elapsed = time.time() - voice_start_time
+                    from orchestrator.voice import format_voice_recording_frame
+                    sys.stdout.write(format_voice_recording_frame(voice_frame_idx, elapsed))
+                    sys.stdout.flush()
+                    continue
+                chunk = os.read(fd, 4096)
+            else:
+                chunk = os.read(fd, 4096)
             if not chunk:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
@@ -381,6 +396,18 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                         continue
                     else:
                         # Standalone Esc key pressed
+                        if voice_active:
+                            if recorder:
+                                try:
+                                    recorder.stop()
+                                except Exception:
+                                    pass
+                            voice_active = False
+                            recorder = None
+                            sys.stdout.write("\r\033[K\033[90m[Voice cancelled]\033[0m")
+                            redraw()
+                            i += 1
+                            continue
                         if dropdown_lines > 0:
                             dropdown_dismissed = True
                         elif buf:
@@ -493,6 +520,18 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
 
                 # Ctrl+C
                 elif text[i] == "\x03":
+                    if voice_active:
+                        if recorder:
+                            try:
+                                recorder.stop()
+                            except Exception:
+                                pass
+                        voice_active = False
+                        recorder = None
+                        sys.stdout.write("\r\033[K\033[90m[Voice cancelled]\033[0m")
+                        redraw()
+                        i += 1
+                        continue
                     sys.stdout.write("\n")
                     sys.stdout.flush()
                     raise KeyboardInterrupt
@@ -509,8 +548,8 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
                         update_matches()
                     i += 1
 
-                # Ctrl+V (\x16) or Ctrl+G (\x07): Toggle Voice Command
-                elif text[i] in ("\x16", "\x07"):
+                # Ctrl+V (\x16), Ctrl+G (\x07), or Ctrl+Space (\x00): Toggle Voice Command
+                elif text[i] in ("\x16", "\x07", "\x00"):
                     toggle_voice()
                     i += 1
                     continue
