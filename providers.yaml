@@ -61,7 +61,7 @@ routing:
   fallback: any_enabled
 budget:
   max_parallel: 10
-  max_time_per_task_sec: 300
+  max_time_per_task_sec: 600
   max_retries: 3
   warn_at_percent: 80
   loop_detect_threshold: 3

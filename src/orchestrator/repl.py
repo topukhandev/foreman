@@ -177,6 +177,84 @@ def print_claude_error(error_msg: str) -> None:
         print(f"\033[90m│\033[0m  \033[2;90m... ({len(lines) - 10} more lines truncated)\033[0m{' ' * max(0, inner_w - 32)}\033[90m│\033[0m")
     print(f"{bot}\n")
 
+def find_target_project(query: str, current_dir: str = ".", desktop_dir: Optional[str] = None) -> Optional[str]:
+    """
+    Intelligently detect target project directory mentioned in user query or natural language.
+    Supports explicit paths (~/Desktop/..., /path/to/..., ./...) and project names/stems
+    (e.g., 'orchestration test project' -> ~/Desktop/orchestrator_test_project).
+    """
+    system_dirs = {
+        'desktop', 'downloads', 'documents', 'music', 'pictures', 'videos',
+        'public', 'templates', 'node_modules', 'venv', '.git', 'bin', 'src',
+        '.gemini', '.cache', '.config'
+    }
+
+    # 1. Direct path matches (e.g. ~/Desktop/foo, /path/to/foo, ./foo)
+    path_matches = re.findall(r'(?:~/[^\s\'\",;]+|/(?:home|usr|var|tmp)/[^\s\'\",;]+|\./[^\s\'\",;]+)', query)
+    for p in path_matches:
+        expanded = os.path.abspath(os.path.expanduser(p))
+        if os.path.isdir(expanded) and expanded not in (os.path.expanduser('~'), '/', os.path.expanduser('~/Desktop')):
+            return expanded
+
+    # 2. Known search roots
+    desktop = os.path.abspath(desktop_dir) if desktop_dir else os.path.expanduser('~/Desktop')
+    home = os.path.expanduser('~')
+    projects_dir = os.path.expanduser('~/projects')
+    search_roots = [current_dir, desktop, projects_dir, home]
+
+    q_lower = query.lower()
+
+    best_candidate = None
+    best_score = 0
+
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        try:
+            entries = os.listdir(root)
+        except Exception:
+            continue
+        for entry in entries:
+            if entry.lower() in system_dirs or entry.startswith('.'):
+                continue
+            full_path = os.path.join(root, entry)
+            if not os.path.isdir(full_path):
+                continue
+
+            tokens = [t.lower() for t in re.split(r'[-_\s]+', entry) if len(t) >= 3]
+            if not tokens:
+                continue
+
+            score = 0
+            if entry.lower() in q_lower:
+                score += 15
+
+            clean_entry = re.sub(r'[-_\s]+', '', entry.lower())
+            clean_q = re.sub(r'[^a-zA-Z0-9]', '', q_lower)
+            if clean_entry in clean_q:
+                score += 12
+
+            matched_tokens = 0
+            for tok in tokens:
+                stem = tok[:6] if len(tok) >= 6 else tok
+                if tok in q_lower or (len(stem) >= 5 and stem in q_lower):
+                    matched_tokens += 1
+
+            if matched_tokens == len(tokens) and len(tokens) >= 2:
+                score += 10
+            elif matched_tokens > 0 and len(tokens) >= 2 and (matched_tokens / len(tokens)) >= 0.6:
+                score += 6
+
+            # Bonus if root is Desktop and 'desktop' is in query
+            if root == desktop and 'desktop' in q_lower:
+                score += 4
+
+            if score > best_score and score >= 8:
+                best_score = score
+                best_candidate = full_path
+
+    return best_candidate
+
 
 class InteractiveShell:
     """Claude Code / Antigravity style interactive terminal console."""
@@ -791,6 +869,66 @@ class InteractiveShell:
         self.handle_provider_menu()
         return self._get_active_provider_name() != "mock"
 
+    def change_project_directory(self, new_dir: str) -> bool:
+        """
+        Switch active working directory of Orchestrator session to new_dir.
+        Re-initializes Hub and links, and updates config path if local providers.yaml exists.
+        """
+        resolved = os.path.abspath(os.path.expanduser(new_dir))
+        if not os.path.isdir(resolved):
+            return False
+
+        if hasattr(os.path, "samefile"):
+            try:
+                if os.path.samefile(resolved, self.project_dir):
+                    return True
+            except Exception:
+                pass
+        elif resolved == self.project_dir:
+            return True
+
+        self.project_dir = resolved
+        self.hub = Hub(self.project_dir)
+        self.links = WorkspaceLinks(self.project_dir)
+
+        # Check for local providers.yaml in the new directory
+        local_cfg = os.path.join(self.project_dir, "providers.yaml")
+        if os.path.exists(local_cfg):
+            self.config_path = local_cfg
+            self.config = load_config(self.config_path)
+            self.config_mtime = os.path.getmtime(self.config_path)
+            self.visual_mode = getattr(self.config, "visual_terminal", True)
+            self.effort = getattr(self.config, "effort", "medium")
+
+        # Clean stale active tasks in new hub
+        active_p = self._get_active_provider_name()
+        self.hub.cleanup_stale_active_tasks(default_provider=active_p)
+        return True
+
+    def handle_cd_command(self, arg: str = "") -> None:
+        """Change current working directory or switch to project folder."""
+        target_path = arg.strip()
+        if not target_path:
+            target_path = read_input_with_esc(f"Enter target directory path [current: {self.project_dir}]: ")
+            if not target_path:
+                return
+            target_path = target_path.strip()
+
+        # Check if target_path resolves via find_target_project or direct path
+        resolved = find_target_project(target_path, self.project_dir)
+        if not resolved:
+            cand = os.path.abspath(os.path.expanduser(target_path))
+            if os.path.isdir(cand):
+                resolved = cand
+
+        if resolved and os.path.isdir(resolved):
+            home = os.path.expanduser("~")
+            disp = ("~" + resolved[len(home):]) if resolved.startswith(home) else resolved
+            self.change_project_directory(resolved)
+            print(f"\n\033[1;32m[OK]\033[0m Working directory switched to: \033[1;33m{disp}\033[0m\n")
+        else:
+            print(f"\n\033[1;31m[!] Directory not found:\033[0m '{target_path}'\n")
+
     def handle_lightweight_query(self, query: str) -> bool:
         """
         Fast local utility responses for zero-token operational questions.
@@ -838,6 +976,12 @@ class InteractiveShell:
             self.handle_close_terminals()
             return True
 
+        # CD command in natural language without slash
+        if q == "cd" or q.startswith("cd "):
+            arg = query.strip()[2:].strip()
+            self.handle_cd_command(arg)
+            return True
+
         # Reasoning Effort Level
         if q in ("effort", "reasoning effort", "effort level", "change effort") or q.startswith("effort "):
             parts = q.split()
@@ -855,6 +999,14 @@ class InteractiveShell:
         """
         if not self.check_or_prompt_ai_provider():
             return
+
+        # Auto-detect target project folder mentioned in query and switch working directory
+        detected_project = find_target_project(query, self.project_dir)
+        if detected_project and detected_project != self.project_dir:
+            home = os.path.expanduser("~")
+            disp = ("~" + detected_project[len(home):]) if detected_project.startswith(home) else detected_project
+            self.change_project_directory(detected_project)
+            print(f"\n\033[1;36m📍 Auto-detected target project:\033[0m \033[1;33m{disp}\033[0m (switched context)")
 
         p_name = self._get_active_provider_name()
         p_cfg = self.config.providers.get(p_name)
@@ -928,7 +1080,15 @@ class InteractiveShell:
         from orchestrator.markdown import render_user_message, render_assistant_response
         print("\n" + render_user_message(query))
 
-        adapter = create_adapter(p_name, p_cfg, timeout_sec=self.config.budget.max_time_per_task_sec, effort=self.effort)
+        base_timeout = getattr(self.config.budget, "max_time_per_task_sec", 600)
+        if self.effort == "high":
+            effective_timeout = max(base_timeout, 900)
+        elif self.effort == "medium":
+            effective_timeout = max(base_timeout, 600)
+        else:
+            effective_timeout = max(base_timeout, 300)
+
+        adapter = create_adapter(p_name, p_cfg, timeout_sec=effective_timeout, effort=self.effort)
         adapter.visual_mode = self.visual_mode
         stream_mode = (not self.visual_mode)
         result = adapter.run(
@@ -1180,7 +1340,7 @@ class InteractiveShell:
 
                     # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
                     all_cmds = [
-                        "/run", "/effort", "/close", "/spawn", "/voice", "/new", "/provider", "/visual", "/status",
+                        "/run", "/cd", "/effort", "/close", "/spawn", "/voice", "/new", "/provider", "/visual", "/status",
                         "/system", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"
                     ]
                     matches = [c for c in all_cmds if c.startswith(cmd)]
@@ -1190,6 +1350,8 @@ class InteractiveShell:
                     if cmd in ("/exit", "/quit"):
                         print("Exiting orchestrator. Goodbye!")
                         break
+                    elif cmd == "/cd":
+                        self.handle_cd_command(arg)
                     elif cmd in ("/effort", "/thinking"):
                         self.handle_effort_menu(cmd_parts[1] if len(cmd_parts) > 1 else "")
                     elif cmd in ("/close", "/terminals", "/kill-terminals"):

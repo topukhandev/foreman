@@ -24,7 +24,7 @@ class ProviderConfig:
 @dataclass
 class BudgetConfig:
     max_parallel: int = 10
-    max_time_per_task_sec: int = 300
+    max_time_per_task_sec: int = 600
     max_retries: int = 3
     warn_at_percent: int = 80
     loop_detect_threshold: int = 3
@@ -98,7 +98,7 @@ routing:
 
 budget:
   max_parallel: 10
-  max_time_per_task_sec: 300
+  max_time_per_task_sec: 600
   max_retries: 3
   warn_at_percent: 80
   loop_detect_threshold: 3

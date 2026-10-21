@@ -30,6 +30,7 @@ COMMANDS: List[Tuple[str, str]] = [
     ("/status",    "View single-page project state (state.md) & active workers"),
     ("/system",    "View real-time System Resource Guard metrics (RAM, CPU, Disk)"),
     ("/tasks",     "Inspect recent tasks, specs, and reviewer verdicts"),
+    ("/cd",        "Change project directory or switch working folder (/cd <path>)"),
     ("/link",      "Connect another directory, repository, or microservice"),
     ("/doctor",    "Check installed AI tools & system health diagnostics"),
     ("/clear",     "Clear the terminal screen"),
@@ -212,7 +213,7 @@ def read_interactive_line(prompt: str = "\033[1;36m❯\033[0m \033[1morchestrato
         if curr_text.startswith("/") and not dropdown_dismissed and " " not in curr_text:
             token = curr_text
             matches = get_command_matches(token)
-            active_matches_count = min(15, len(matches))
+            active_matches_count = len(matches)
             if active_matches_count > 0:
                 selected_idx = max(0, min(selected_idx, active_matches_count - 1))
                 current_selected_cmd = matches[selected_idx][0]
