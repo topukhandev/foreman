@@ -701,31 +701,23 @@ def launch_visual_worker(
                 pass
 
     quoted_cmd = " ".join(shlex.quote(arg) for arg in cmd)
-    display_cmd = quoted_cmd if len(quoted_cmd) <= 80 else quoted_cmd[:77] + "..."
     quoted_cwd = shlex.quote(cwd)
+    live_runner_py = os.path.abspath(os.path.join(os.path.dirname(__file__), "live_runner.py"))
+    quoted_runner = shlex.quote(live_runner_py)
 
     task_script = f"""#!/bin/bash
 cd {quoted_cwd} || exit 1
-CYAN='\\033[1;36m'
-YELLOW='\\033[1;33m'
-WHITE='\\033[1;37m'
-GRAY='\\033[90m'
-RESET='\\033[0m'
 
-echo -e "${{CYAN}}╔════════════════════════════════════════════════════════════════════════════╗${{RESET}}"
-echo -e "${{CYAN}}║${{RESET}}  ${{YELLOW}}▶ [{role.upper()}]${{RESET}} Task #{task_id}: ${{WHITE}}{title[:45]}${{RESET}}"
-echo -e "${{CYAN}}║${{RESET}}  Command : ${{GRAY}}{display_cmd}${{RESET}}"
-echo -e "${{CYAN}}╚════════════════════════════════════════════════════════════════════════════╝${{RESET}}"
-echo -e "${{YELLOW}}⚡ AI worker is actively generating code, creating files, and executing tools...${{RESET}}"
-echo -e "${{GRAY}}   Live streams and outputs will appear below:${{RESET}}"
-echo ""
-
-({quoted_cmd}) 2>&1 | tee "{task_out_file}" &
-MAIN_PID=$!
-echo $MAIN_PID > "{task_pid_file}"
-wait $MAIN_PID
-EXIT_CODE=${{PIPESTATUS[0]}}
-rm -f "{task_pid_file}"
+python3 -u {quoted_runner} \\
+    --out "{task_out_file}" \\
+    --cwd {quoted_cwd} \\
+    --pid-file "{task_pid_file}" \\
+    --title {shlex.quote(title)} \\
+    --worker {shlex.quote(worker_name)} \\
+    --role {shlex.quote(role)} \\
+    --task-id {shlex.quote(str(task_id))} \\
+    -- {quoted_cmd}
+EXIT_CODE=$?
 exit $EXIT_CODE
 """
     task_sh = os.path.join(session_dir, "run_task.sh")
