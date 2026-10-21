@@ -47,6 +47,6 @@ Interrupt the user **only** when:
 
 ## 3. Budget Guard Enforcements (Deterministic Python)
 - **Daily Runs**: Tracked per provider; hard cutoff at 100% with warning at 80%.
-- **Concurrency**: Maximum 2 concurrent workers globally.
+- **Concurrency**: Up to 10-15 concurrent workers globally (default: 10), dynamically governed by deterministic System Resource Guard (RAM & CPU checks).
 - **Task Timeout**: 300 seconds default.
 - **Loop Threshold**: Maximum 3 review bounces before halting execution and escalating to manager as a blocker.

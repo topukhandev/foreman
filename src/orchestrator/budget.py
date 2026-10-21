@@ -94,6 +94,12 @@ class BudgetGuard:
             if not provider:
                 return False, f"Unknown provider '{provider_name}'"
 
+            # 0. System Resource Guard (RAM, CPU, and Disk Headroom)
+            from orchestrator.system_guard import SystemGuard
+            can_run, sys_guard_err = SystemGuard.can_spawn(1)
+            if not can_run:
+                return False, sys_guard_err or "System Guard: insufficient resources to spawn worker."
+
             # 1. Concurrency limit (Global)
             if len(self.active_workers) >= self.config.max_parallel:
                 return False, f"Global concurrency limit reached ({self.config.max_parallel} active workers)"

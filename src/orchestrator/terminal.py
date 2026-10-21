@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from orchestrator.finder import find_tool_executable
 
 
@@ -25,11 +25,16 @@ class TerminalEmulatorInfo:
     name: str
     executable: str
     args_builder: Callable[[str, str], List[str]]
+    nowait_args_builder: Optional[Callable[[str, str], List[str]]] = None
 
 
 def _build_gnome_terminal_args(title: str, script_path: str) -> List[str]:
     # gnome-terminal --title="..." --wait -- script_path
     return ["gnome-terminal", f"--title={title}", "--wait", "--", script_path]
+
+
+def _build_gnome_terminal_nowait_args(title: str, script_path: str) -> List[str]:
+    return ["gnome-terminal", f"--title={title}", "--", script_path]
 
 
 def _build_generic_xterm_args(title: str, script_path: str) -> List[str]:
@@ -42,9 +47,17 @@ def _build_konsole_args(title: str, script_path: str) -> List[str]:
     return ["konsole", "--nofork", "-e", script_path]
 
 
+def _build_konsole_nowait_args(title: str, script_path: str) -> List[str]:
+    return ["konsole", "-e", script_path]
+
+
 def _build_xfce4_terminal_args(title: str, script_path: str) -> List[str]:
     # xfce4-terminal --title="..." --disable-server -x script_path
     return ["xfce4-terminal", f"--title={title}", "--disable-server", "-x", script_path]
+
+
+def _build_xfce4_terminal_nowait_args(title: str, script_path: str) -> List[str]:
+    return ["xfce4-terminal", f"--title={title}", "-x", script_path]
 
 
 def _build_alacritty_args(title: str, script_path: str) -> List[str]:
@@ -70,22 +83,23 @@ def detect_desktop_terminal() -> Optional[TerminalEmulatorInfo]:
 
     # Check terminal emulators in order of preference
     emulators = [
-        ("gnome-terminal", _build_gnome_terminal_args),
-        ("x-terminal-emulator", _build_generic_xterm_args),
-        ("konsole", _build_konsole_args),
-        ("xfce4-terminal", _build_xfce4_terminal_args),
-        ("alacritty", _build_alacritty_args),
-        ("kitty", _build_kitty_args),
-        ("xterm", _build_xterm_args),
+        ("gnome-terminal", _build_gnome_terminal_args, _build_gnome_terminal_nowait_args),
+        ("x-terminal-emulator", _build_generic_xterm_args, _build_generic_xterm_args),
+        ("konsole", _build_konsole_args, _build_konsole_nowait_args),
+        ("xfce4-terminal", _build_xfce4_terminal_args, _build_xfce4_terminal_nowait_args),
+        ("alacritty", _build_alacritty_args, _build_alacritty_args),
+        ("kitty", _build_kitty_args, _build_kitty_args),
+        ("xterm", _build_xterm_args, _build_xterm_args),
     ]
 
-    for bin_name, builder in emulators:
+    for bin_name, builder, nowait_builder in emulators:
         path = shutil.which(bin_name)
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return TerminalEmulatorInfo(
                 name=bin_name,
                 executable=path,
-                args_builder=builder
+                args_builder=builder,
+                nowait_args_builder=nowait_builder
             )
 
     return None
@@ -850,3 +864,250 @@ exit $EXIT_CODE
             exit_code=-1,
             duration_sec=time.time() - start_time
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-Terminal Interactive Spawner & Tracker
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SpawnedTerminal:
+    id: str
+    tool_name: str
+    cwd: str
+    pid: Optional[int]
+    title: str
+    created_at: float
+    session_dir: str
+    proc: Optional[subprocess.Popen]
+
+    def is_alive(self) -> bool:
+        if self.pid:
+            try:
+                os.kill(self.pid, 0)
+                return True
+            except OSError:
+                pass
+        if self.proc:
+            return self.proc.poll() is None
+        return False
+
+    def close(self) -> None:
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except OSError:
+                pass
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+        shutil.rmtree(self.session_dir, ignore_errors=True)
+
+
+class SpawnedTerminalTracker:
+    """Manages independent interactive desktop terminal windows spawned by user command."""
+
+    _instance: Optional["SpawnedTerminalTracker"] = None
+
+    def __init__(self):
+        self._terminals: Dict[str, SpawnedTerminal] = {}
+
+    @classmethod
+    def get_instance(cls) -> "SpawnedTerminalTracker":
+        if cls._instance is None:
+            cls._instance = SpawnedTerminalTracker()
+        return cls._instance
+
+    def spawn_terminal(
+        self,
+        tool: str,
+        cwd: str,
+        title: Optional[str] = None
+    ) -> Tuple[Optional[SpawnedTerminal], Optional[str]]:
+        """
+        Spawn a single interactive desktop terminal running `tool` inside `cwd`.
+        Returns: (SpawnedTerminal, error_message)
+        """
+        emulator = detect_desktop_terminal()
+        if not emulator:
+            return None, "No desktop terminal emulator available (headless environment)."
+
+        # Resolve directory
+        target_dir = os.path.abspath(os.path.expanduser(cwd))
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception as e:
+                return None, f"Cannot create directory '{target_dir}': {e}"
+
+        # Resolve tool executable
+        tool_clean = tool.lower().strip()
+        display_name = tool_clean
+        tool_bin = None
+
+        if tool_clean in ("agy", "antigravity", "antigravity_cli", "এজিআই", "অ্যান্টিগ্রাভিটি"):
+            tool_bin = find_tool_executable("antigravity_cli") or find_tool_executable("agy") or shutil.which("agy")
+            display_name = "antigravity_cli"
+        elif tool_clean in ("claude", "claude_code", "ক্লড"):
+            tool_bin = find_tool_executable("claude_code") or find_tool_executable("claude") or shutil.which("claude")
+            display_name = "claude_code"
+        elif tool_clean in ("opencode", "opencode_ai", "ওপেনকোড", "ওপেন কোড"):
+            tool_bin = find_tool_executable("opencode") or shutil.which("opencode")
+            display_name = "opencode"
+        elif tool_clean in ("bash", "sh", "terminal", "shell"):
+            tool_bin = os.environ.get("SHELL", "/bin/bash")
+            display_name = "bash"
+        else:
+            tool_bin = shutil.which(tool) or tool
+            display_name = tool
+
+        if not tool_bin:
+            return None, f"Tool '{tool}' is not installed or executable not found on this machine."
+
+        term_id = f"term_{int(time.time())}_{len(self._terminals) + 1}"
+        window_title = title or f"Foreman Worker: [{display_name}] ({os.path.basename(target_dir)})"
+        session_dir = tempfile.mkdtemp(prefix=f"foreman_term_{display_name}_")
+
+        pid_file = os.path.join(session_dir, "term.pid")
+        launcher_sh = os.path.join(session_dir, "launcher.sh")
+
+        quoted_cwd = shlex.quote(target_dir)
+        quoted_bin = shlex.quote(tool_bin)
+
+        script_content = f"""#!/bin/bash
+cd {quoted_cwd} || exit 1
+echo $$ > "{pid_file}"
+
+CYAN='\\033[1;36m'
+YELLOW='\\033[1;33m'
+GREEN='\\033[1;32m'
+GRAY='\\033[90m'
+RESET='\\033[0m'
+
+echo -e "${{CYAN}}╔════════════════════════════════════════════════════════════════════════════╗${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  ${{YELLOW}}🤖 FOREMAN AI WORKER TERMINAL : [{display_name}]${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  Directory : ${{GREEN}}{target_dir}${{RESET}}"
+echo -e "${{CYAN}}║${{RESET}}  Status    : ACTIVE & INTERACTIVE"
+echo -e "${{CYAN}}╚════════════════════════════════════════════════════════════════════════════╝${{RESET}}"
+echo ""
+
+{quoted_bin}
+EXIT_CODE=$?
+
+echo ""
+echo -e "${{GRAY}}────────────────────────────────────────────────────────────────────────────${{RESET}}"
+echo -e "${{GRAY}}[Worker process finished with exit code $EXIT_CODE. Press Enter to close window]${{RESET}}"
+read -r
+"""
+        with open(launcher_sh, "w", encoding="utf-8") as f:
+            f.write(script_content)
+        os.chmod(launcher_sh, stat.S_IRWXU)
+
+        builder = emulator.nowait_args_builder or emulator.args_builder
+        term_cmd = builder(window_title, launcher_sh)
+
+        try:
+            proc = subprocess.Popen(term_cmd, cwd=target_dir, start_new_session=True)
+        except Exception as e:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            return None, f"Failed to launch terminal window ({emulator.name}): {e}"
+
+        # Wait briefly for pid_file
+        deadline = time.time() + 1.5
+        pid_val = None
+        while time.time() < deadline:
+            val = _read_file_text(pid_file)
+            if val:
+                try:
+                    pid_val = int(val)
+                    break
+                except Exception:
+                    pass
+            time.sleep(0.05)
+
+        term_obj = SpawnedTerminal(
+            id=term_id,
+            tool_name=display_name,
+            cwd=target_dir,
+            pid=pid_val or proc.pid,
+            title=window_title,
+            created_at=time.time(),
+            session_dir=session_dir,
+            proc=proc
+        )
+        self._terminals[term_id] = term_obj
+        return term_obj, None
+
+    def spawn_batch(self, specs: List[Dict[str, Any]]) -> Tuple[List[SpawnedTerminal], List[str]]:
+        """
+        Spawn multiple terminals based on specifications list.
+        Each spec: {"provider": str, "count": int, "dir": str}
+        Enforces SystemGuard checks before launching.
+        """
+        from orchestrator.system_guard import SystemGuard
+
+        total_requested = sum(max(1, int(s.get("count", 1))) for s in specs)
+        target_dir = specs[0].get("dir", ".") if specs else "."
+
+        # System Guard check!
+        can_spawn, guard_msg = SystemGuard.can_spawn(total_requested, target_dir=target_dir)
+        if not can_spawn:
+            return [], [guard_msg or "Spawning blocked by System Resource Guard."]
+
+        spawned = []
+        errors = []
+        if guard_msg:
+            errors.append(guard_msg)
+
+        idx = 1
+        for s in specs:
+            tool = s.get("provider", "antigravity_cli")
+            count = max(1, int(s.get("count", 1)))
+            cwd = s.get("dir", ".")
+            for _ in range(count):
+                title = f"Foreman Worker #{idx}: [{tool}] ({os.path.basename(os.path.abspath(os.path.expanduser(cwd)))})"
+                term, err = self.spawn_terminal(tool=tool, cwd=cwd, title=title)
+                if term:
+                    spawned.append(term)
+                    idx += 1
+                elif err:
+                    errors.append(err)
+
+        return spawned, errors
+
+    def list_active(self) -> List[SpawnedTerminal]:
+        """Return list of active, alive spawned terminals."""
+        alive = []
+        for t_id, term in list(self._terminals.items()):
+            if term.is_alive():
+                alive.append(term)
+            else:
+                self._terminals.pop(t_id, None)
+        return alive
+
+    def close_all(self) -> None:
+        """Close all spawned terminals."""
+        for term in list(self._terminals.values()):
+            term.close()
+        self._terminals.clear()
+
+
+def spawn_interactive_terminal(tool: str, cwd: str, title: Optional[str] = None) -> Tuple[Optional[SpawnedTerminal], Optional[str]]:
+    return SpawnedTerminalTracker.get_instance().spawn_terminal(tool, cwd, title)
+
+
+def spawn_terminals_batch(specs: List[Dict[str, Any]]) -> Tuple[List[SpawnedTerminal], List[str]]:
+    return SpawnedTerminalTracker.get_instance().spawn_batch(specs)
+
+
+def list_active_terminals() -> List[SpawnedTerminal]:
+    return SpawnedTerminalTracker.get_instance().list_active()
+
+
+def close_all_spawned_terminals() -> None:
+    SpawnedTerminalTracker.get_instance().close_all()
+
+
+atexit.register(close_all_spawned_terminals)

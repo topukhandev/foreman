@@ -74,11 +74,16 @@ class SetupDoctor:
                         "roles": p.roles
                     })
 
+        # Check system hardware & resource headroom
+        from orchestrator.system_guard import SystemGuard
+        metrics = SystemGuard.get_metrics()
+
         return {
             "os": current_os,
             "python_version": python_ver,
             "tools": tools_status,
-            "configured_providers": configured_summary
+            "configured_providers": configured_summary,
+            "system_resources": metrics
         }
 
     @classmethod
@@ -123,4 +128,10 @@ class SetupDoctor:
                 lines.append(f"    Command: {cmd}")
 
         lines.append("===========================================================")
+
+        # Append hardware and resource guard report
+        from orchestrator.system_guard import SystemGuard
+        lines.append("")
+        lines.append(SystemGuard.render_report())
+
         return "\n".join(lines)

@@ -1,10 +1,10 @@
 machine: topukhan
 os: linux
-default_provider: opencode
+default_provider: antigravity_cli
 visual_terminal: true
 providers:
   antigravity_cli:
-    enabled: false
+    enabled: true
     tier: paid
     command: agy -p
     roles:
@@ -15,7 +15,7 @@ providers:
     - reviewer
     limits:
       max_runs_per_day: 50
-      max_parallel: 2
+      max_parallel: 10
   claude_code:
     enabled: false
     tier: paid
@@ -28,9 +28,9 @@ providers:
     - reviewer
     limits:
       max_runs_per_day: 50
-      max_parallel: 2
+      max_parallel: 10
   opencode:
-    enabled: true
+    enabled: false
     tier: free
     command: opencode run
     roles:
@@ -42,7 +42,7 @@ providers:
     - bulk
     limits:
       max_runs_per_day: 100
-      max_parallel: 4
+      max_parallel: 10
   mock:
     enabled: false
     tier: free
@@ -55,12 +55,12 @@ providers:
     - reviewer
     limits:
       max_runs_per_day: 1000
-      max_parallel: 4
+      max_parallel: 10
 routing:
   reviewer_must_differ_from_builder: true
   fallback: any_enabled
 budget:
-  max_parallel: 2
+  max_parallel: 10
   max_time_per_task_sec: 300
   max_retries: 3
   warn_at_percent: 80

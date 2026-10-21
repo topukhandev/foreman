@@ -3,7 +3,7 @@
 import os
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 import yaml
 from orchestrator.config import load_config, OrchestratorConfig
@@ -286,6 +286,227 @@ class InteractiveShell:
             return ""  # Trigger interactive selector menu
         return None
 
+    def _detect_spawn_terminals_intent(self, text: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Detect natural language request to open one or more worker terminal windows.
+        Supports Bengali and English phrasings, numbers, providers, and target directories.
+        """
+        import re
+        t = text.strip()
+        t_lower = t.lower()
+
+        # Check triggers
+        en_match = bool(re.search(r'\b(open|spawn|launch|start)\b.*?\b(terminals?|sessions?|windows?)\b', t_lower))
+        bn_match = bool(re.search(r'(টার্মিনাল|সেশন|উইন্ডো).*?(ওপেন|খোল|চালু|চালাও)', t) or re.search(r'(ওপেন|খোল|চালু).*?(টার্মিনাল|সেশন|উইন্ডো)', t))
+
+        if not (en_match or bn_match):
+            return None
+
+        # Number map
+        num_map = {
+            "এক": 1, "একটা": 1, "একটি": 1, "১": 1, "১টা": 1, "১টি": 1, "one": 1, "1": 1, "a": 1, "an": 1,
+            "দুই": 2, "দুইটা": 2, "দুটো": 2, "দুটি": 2, "২": 2, "২টা": 2, "২টি": 2, "two": 2, "2": 2,
+            "তিন": 3, "তিনটা": 3, "তিনটি": 3, "৩": 3, "৩টা": 3, "৩টি": 3, "three": 3, "3": 3,
+            "চার": 4, "চারটা": 4, "চারটি": 4, "৪": 4, "৪টা": 4, "৪টি": 4, "four": 4, "4": 4,
+            "পাঁচ": 5, "পাঁচটা": 5, "৫": 5, "৫টা": 5, "five": 5, "5": 5,
+            "ছয়": 6, "ছয়টা": 6, "৬": 6, "six": 6, "6": 6,
+            "সাত": 7, "সাতটা": 7, "৭": 7, "seven": 7, "7": 7,
+            "আট": 8, "আটটা": 8, "৮": 8, "eight": 8, "8": 8,
+            "নয়": 9, "নয়টা": 9, "৯": 9, "nine": 9, "9": 9,
+            "দশ": 10, "দশটা": 10, "১০": 10, "ten": 10, "10": 10
+        }
+
+        # Provider map
+        provider_map = {
+            "claude": "claude_code", "claude_code": "claude_code", "ক্লড": "claude_code",
+            "antigravity": "antigravity_cli", "antigravity_cli": "antigravity_cli",
+            "agy": "antigravity_cli", "এজিআই": "antigravity_cli",
+            "অ্যান্টিগ্রাভিটি": "antigravity_cli", "এন্টিগ্রাভিটি": "antigravity_cli",
+            "opencode": "opencode", "opencode_ai": "opencode", "ওপেনকোড": "opencode", "ওপেন কোড": "opencode",
+            "bash": "bash", "shell": "bash"
+        }
+
+        default_provider = self._get_active_provider_name()
+        if default_provider == "mock":
+            default_provider = "antigravity_cli"
+
+        clauses = re.split(r'[,;]|\band\b|\bএবং\b|\bআর\b', t)
+        results = []
+
+        for c in clauses:
+            c_clean = c.strip()
+            if not c_clean:
+                continue
+
+            found_count = 1
+            has_explicit_count = False
+            m_digit = re.search(r'\b(\d+)\b', c_clean)
+            if m_digit:
+                found_count = int(m_digit.group(1))
+                has_explicit_count = True
+            else:
+                for k, v in num_map.items():
+                    if re.search(r'(^|\s|[^\w])' + re.escape(k) + r'($|\s|[^\w])', c_clean, re.IGNORECASE):
+                        found_count = v
+                        has_explicit_count = True
+                        break
+
+            c_lower = c_clean.lower()
+            detected_provider = default_provider
+            has_explicit_provider = False
+            for p_key, p_val in provider_map.items():
+                if p_key in c_lower:
+                    detected_provider = p_val
+                    has_explicit_provider = True
+                    break
+
+            detected_dir = self.project_dir
+            path_match = re.search(r'(/[\w\.\-/~]+|~/[\w\.\-/~]+|[A-Za-z]:\\[\w\.\-\\]+)', c_clean)
+            if path_match:
+                detected_dir = os.path.abspath(os.path.expanduser(path_match.group(1)))
+
+            if has_explicit_count or has_explicit_provider or "টার্মিনাল" in c_clean or "terminal" in c_lower or "সেশন" in c_clean or "session" in c_lower:
+                results.append({
+                    "provider": detected_provider,
+                    "count": found_count,
+                    "dir": detected_dir
+                })
+
+        if results:
+            return results
+
+        overall_count = 1
+        for k, v in num_map.items():
+            if re.search(r'(^|\s|[^\w])' + re.escape(k) + r'($|\s|[^\w])', t, re.IGNORECASE):
+                overall_count = v
+                break
+        return [{
+            "provider": default_provider,
+            "count": overall_count,
+            "dir": self.project_dir
+        }]
+
+    def handle_spawn_command(self, arg: str = "", parsed_specs: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Spawn independent desktop worker terminal windows."""
+        from orchestrator.terminal import spawn_terminals_batch, detect_desktop_terminal
+        from orchestrator.system_guard import SystemGuard
+
+        emulator = detect_desktop_terminal()
+        if not emulator:
+            print("\n\033[1;33m⚠️  No Desktop GUI Terminal Found\033[0m")
+            print("Cannot launch visible desktop terminal windows in headless mode (no DISPLAY / WAYLAND).")
+            return
+
+        specs = parsed_specs or []
+        default_p = self._get_active_provider_name()
+        if default_p == "mock":
+            default_p = "antigravity_cli"
+
+        if not specs:
+            arg_clean = arg.strip()
+            parts = arg_clean.split()
+            if len(parts) == 1 and parts[0].isdigit():
+                specs = [{"provider": default_p, "count": int(parts[0]), "dir": self.project_dir}]
+            elif len(parts) == 1 and parts[0].lower() in ("agy", "antigravity", "claude", "opencode", "bash"):
+                specs = [{"provider": parts[0].lower(), "count": 1, "dir": self.project_dir}]
+            elif len(parts) >= 2 and parts[1].isdigit():
+                target_dir = parts[2] if len(parts) > 2 else self.project_dir
+                specs = [{"provider": parts[0], "count": int(parts[1]), "dir": os.path.abspath(os.path.expanduser(target_dir))}]
+            elif len(parts) >= 2 and parts[0].isdigit():
+                target_dir = parts[2] if len(parts) > 2 else self.project_dir
+                specs = [{"provider": parts[1], "count": int(parts[0]), "dir": os.path.abspath(os.path.expanduser(target_dir))}]
+            elif arg_clean:
+                specs = self._detect_spawn_terminals_intent(arg_clean) or []
+
+        if not specs:
+            options = [
+                ("1", f"Active provider ({default_p}) - 1 terminal in current project"),
+                ("2", f"Active provider ({default_p}) - 4 terminals in current project"),
+                ("3", "Custom (select provider, count, and directory)")
+            ]
+            choice = select_from_menu("? Launch Desktop Worker Terminal(s):", options)
+            if not choice:
+                return
+            if choice == "1":
+                specs = [{"provider": default_p, "count": 1, "dir": self.project_dir}]
+            elif choice == "2":
+                specs = [{"provider": default_p, "count": 4, "dir": self.project_dir}]
+            elif choice == "3":
+                p_choice = select_from_menu("? Select AI Tool for Terminal:", [
+                    ("1", "antigravity_cli (agy)"),
+                    ("2", "claude_code (claude)"),
+                    ("3", "opencode (opencode)"),
+                    ("4", "bash / shell")
+                ])
+                p_map = {"1": "antigravity_cli", "2": "claude_code", "3": "opencode", "4": "bash"}
+                p_name = p_map.get(p_choice, default_p)
+                count_str = read_input_with_esc("Number of terminals to open [default: 1]: ", default="1")
+                try:
+                    count_val = max(1, int(count_str or 1))
+                except ValueError:
+                    count_val = 1
+                dir_str = read_input_with_esc(f"Target directory [default: {self.project_dir}]: ", default=self.project_dir)
+                target_dir = os.path.abspath(os.path.expanduser(dir_str or self.project_dir))
+                specs = [{"provider": p_name, "count": count_val, "dir": target_dir}]
+
+        total_terminals = sum(s.get("count", 1) for s in specs)
+
+        print(f"\n🛡️ Checking System Resource Guard before spawning {total_terminals} terminal(s)...")
+        spawned, errors = spawn_terminals_batch(specs)
+
+        if errors:
+            for err in errors:
+                print(f"\n{err}")
+
+        if spawned:
+            print(f"\n\033[1;32m✓ Successfully spawned {len(spawned)} desktop terminal window(s):\033[0m")
+            for idx, term in enumerate(spawned, 1):
+                print(f"   • [{idx}] \033[1;36m{term.tool_name}\033[0m (PID: {term.pid}) @ \033[1;33m{term.cwd}\033[0m")
+            print("\n💡 These terminal windows are active on your desktop. Type /terminals to inspect or close them.\n")
+        elif not errors:
+            print("\n(No terminals were spawned.)\n")
+
+    def handle_terminals_command(self) -> None:
+        """Inspect and manage spawned desktop worker terminal windows."""
+        from orchestrator.terminal import list_active_terminals, close_all_spawned_terminals
+
+        active = list_active_terminals()
+        if not active:
+            print("\n[!] No standalone desktop worker terminals currently active.")
+            print("    Use /spawn [count/tool/dir] to open worker terminal windows.")
+            return
+
+        print(f"\nActive Desktop Worker Terminals ({len(active)} open):")
+        for idx, term in enumerate(active, 1):
+            uptime = max(0.0, time.time() - term.created_at)
+            print(f"  [{idx}] {term.tool_name} (PID: {term.pid}) @ {term.cwd} [Uptime: {uptime:.0f}s]")
+
+        options = [
+            ("1", "Keep all running (Back)"),
+            ("2", "Close all spawned terminal windows"),
+            ("3", "Close a specific terminal by number")
+        ]
+        choice = select_from_menu("? Terminal Window Management:", options)
+        if choice == "2":
+            close_all_spawned_terminals()
+            print("[OK] Closed all spawned desktop terminal windows.")
+        elif choice == "3":
+            idx_str = read_input_with_esc("Enter terminal number to close: ")
+            try:
+                pick = int(idx_str)
+                if 1 <= pick <= len(active):
+                    active[pick - 1].close()
+                    print(f"[OK] Closed terminal #{pick} ({active[pick - 1].tool_name}).")
+                else:
+                    print("Invalid terminal number.")
+            except Exception:
+                pass
+
+    def handle_system_status(self) -> None:
+        """Display real-time System Resource Guard metrics."""
+        from orchestrator.system_guard import SystemGuard
+        print("\n" + SystemGuard.render_report(self.project_dir))
+
     def handle_new_session(self) -> None:
         """Start a fresh conversation thread with active AI worker."""
         from orchestrator.terminal import close_all_visual_sessions
@@ -515,7 +736,10 @@ class InteractiveShell:
                 f"1. Answer the user directly, clearly, and concisely based on the project context above.\n"
                 f"2. If the user asks about project state or progress, summarize accurately from the state above.\n"
                 f"3. If the user is proposing a software feature or engineering goal, provide a crisp answer or outline, "
-                f"and inform them they can run '/run <goal>' to trigger a complete 4-agent sprint."
+                f"and inform them they can run '/run <goal>' to trigger a complete 4-agent sprint.\n"
+                f"4. If the user asks about spawning/opening worker terminals or concurrency limits, inform them that "
+                f"Foreman supports up to 10-15 concurrent workers governed by the real-time System Resource Guard, "
+                f"and they can type '/spawn [count/tool/dir]' or ask to open terminals at any time."
             )
             session_arg = self.session_id if p_name == "claude_code" else None
 
@@ -626,7 +850,10 @@ class InteractiveShell:
                     arg = " ".join(cmd_parts[1:]) if len(cmd_parts) > 1 else ""
 
                     # Auto-expand unambiguous slash command prefix (e.g. /pro -> /provider, /st -> /status)
-                    all_cmds = ["/run", "/new", "/provider", "/visual", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"]
+                    all_cmds = [
+                        "/run", "/spawn", "/terminals", "/system", "/new", "/provider",
+                        "/visual", "/status", "/tasks", "/link", "/doctor", "/clear", "/help", "/exit", "/quit"
+                    ]
                     matches = [c for c in all_cmds if c.startswith(cmd)]
                     if len(matches) == 1:
                         cmd = matches[0]
@@ -636,6 +863,12 @@ class InteractiveShell:
                         break
                     elif cmd == "/run":
                         self.handle_run_command(arg)
+                    elif cmd in ("/spawn", "/open", "/terminal"):
+                        self.handle_spawn_command(arg)
+                    elif cmd in ("/terminals", "/sessions"):
+                        self.handle_terminals_command()
+                    elif cmd in ("/system", "/guard", "/hardware"):
+                        self.handle_system_status()
                     elif cmd == "/new":
                         self.handle_new_session()
                     elif cmd == "/clear":
@@ -676,11 +909,17 @@ class InteractiveShell:
                         self.handle_visual_toggle(visual_intent)
                         continue
 
-                    # 3. Fast local operational query (who are you, where am i)
+                    # 3. Check for natural language terminal spawn intent (e.g. "চারটা টার্মিনাল ওপেন করো", "open 4 terminals")
+                    spawn_intent = self._detect_spawn_terminals_intent(line)
+                    if spawn_intent is not None:
+                        self.handle_spawn_command(parsed_specs=spawn_intent)
+                        continue
+
+                    # 4. Fast local operational query (who are you, where am i)
                     if self.handle_lightweight_query(line):
                         continue
 
-                    # 3. If user specifically asks to run/build/implement a full project feature:
+                    # 5. If user specifically asks to run/build/implement a full project feature:
                     lower = line.strip().lower()
                     if (lower.startswith("run ") or lower.startswith("build ") or 
                         lower.startswith("implement ") or lower.startswith("create a ")):
@@ -695,8 +934,9 @@ class InteractiveShell:
                             self.execute_goal(line)
                             continue
 
-                    # 4. Natural Language query -> Bridge directly to active AI Provider!
+                    # 6. Natural Language query -> Bridge directly to active AI Provider!
                     self.bridge_to_ai_provider(line)
         finally:
-            from orchestrator.terminal import close_all_visual_sessions
+            from orchestrator.terminal import close_all_visual_sessions, close_all_spawned_terminals
             close_all_visual_sessions()
+            close_all_spawned_terminals()

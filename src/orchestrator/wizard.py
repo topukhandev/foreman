@@ -95,28 +95,28 @@ def build_config_for_preset(preset_key: str, detected_tools: Dict[str, Any]) -> 
                 "tier": "paid",
                 "command": "agy -p",
                 "roles": ["planner", "critic", "coder", "researcher", "reviewer"],
-                "limits": {"max_runs_per_day": 50, "max_parallel": 2}
+                "limits": {"max_runs_per_day": 50, "max_parallel": 10}
             },
             "claude_code": {
                 "enabled": enable_claude,
                 "tier": "paid",
                 "command": "claude -p",
                 "roles": ["planner", "critic", "coder", "researcher", "reviewer"],
-                "limits": {"max_runs_per_day": 50, "max_parallel": 2}
+                "limits": {"max_runs_per_day": 50, "max_parallel": 10}
             },
             "opencode": {
                 "enabled": enable_opencode,
                 "tier": "free",
                 "command": "opencode run",
                 "roles": ["planner", "critic", "coder", "researcher", "reviewer", "bulk"],
-                "limits": {"max_runs_per_day": 100, "max_parallel": 4}
+                "limits": {"max_runs_per_day": 100, "max_parallel": 10}
             },
             "mock": {
                 "enabled": enable_mock,
                 "tier": "free",
                 "command": "mock",
                 "roles": ["planner", "critic", "coder", "researcher", "reviewer"],
-                "limits": {"max_runs_per_day": 1000, "max_parallel": 4}
+                "limits": {"max_runs_per_day": 1000, "max_parallel": 10}
             }
         },
         "routing": {
@@ -124,7 +124,7 @@ def build_config_for_preset(preset_key: str, detected_tools: Dict[str, Any]) -> 
             "fallback": "any_enabled"
         },
         "budget": {
-            "max_parallel": 2,
+            "max_parallel": 10,
             "max_time_per_task_sec": 300,
             "max_retries": 3,
             "warn_at_percent": 80,

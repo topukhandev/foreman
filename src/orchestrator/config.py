@@ -23,7 +23,7 @@ class ProviderConfig:
 
 @dataclass
 class BudgetConfig:
-    max_parallel: int = 2
+    max_parallel: int = 10
     max_time_per_task_sec: int = 300
     max_retries: int = 3
     warn_at_percent: int = 80
@@ -62,7 +62,7 @@ providers:
     roles: [planner, critic, coder, researcher, reviewer]
     limits:
       max_runs_per_day: 50
-      max_parallel: 2
+      max_parallel: 10
 
   claude_code:
     enabled: false
@@ -71,7 +71,7 @@ providers:
     roles: [planner, critic, coder, reviewer]
     limits:
       max_runs_per_day: 50
-      max_parallel: 2
+      max_parallel: 10
 
   opencode:
     enabled: false
@@ -80,7 +80,7 @@ providers:
     roles: [bulk, researcher]
     limits:
       max_runs_per_day: 100
-      max_parallel: 4
+      max_parallel: 10
 
   mock:
     enabled: false
@@ -89,14 +89,14 @@ providers:
     roles: [planner, critic, coder, researcher, reviewer]
     limits:
       max_runs_per_day: 1000
-      max_parallel: 4
+      max_parallel: 10
 
 routing:
   reviewer_must_differ_from_builder: true
   fallback: any_enabled
 
 budget:
-  max_parallel: 2
+  max_parallel: 10
   max_time_per_task_sec: 300
   max_retries: 3
   warn_at_percent: 80
@@ -161,7 +161,7 @@ def load_config(config_path: str) -> OrchestratorConfig:
     # Budget
     b_data = data.get("budget", {})
     budget = BudgetConfig(
-        max_parallel=b_data.get("max_parallel", 2),
+        max_parallel=b_data.get("max_parallel", 10),
         max_time_per_task_sec=b_data.get("max_time_per_task_sec", 300),
         max_retries=b_data.get("max_retries", 3),
         warn_at_percent=b_data.get("warn_at_percent", 80),
