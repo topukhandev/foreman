@@ -4,7 +4,7 @@
 **Primary AI Provider**: `antigravity_cli`
 **Status**: `idle` (All 64 tests passing)
 **Milestones Completed**:
-- Natural language directory resolution & tool-specific folder binding
+- Pure front-desk pass-through: removed regex heuristics; user prompts bridge directly to active AI session
 - Up/Down arrow terminal command history navigation (`~/.foreman_history`)
 - Horizontal cursor movement (Left/Right arrows, Home/End, Backspace/Delete)
 
