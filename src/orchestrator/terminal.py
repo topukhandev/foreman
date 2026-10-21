@@ -716,6 +716,8 @@ echo -e "${{CYAN}}╔═══════════════════�
 echo -e "${{CYAN}}║${{RESET}}  ${{YELLOW}}▶ [{role.upper()}]${{RESET}} Task #{task_id}: ${{WHITE}}{title[:45]}${{RESET}}"
 echo -e "${{CYAN}}║${{RESET}}  Command : ${{GRAY}}{display_cmd}${{RESET}}"
 echo -e "${{CYAN}}╚════════════════════════════════════════════════════════════════════════════╝${{RESET}}"
+echo -e "${{YELLOW}}⚡ AI worker is actively generating code, creating files, and executing tools...${{RESET}}"
+echo -e "${{GRAY}}   Live streams and outputs will appear below:${{RESET}}"
 echo ""
 
 ({quoted_cmd}) 2>&1 | tee "{task_out_file}" &
