@@ -51,10 +51,10 @@ class DeveloperPack:
                 "Objective: {goal}\n"
                 "Incorporate the architectural plan and security mitigations:\n{previous_output}\n\n"
                 "Provide:\n"
-                "1. Detailed code implementation / patch logic\n"
-                "2. Error handling and logging\n"
-                "3. Comprehensive unit test cases (happy path + edge cases)\n"
-                "4. Integration verification steps"
+                "1. Implement the solution: create all necessary source code files, data models, and assets directly on disk in the project directory.\n"
+                "2. Robust error handling, validation, and modular architecture.\n"
+                "3. Write comprehensive unit test cases and run them to verify they pass.\n"
+                "4. Deliver an implementation report summarizing all created files, test execution results, and instructions to run the application."
             )
         ),
         PackTaskSpec(

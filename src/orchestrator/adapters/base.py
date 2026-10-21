@@ -111,12 +111,20 @@ class BaseCLIAdapter:
 
         try:
             # Start in new session/process group on Unix to allow killing child trees
+            env = os.environ.copy()
+            current_path = env.get("PATH", "")
+            home = os.path.expanduser("~")
+            path_extras = [
+                os.path.join(home, ".local/bin"),
+                os.path.join(home, ".nvm/versions/node/v24.14.1/bin"),
+            ]
+            env["PATH"] = ":".join(path_extras + [current_path])
             popen_kwargs = {
                 "cwd": cwd,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
                 "text": True,
-                "env": os.environ.copy()
+                "env": env
             }
             if os.name != "nt":
                 popen_kwargs["start_new_session"] = True

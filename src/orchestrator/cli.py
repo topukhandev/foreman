@@ -111,7 +111,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 verified=True
             )
 
-    goal = args.goal or "Validate and prepare a launch strategy for an AI Developer Tool"
+    goal = ""
+    if getattr(args, "file", None) and os.path.isfile(args.file):
+        with open(args.file, "r", encoding="utf-8") as f:
+            goal = f.read().strip()
+    elif args.goal and os.path.isfile(args.goal):
+        with open(args.goal, "r", encoding="utf-8") as f:
+            goal = f.read().strip()
+    else:
+        goal = args.goal or "Validate and prepare a launch strategy for an AI Developer Tool"
     pack_name = args.pack or "developer"
 
     if getattr(args, "visual", None) is not None:
@@ -201,6 +209,7 @@ def main() -> None:
     # run
     p_run = subparsers.add_parser("run", help="Run a multi-agent workflow on a goal")
     p_run.add_argument("goal", nargs="?", default="", help="Goal or user prompt")
+    p_run.add_argument("--file", "-f", help="Path to markdown file containing goal prompt")
     p_run.add_argument("--pack", choices=list(PACKS.keys()), default="developer", help="Role pack to execute (developer, business_idea, qa)")
     p_run.add_argument("--project", default=".", help="Project directory")
     p_run.add_argument("--mock", action="store_true", help="Run with mock/simulation workers")

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import os
 import time
+import uuid
 from typing import Callable, Dict, List, Optional
 from orchestrator.config import OrchestratorConfig
 from orchestrator.budget import BudgetGuard, BudgetExceededError, LoopDetectedError
@@ -317,7 +318,45 @@ class OrchestratorEngine:
                 finally:
                     self.budget.release(f"rev_{task_id}")
 
-                self.progress.agent_finished(rev_agent_key, task_id, True)
+                rev_success = bool(rev_res and rev_res.success)
+                self.progress.agent_finished(rev_agent_key, task_id, rev_success)
+
+                # Fallback to worker provider in a fresh isolated session if reviewer failed
+                if (not rev_res or not rev_res.success) and rev_provider != worker_provider:
+                    err_summary = rev_res.error if rev_res and rev_res.error else "Reviewer failed or not available"
+                    self._notify_progress(
+                        f"\033[1;33m⚠ [Reviewer]\033[0m Reviewer '{rev_provider}' failed ({err_summary}). "
+                        f"Falling back to isolated clean session via '{worker_provider}'..."
+                    )
+                    fb_session = f"fresh_rev_{uuid.uuid4().hex[:8]}"
+                    fb_agent_key = f"rev_{worker_provider}_{fb_session}"
+                    fb_adapter = self.adapters.get(worker_provider)
+
+                    try:
+                        self.progress.agent_started(
+                            agent_id=fb_agent_key,
+                            provider=worker_provider,
+                            role="reviewer",
+                            task_id=task_id,
+                            task_title=f"Fallback Review of {title}",
+                            session_id=fb_session
+                        )
+                        fb_res = fb_adapter.run(
+                            prompt=review_prompt,
+                            cwd=self.project_dir,
+                            task_id=task_id,
+                            session_id=fb_session
+                        ) if fb_adapter else None
+                    finally:
+                        self.progress.agent_finished(
+                            fb_agent_key,
+                            task_id,
+                            bool(fb_res and fb_res.success)
+                        )
+
+                    if fb_res and fb_res.success:
+                        rev_res = fb_res
+                        rev_provider = worker_provider
 
                 rev_output = rev_res.output if rev_res else ""
                 self.hub.append_log(task_id, f"REVIEWER OUTPUT ({rev_provider}):\n{rev_output}")

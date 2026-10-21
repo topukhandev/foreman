@@ -1012,6 +1012,13 @@ class InteractiveShell:
             print("No goal specified. Cancelled.")
             return
 
+        if os.path.isfile(goal.strip()):
+            try:
+                with open(goal.strip(), "r", encoding="utf-8") as f:
+                    goal = f.read().strip()
+            except Exception:
+                pass
+
         if not self.check_or_prompt_ai_provider():
             return
 
