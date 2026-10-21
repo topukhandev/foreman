@@ -3,8 +3,10 @@
 import os
 import re
 import shlex
+import shutil
 import signal
 import sys
+import textwrap
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
@@ -123,6 +125,58 @@ def extract_spawn_directives(text: str, default_provider: str = "antigravity_cli
     return specs
 
 
+def clean_user_facing_output(text: str) -> str:
+    """
+    Filter out internal /spawn directives and code blocks that contain only spawn directives,
+    so the user gets a concise, high-signal explanation without internal CLI plumbing commands.
+    """
+    lines = text.splitlines()
+    filtered = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Skip isolated ```bash /spawn ... ``` blocks
+        if line.strip().startswith("```"):
+            j = i + 1
+            block_lines = []
+            while j < len(lines) and not lines[j].strip().startswith("```"):
+                block_lines.append(lines[j])
+                j += 1
+            if j < len(lines):
+                all_spawn = all(
+                    re.search(r"^\s*(?:/spawn|ACTION:\s*SPAWN)\b", bl, re.IGNORECASE) or not bl.strip()
+                    for bl in block_lines
+                ) and any(re.search(r"^\s*(?:/spawn|ACTION:\s*SPAWN)\b", bl, re.IGNORECASE) for bl in block_lines)
+                if all_spawn:
+                    i = j + 1
+                    continue
+        # Skip single spawn line
+        if re.search(r"^\s*(?:/spawn|ACTION:\s*SPAWN)\b", line, re.IGNORECASE):
+            i += 1
+            continue
+        filtered.append(line)
+        i += 1
+    return "\n".join(filtered).strip()
+
+
+def print_claude_error(error_msg: str) -> None:
+    """Render a clean, low-verbosity Claude Code style error container."""
+    lines = error_msg.strip().splitlines()
+    cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+    box_w = max(40, min(cols - 4, 76))
+    inner_w = box_w - 4
+    top = f"\033[90m╭─\033[1;31m Error \033[0;90m{'─' * max(0, box_w - 11)}╮\033[0m"
+    bot = f"\033[90m╰{'─' * (box_w - 2)}╯\033[0m"
+    print(f"\n{top}")
+    for l in lines[:10]:
+        for wrapped in textwrap.wrap(l, width=inner_w) or [""]:
+            pad = " " * max(0, inner_w - len(wrapped))
+            print(f"\033[90m│\033[0m  \033[1;31m{wrapped}\033[0m{pad}\033[90m│\033[0m")
+    if len(lines) > 10:
+        print(f"\033[90m│\033[0m  \033[2;90m... ({len(lines) - 10} more lines truncated)\033[0m{' ' * max(0, inner_w - 32)}\033[90m│\033[0m")
+    print(f"{bot}\n")
+
+
 class InteractiveShell:
     """Claude Code / Antigravity style interactive terminal console."""
 
@@ -182,7 +236,7 @@ class InteractiveShell:
         return "mock"
 
     def render_banner(self) -> None:
-        """Render welcoming interactive session banner."""
+        """Render clean, modern Claude Code style session banner."""
         from orchestrator.terminal import detect_desktop_terminal
         active_p = self._get_active_provider_name()
         diag = SetupDoctor.check_system(self.config)
@@ -194,24 +248,44 @@ class InteractiveShell:
 
         emulator = detect_desktop_terminal()
         if self.visual_mode and emulator:
-            vis_str = f"Enabled ({emulator.name})"
+            vis_str = f"\033[1;32mON\033[0m \033[90m({emulator.name})\033[0m"
         elif self.visual_mode:
-            vis_str = "Enabled (No GUI display found)"
+            vis_str = "\033[1;33mON (No GUI display)\033[0m"
         else:
-            vis_str = "Disabled (Headless background)"
+            vis_str = "\033[90mOFF (Headless)\033[0m"
 
-        print("========================================================================")
-        print(" 🎛️  FOREMAN ORCHESTRATOR — Front-Desk Session")
-        print(f" Directory  : {self.project_dir}")
-        print(f" Primary AI : {active_p}")
-        print(f" Effort     : {self.effort.upper()} (switch via /effort)")
-        print(f" Visual Term: {vis_str}")
-        print(f" Tools Found: {', '.join(available_tools) or 'None'}")
-        print(f" Workspaces : {services_str}")
-        print("------------------------------------------------------------------------")
-        print(" Type '/' to see live commands, or ask any question/goal below.")
-        print(" Type /help for usage guide, /exit to quit.")
-        print("========================================================================")
+        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
+        box_w = max(44, min(cols - 4, 72))
+        inner_w = box_w - 4
+
+        home = os.path.expanduser("~")
+        disp_dir = ("~" + self.project_dir[len(home):]) if self.project_dir.startswith(home) else self.project_dir
+        if len(disp_dir) > inner_w - 12:
+            disp_dir = "..." + disp_dir[-(inner_w - 15):]
+        tools_str = ", ".join(available_tools) if available_tools else "none"
+
+        top = f"\033[90m╭{'─' * (box_w - 2)}╮\033[0m"
+        bot = f"\033[90m╰{'─' * (box_w - 2)}╯\033[0m"
+
+        def _row(text: str) -> str:
+            clean_len = len(re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text))
+            pad = " " * max(0, inner_w - clean_len)
+            return f"\033[90m│\033[0m  {text}{pad}\033[90m│\033[0m"
+
+        banner_lines = [
+            top,
+            _row("\033[1;37mForeman Orchestrator\033[0m"),
+            _row("\033[90mAutonomous multi-provider AI coordinator & front desk\033[0m"),
+            _row(""),
+            _row(f"\033[36mcwd\033[0m     : \033[1;33m{disp_dir}\033[0m"),
+            _row(f"\033[36mworker\033[0m  : \033[1;36m{active_p}\033[0m \033[90m•\033[0m \033[36meffort\033[0m: \033[1;34m{self.effort.upper()}\033[0m \033[90m•\033[0m \033[36mvisual\033[0m: {vis_str}"),
+            _row(f"\033[36mtools\033[0m   : \033[90m{tools_str}\033[0m"),
+            _row(f"\033[36mlinks\033[0m   : \033[90m{services_str}\033[0m"),
+            _row(""),
+            _row("\033[90mType \033[1;37m/\033[0;90m for menu, \033[1;37m/run\033[0;90m for sprint, or ask any question below\033[0m"),
+            bot
+        ]
+        print("\n" + "\n".join(banner_lines))
 
     def print_slash_menu(self, filter_prefix: str = "") -> None:
         """Render dropdown menu of available slash commands."""
@@ -397,7 +471,10 @@ class InteractiveShell:
         close_all_spawned_terminals()
         elapsed = time.time() - start_t
         self.last_duration_sec = elapsed
-        print(f"\n\033[1;32m✓ Closed all active terminal window(s)\033[0m ({active_cnt} window(s) closed in {elapsed:.2f}s).\n")
+        print("\n\033[1;36m⏺ Action:\033[0m Close Terminals")
+        print(f"  \033[90m↳ Closed  :\033[0m \033[1;37m{active_cnt} active terminal window(s)\033[0m")
+        print(f"  \033[90m↳ Duration:\033[0m {elapsed:.2f}s")
+        print("  \033[1;32m✓ Terminals closed successfully.\033[0m\n")
 
     def _detect_visual_intent(self, text: str) -> Optional[str]:
         """Detect natural language intent to configure visual worker terminal windows."""
@@ -479,13 +556,20 @@ class InteractiveShell:
                 print(f"\n{err}")
 
         if spawned:
+            print("\n\033[1;36m⏺ Action:\033[0m Launch Worker Terminal(s)")
+            home = os.path.expanduser("~")
             counts: Dict[str, int] = {}
             tool_dirs: Dict[str, str] = {}
             for t in spawned:
                 counts[t.tool_name] = counts.get(t.tool_name, 0) + 1
                 tool_dirs[t.tool_name] = t.cwd
+                cwd_disp = ("~" + t.cwd[len(home):]) if t.cwd.startswith(home) else t.cwd
+                pid_info = f" (PID: {t.pid})" if t.pid else ""
+                print(f"  \033[90m↳ Tool     :\033[0m \033[1;37m{t.tool_name}\033[0m")
+                print(f"  \033[90m↳ Directory:\033[0m \033[1;33m{cwd_disp}\033[0m")
+                print(f"  \033[90m↳ Window   :\033[0m \033[1;32m{emulator.name}{pid_info}\033[0m")
+
             parts = []
-            home = os.path.expanduser("~")
             for tool, cnt in counts.items():
                 cwd = tool_dirs.get(tool, self.project_dir)
                 if cwd == self.project_dir:
@@ -495,7 +579,7 @@ class InteractiveShell:
                 else:
                     pretty_cwd = cwd
                 parts.append(f"{cnt}x {tool} ({pretty_cwd})")
-            print(f"\n\033[1;32m✓ Opened {len(spawned)} terminal window(s):\033[0m {', '.join(parts)}")
+            print(f"  \033[1;32m✓ Opened {len(spawned)} terminal window(s):\033[0m {', '.join(parts)}")
 
     def handle_spawn_command(self, arg_str: str = "") -> None:
         """Open worker terminal window(s) via /spawn [count] [tool] [dir] or interactive menu."""
@@ -848,8 +932,10 @@ class InteractiveShell:
         if result.success and result.output:
             self.session_turns += 1
             if not stream_mode:
-                formatted = render_markdown(result.output.strip())
-                print(formatted)
+                clean_output = clean_user_facing_output(result.output)
+                if clean_output:
+                    formatted = render_markdown(clean_output)
+                    print(formatted)
 
             # Check for spawn directives emitted by AI worker
             specs = extract_spawn_directives(
@@ -858,17 +944,16 @@ class InteractiveShell:
                 default_dir=self.project_dir
             )
             if specs:
-                print("\n\033[1;36m[Foreman Conductor]\033[0m Launching requested worker terminals on desktop...")
                 self.open_requested_terminals(specs)
 
         elif result.error:
-            print(f"\n\033[1;31m[Worker Error]\033[0m {result.error}\n")
+            print_claude_error(result.error)
         elif not stream_mode:
-            print("\n(No response received from AI worker.)\n")
+            print("\n\033[90m(No response received from AI worker.)\033[0m\n")
 
-        # Explicit execution completion footer displaying exact time taken
+        # Claude Code style execution completion footer
         if result.duration_sec > 0:
-            print(f"\n\033[90m─── (⏱️  Completed in {result.duration_sec:.1f}s • Provider: {p_name} • Effort: {self.effort.upper()}) ───\033[0m")
+            print(f"\n\033[90m⏺ \033[1;36m{p_name}\033[0m \033[90m• effort: \033[1;34m{self.effort.upper()}\033[0m \033[90m• duration: \033[0m{result.duration_sec:.1f}s\033[0m")
 
     def execute_goal(self, goal: str) -> None:
         """Execute full multi-agent workflow sprint on user goal with confirmation."""
@@ -955,13 +1040,13 @@ class InteractiveShell:
 
         p_badge = f"\033[1;36mProvider:\033[0m {active_p}"
         e_badge = f"\033[1;34mEffort:\033[0m {self.effort.upper()}"
-        last_badge = f" [\033[1;33mLast:\033[0m {self.last_duration_sec:.1f}s]" if self.last_duration_sec is not None else ""
+        last_badge = f" \033[90m──\033[0m [\033[1;33mLast:\033[0m {self.last_duration_sec:.1f}s]" if self.last_duration_sec is not None else ""
         r_badge = f"{health_color}RAM:\033[0m {ram_str}"
         c_badge = f"\033[90mCPU:\033[0m {cpu_str}"
         w_badge = f"\033[1;33mWorkers:\033[0m {active_cnt} active"
         v_badge = f"\033[1;35mVisual:\033[0m {vis_str}"
 
-        return f"\033[90m┌─\033[0m [{p_badge}] [{e_badge}]{last_badge} [{r_badge}] [{c_badge}] [{w_badge}] [{v_badge}]"
+        return f"\033[90m╭─\033[0m [{p_badge}] \033[90m──\033[0m [{e_badge}] \033[90m──\033[0m [{r_badge}] \033[90m──\033[0m [{c_badge}] \033[90m──\033[0m [{w_badge}] \033[90m──\033[0m [{v_badge}]{last_badge}"
 
     def run(self) -> None:
         """Main interactive REPL loop."""
@@ -985,8 +1070,7 @@ class InteractiveShell:
                 try:
                     status_line = self._render_status_bar()
                     print(f"\n{status_line}")
-                    active_p = self._get_active_provider_name()
-                    prompt = f"\033[90m└─\033[0m \033[1;36m❯\033[0m \033[1morchestrator\033[0m \033[1;33m[{active_p}]\033[0m › "
+                    prompt = "\033[90m╰─\033[1;36m❯\033[0m "
                     line = read_interactive_line(prompt=prompt)
                 except (EOFError, KeyboardInterrupt):
                     print("\nExiting orchestrator. Goodbye!")

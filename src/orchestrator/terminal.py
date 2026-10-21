@@ -780,7 +780,7 @@ exit $EXIT_CODE
                 elif avail <= 5:
                     full_desc = time_str
 
-                sys.stdout.write(f"\r\033[K\033[1;36m{spin_ch} [{lbl}]\033[0m {full_desc}")
+                sys.stdout.write(f"\r\033[K\033[1;36m⏺ [{lbl}]\033[0m {spin_ch} {full_desc}")
                 sys.stdout.flush()
                 idx += 1
                 time.sleep(0.1)

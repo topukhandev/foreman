@@ -125,7 +125,7 @@ class BaseCLIAdapter:
 
             if stream_output and sys.stdout.isatty():
                 lbl = progress_label or self.name
-                sys.stdout.write(f"\033[1;36m▶ [{lbl}]\033[0m Streaming live response...\n\n")
+                sys.stdout.write(f"\033[1;36m⏺ [{lbl}]\033[0m Streaming live response...\n\n")
                 sys.stdout.flush()
 
                 collected_out: List[str] = []
@@ -225,9 +225,9 @@ class BaseCLIAdapter:
                     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
                     spin_ch = spinner[idx % len(spinner)]
                     desc = f"Thinking... ({elapsed:.1f}s)"
-                    if len(f"{spin_ch} [{lbl}] {desc}") >= cols - 1:
+                    if len(f"⏺ [{lbl}] {desc}") >= cols - 1:
                         desc = f"({elapsed:.1f}s)"
-                    sys.stdout.write(f"\r\033[K\033[1;36m{spin_ch} [{lbl}]\033[0m {desc}")
+                    sys.stdout.write(f"\r\033[K\033[1;36m⏺ [{lbl}]\033[0m {spin_ch} {desc}")
                     sys.stdout.flush()
                     idx += 1
                     time.sleep(0.1)
@@ -249,7 +249,7 @@ class BaseCLIAdapter:
                 exit_code = process.returncode
                 duration = time.time() - start_time
                 if exit_code == 0:
-                    sys.stdout.write(f"\r\033[K\033[1;32m✓ [{lbl}]\033[0m Responded in {duration:.1f}s\n\n")
+                    sys.stdout.write(f"\r\033[K\033[1;32m✓ [{lbl}]\033[0m Done ({duration:.1f}s)\n\n")
                 else:
                     sys.stdout.write(f"\r\033[K\033[1;31m✗ [{lbl}]\033[0m Error after {duration:.1f}s (code {exit_code})\n\n")
                 sys.stdout.flush()
