@@ -181,24 +181,77 @@ class InteractiveShell:
         """Toggle or set visual desktop terminal windows for AI workers."""
         from orchestrator.terminal import detect_desktop_terminal
         arg = arg.strip().lower()
-        if arg in ("on", "1", "true", "enable"):
+        if arg in ("on", "1", "true", "enable", "show"):
             self.visual_mode = True
-        elif arg in ("off", "0", "false", "disable"):
+        elif arg in ("off", "0", "false", "disable", "hide", "headless"):
             self.visual_mode = False
+        elif not arg:
+            options = [
+                ("1", f"Enable Visual Terminals  (Visible desktop windows) {'[CURRENT]' if self.visual_mode else ''}".strip()),
+                ("2", f"Disable Visual Terminals (Run under the hood / Headless) {'[CURRENT]' if not self.visual_mode else ''}".strip()),
+            ]
+            choice = select_from_menu(f"? Configure AI Worker Terminal Visibility (Currently: {'ON' if self.visual_mode else 'OFF'}):", options)
+            if not choice:
+                return
+            self.visual_mode = (choice == "1")
         else:
             self.visual_mode = not self.visual_mode
 
+        # Persist visual_terminal setting to providers.yaml
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+                data["visual_terminal"] = self.visual_mode
+                with open(self.config_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(data, f, sort_keys=False)
+                self.config.visual_terminal = self.visual_mode
+                self.config_mtime = os.path.getmtime(self.config_path)
+            except Exception:
+                pass
+
+        # Update hub/state.md with worker visibility
+        self.hub.write_state(
+            goal=self.hub.get_current_goal() or "Idle / Front-Desk Chat",
+            phase="idle",
+            active_tasks=[],
+            blockers=[],
+            default_provider=self._get_active_provider_name(),
+            visual_mode=self.visual_mode
+        )
+
         emulator = detect_desktop_terminal()
-        status_str = "\033[1;32mENABLED\033[0m" if self.visual_mode else "\033[1;31mDISABLED\033[0m"
+        status_str = "\033[1;32mENABLED (Visible Desktop Windows)\033[0m" if self.visual_mode else "\033[1;33mDISABLED (Headless Under The Hood)\033[0m"
         print(f"\n🖥️  Visual Worker Terminals: {status_str}")
         if self.visual_mode:
             if emulator:
-                print(f"   Using desktop terminal: \033[1;36m{emulator.name}\033[0m ({emulator.executable})")
-                print("   AI worker sessions (OpenCode, Antigravity, Claude) will pop up in visible desktop windows.")
+                print(f"   Desktop Terminal : \033[1;36m{emulator.name}\033[0m ({emulator.executable})")
+                print("   AI workers (OpenCode, Antigravity, Claude) will pop up in visible desktop windows.")
             else:
-                print("   ⚠️  Warning: No desktop display or terminal emulator detected (running headless).")
+                print("   ⚠️  Warning: No desktop display or terminal emulator detected (will fall back to headless).")
         else:
-            print("   AI workers will execute under the hood (headless in background).")
+            print("   AI workers will execute completely under the hood (headless in background).")
+
+    def _detect_visual_intent(self, text: str) -> Optional[str]:
+        """Detect natural language intent to configure visual worker terminal windows."""
+        t = text.strip().lower()
+        keywords = [
+            "visual terminal", "terminal visibility", "desktop terminal",
+            "ভিজ্যুয়াল টার্মিনাল", "ভিজ্যুয়াল টার্মিনাল", "টার্মিনাল দেখা",
+            "আন্ডার দ্য হুড", "under the hood", "headless mode", "headless"
+        ]
+        if not any(k in t for k in keywords):
+            return None
+
+        words = set(t.split())
+        on_triggers = ["on", "enable", "show", "open", "দেখতে", "দেখা যাবে", "অন"]
+        off_triggers = ["off", "disable", "hide", "close", "বন্ধ", "অফ", "hood", "হুড", "headless", "দেখা যাবে না", "না যেন"]
+
+        if any(tr in t for tr in off_triggers) or "off" in words or "hide" in words:
+            return "off"
+        elif any(tr in t for tr in on_triggers) or "on" in words or "show" in words:
+            return "on"
+        return ""  # Trigger menu
 
     def _detect_provider_intent(self, text: str) -> Optional[str]:
         """Detect if user is expressing intent to switch or select AI provider in natural language."""
@@ -608,7 +661,13 @@ class InteractiveShell:
                     self.handle_provider_menu(provider_intent)
                     continue
 
-                # 2. Fast local operational query (who are you, where am i)
+                # 2. Check for natural language visual terminal configuration intent
+                visual_intent = self._detect_visual_intent(line)
+                if visual_intent is not None:
+                    self.handle_visual_toggle(visual_intent)
+                    continue
+
+                # 3. Fast local operational query (who are you, where am i)
                 if self.handle_lightweight_query(line):
                     continue
 

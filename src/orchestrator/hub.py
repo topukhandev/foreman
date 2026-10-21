@@ -215,7 +215,7 @@ class Hub:
                 return line.replace("**Goal**:", "").strip()
         return "Idle / Front-Desk Chat"
 
-    def cleanup_stale_active_tasks(self, default_provider: Optional[str] = None) -> bool:
+    def cleanup_stale_active_tasks(self, default_provider: Optional[str] = None, visual_mode: Optional[bool] = None) -> bool:
         """
         Detect and clear any orphaned 'running' tasks left behind by previous interrupted sessions.
         Ensures hub/state.md always accurately reflects idle status when no sprint is executing.
@@ -245,7 +245,8 @@ class Hub:
                 phase="idle",
                 active_tasks=[],
                 blockers=[],
-                default_provider=default_provider
+                default_provider=default_provider,
+                visual_mode=visual_mode
             )
             return True
         return False
@@ -257,7 +258,8 @@ class Hub:
         active_tasks: List[Dict[str, Any]],
         blockers: List[str],
         completed_tasks: Optional[List[str]] = None,
-        default_provider: Optional[str] = None
+        default_provider: Optional[str] = None,
+        visual_mode: Optional[bool] = None
     ) -> None:
         """
         Write one-page state.md atomically.
@@ -272,6 +274,10 @@ class Hub:
 
         if default_provider:
             lines.append(f"**Primary AI Provider**: `{default_provider}`")
+
+        if visual_mode is not None:
+            vis_label = "Visible Desktop Windows" if visual_mode else "Headless (Under the hood)"
+            lines.append(f"**Worker Visibility**: `{vis_label}`")
 
         lines.extend([
             f"**Goal**: {goal}",

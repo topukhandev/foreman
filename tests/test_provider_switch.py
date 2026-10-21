@@ -78,18 +78,33 @@ class TestProviderSwitching(unittest.TestCase):
         self.assertIsNone(shell._detect_provider_intent("How do I write a Python function?"))
 
     def test_visual_toggle_command(self):
-        """Verify /visual toggles visual_mode on and off."""
+        """Verify /visual toggles visual_mode on and off and persists to yaml."""
         shell = InteractiveShell(self.test_dir)
-        initial = shell.visual_mode
 
         shell.handle_visual_toggle("off")
         self.assertFalse(shell.visual_mode)
+        with open(shell.config_path) as f:
+            data = yaml.safe_load(f)
+        self.assertFalse(data.get("visual_terminal"))
 
         shell.handle_visual_toggle("on")
         self.assertTrue(shell.visual_mode)
+        with open(shell.config_path) as f:
+            data = yaml.safe_load(f)
+        self.assertTrue(data.get("visual_terminal"))
 
-        shell.handle_visual_toggle()
-        self.assertEqual(shell.visual_mode, not True)
+    def test_detect_visual_intent(self):
+        """Verify natural language visual terminal intent detection."""
+        shell = InteractiveShell(self.test_dir)
+
+        self.assertEqual(shell._detect_visual_intent("turn on visual terminal"), "on")
+        self.assertEqual(shell._detect_visual_intent("turn off visual terminal"), "off")
+        self.assertEqual(shell._detect_visual_intent("run under the hood"), "off")
+        self.assertEqual(shell._detect_visual_intent("headless mode"), "off")
+        self.assertEqual(shell._detect_visual_intent("ভিজ্যুয়াল টার্মিনাল অন করো"), "on")
+        self.assertEqual(shell._detect_visual_intent("টার্মিনাল দেখা যাবে না আন্ডার দ্য হুড চালাও"), "off")
+        self.assertEqual(shell._detect_visual_intent("visual terminal"), "")
+        self.assertIsNone(shell._detect_visual_intent("Write a sort algorithm"))
 
 
 if __name__ == "__main__":

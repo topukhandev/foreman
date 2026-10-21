@@ -95,12 +95,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     goal = args.goal or "Validate and prepare a launch strategy for an AI Developer Tool"
     pack_name = args.pack or "developer"
 
+    if getattr(args, "visual", None) is not None:
+        cfg.visual_terminal = args.visual
+
     def print_progress(dashboard: str, event: Optional[str] = None):
         if event:
             print(f"  {event}")
 
     print(f"Starting Orchestrator in: {target_dir}")
-    print(f"Goal: {goal}\n")
+    print(f"Goal: {goal}")
+    vis_label = "Visible Windows" if cfg.visual_terminal else "Headless Under The Hood"
+    print(f"Worker Terminals: {vis_label}\n")
 
     engine = OrchestratorEngine(
         project_dir=target_dir,
@@ -174,6 +179,8 @@ def main() -> None:
     p_run.add_argument("--pack", choices=list(PACKS.keys()), default="developer", help="Role pack to execute (developer, business_idea, qa)")
     p_run.add_argument("--project", default=".", help="Project directory")
     p_run.add_argument("--mock", action="store_true", help="Run with mock/simulation workers")
+    p_run.add_argument("--visual", dest="visual", action="store_true", default=None, help="Force visible desktop terminal windows for AI workers")
+    p_run.add_argument("--headless", dest="visual", action="store_false", help="Run AI workers headless under the hood")
     p_run.set_defaults(func=cmd_run)
 
     args = parser.parse_args()

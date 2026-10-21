@@ -44,12 +44,15 @@ class OrchestratorEngine:
 
         # Adapters cache
         self.adapters: Dict[str, BaseCLIAdapter] = {}
+        vis_mode = getattr(config, "visual_terminal", True)
         for p_name, p_cfg in config.providers.items():
-            self.adapters[p_name] = create_adapter(
+            ad = create_adapter(
                 p_name,
                 p_cfg,
                 timeout_sec=config.budget.max_time_per_task_sec
             )
+            ad.visual_mode = vis_mode
+            self.adapters[p_name] = ad
 
         # Progress tracker
         self.progress = ProgressTracker()

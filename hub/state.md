@@ -1,7 +1,8 @@
 # Project State (Foreman Hub)
-*Last Updated: 2026-10-21 10:03:13*
+*Last Updated: 2026-10-21 10:09:52*
 
 **Primary AI Provider**: `opencode`
+**Worker Visibility**: `Visible Desktop Windows`
 **Goal**: Inspect the Desktop directory (/home/topukhan/Desktop) and list all applications, projects, and directories with a summary of each
 **Current Phase**: `idle`
 
