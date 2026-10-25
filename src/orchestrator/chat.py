@@ -1,4 +1,4 @@
-"""Interactive chat: run `orchestrator` with no arguments. Claude Code-inspired terminal UI (see ui.py).
+"""Interactive chat: run `foreman` with no arguments. Claude Code-inspired terminal UI (see ui.py).
 
 Plain language for everything: questions, changes, "status", "continue", answering a task's question,
 accepting a suggestion. Each task runs in a detached process; the chat streams its progress from the
@@ -17,7 +17,7 @@ from orchestrator.app import build_engine, spawn_task
 from orchestrator.config import set_first_provider, set_option
 from orchestrator.engine import NO_RE, RESUME_RE, YES_RE, clean_text, is_task_status_query
 from orchestrator.report import render_report
-from orchestrator.store import ACTIVE, FINAL
+from orchestrator.store import ACTIVE
 from orchestrator.util import short
 
 COMMANDS = [
@@ -31,6 +31,8 @@ COMMANDS = [
     ("/projects", "projects related to this folder"),
     ("/suggestions", "open suggestions"),
     ("/providers", "choose the planner (and first worker) with ↑/↓"),
+    ("/mode", "lifecycle mode: R&D, planning, development, QA, deployment, or auto"),
+    ("/lifecycle", "where this project's features stand and what's next"),
     ("/doctor", "providers, health and setup"),
     ("/exit", "leave the chat (Ctrl+D)"),
 ]
@@ -41,7 +43,8 @@ Just type what you need, for example:
   • what's the status of my task? · continue the previous task · yes / no
 Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
-  /providers  /display terminal|headless  /projects  /suggestions  /exit
+  /mode  /lifecycle  /providers  /display terminal|headless  /projects  /suggestions  /exit
+Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
 Wheel or PgUp/PgDn scroll the chat; hold Shift to select text with the mouse.
 While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
 ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2}  # not "one": "the second one"
@@ -61,6 +64,8 @@ class Chat:
         self.queue: List[str] = []           # messages typed while a task was running
         self.history = ChatHistory(self.eng.cfg.home, self._project_key)
         self.last_providers: Optional[str] = None
+        self.mode: Optional[str] = None       # lifecycle mode fixed with /mode (None = recommended per request)
+        self._offered_next: set = set()
 
     # ------------------------------------------------------------------ loop
     def run(self, resume: Optional[str] = None) -> None:
@@ -145,8 +150,9 @@ class Chat:
             left = "/help for shortcuts"
         proj = self.eng.registry.project_for_path(self.cwd)
         who = self.last_providers or f"planner: {self._planner()}"
-        right = f"{proj.name if proj else os.path.basename(self.cwd)} · {who} · " \
-                f"{'terminal' if self._visual() else 'headless'}"
+        mode = self.eng.modes(self.cwd).get(self.mode) if self.mode else None
+        right = f"{proj.name if proj else os.path.basename(self.cwd)} · " + (f"mode: {mode.title} · " if mode else "") \
+                + f"{who} · {'terminal' if self._visual() else 'headless'}"
         return left, right
 
     def _resume_menu(self) -> str:
@@ -283,8 +289,30 @@ class Chat:
             return handled
         if (YES_RE.match(text) or NO_RE.match(text)) and len(text.split()) <= 3 and not RESUME_RE.search(text):
             return ui.bullet("Nothing is waiting for a yes/no right now. What would you like to do?")
-        task, msg = self.eng.route(text, self.cwd, self._conversation(), confirm_plan=True)
+        task, msg = self.eng.route(text, self.cwd, self._conversation(), confirm_plan=True, mode=self.mode)
         return self._run(text, task, msg)
+
+    def _mode_menu(self, arg: str) -> str:
+        modes = self.eng.modes(self.cwd)
+        if arg:
+            if arg.lower() in ("auto", "off", "none"):
+                self.mode = None
+                return ui.bullet("Mode: auto. I'll recommend a mode for each request.")
+            from orchestrator.modes import resolve
+            name = resolve(arg, modes)
+            if not name:
+                return ui.bullet(f"Unknown mode '{arg}'. Modes: auto, " + ", ".join(m.title for m in modes.values()), ui.YELLOW)
+            self.mode = name
+            return ui.bullet(f"Mode: {modes[name].title}. {modes[name].summary} (/mode auto to go back)")
+        if not ui.TTY:
+            return "Modes: auto, " + ", ".join(f"{m.title} ({n})" for n, m in modes.items())
+        labels = ["Auto: recommend a mode for each request"] + [f"{m.title}: {m.summary}" for m in modes.values()]
+        current = 0 if not self.mode else 1 + list(modes).index(self.mode)
+        choice = ui.choose("Lifecycle mode", ["Applies to your next requests in this chat."], labels,
+                           allow_text=False, start=current, color=ui.FRAME, esc="keep the current mode")
+        if choice is None:
+            return ui.bullet("Mode unchanged.", ui.GREY)
+        return self._mode_menu("auto" if choice.startswith("Auto") else list(modes)[labels.index(choice) - 1])
 
     def _suggestion_reply(self, focus, text: str) -> Optional[str]:
         if not focus or not focus.get("suggestions"):
@@ -344,6 +372,10 @@ class Chat:
             return "Usage: /display terminal|headless"
         if cmd == "/providers":
             return self._providers_menu(arg)
+        if cmd == "/mode":
+            return self._mode_menu(arg)
+        if cmd == "/lifecycle":
+            return ui.bullet(self.eng.lifecycle_text(self.cwd))
         if cmd == "/doctor":
             lines = []
             for name, p in self.eng.providers.items():
@@ -376,7 +408,7 @@ class Chat:
         return self.render(final)
 
     def render(self, task: Dict[str, Any]) -> str:
-        if task["status"] == "answered" and task.get("answer") and not any(
+        if task["status"] == "answered" and task.get("answer") and not task.get("document") and not any(
                 s["kind"] == "implement" for s in task["steps"]):
             secs = _seconds(task)
             foot = f"{task.get('answered_by') or 'planner'}" + (f" · {secs}s" if secs else "")
@@ -475,6 +507,8 @@ class Chat:
         """If the focused task waits on a decision, offer it as a menu (Esc = answer later in the chat)."""
         task = self.eng.store.load(self.focus) if self.focus else None
         open_q = [q for q in (task or {}).get("questions", []) if not q.get("answer")]
+        if task and not open_q and ui.TTY:
+            self._offer_next(task)
         if not open_q or not ui.TTY:
             return
         q = open_q[0]
@@ -490,6 +524,20 @@ class Chat:
             return
         answer = {"Yes, go ahead": "yes", "No, cancel": "no", "Yes, continue": "yes", "No, stop": "no"}.get(choice, choice)
         self._exchange(answer)
+
+    def _offer_next(self, task: Dict[str, Any]) -> None:
+        """After a lifecycle step, offer the recommended next one once (Esc or 'Not now' = keep chatting)."""
+        nxt = task.get("next")
+        if not nxt or task.get("next_started") or task["id"] in self._offered_next or task["id"] in self.background:
+            return
+        self._offered_next.add(task["id"])
+        title = nxt.get("title") or nxt["mode"]
+        choice = ui.choose("Next step", [f"{title}: {nxt.get('reason', '')}"], [f"Start {title}", "Not now"],
+                           allow_text=False, color=ui.FRAME, esc="decide later")
+        if choice and choice.startswith("Start"):
+            self._exchange("next")
+        else:
+            ui.out(ui.c("  Say \"next\" whenever you want to continue.", ui.GREY))
 
     def _style(self, report: str) -> str:
         """Report text -> chat message: ◆ status line, bold section titles, coloured marks, wrapped text."""
@@ -523,7 +571,8 @@ class Chat:
     def _conversation(self) -> str:
         return "\n".join(f"User: {u}\nForeman: {a}" for u, a in self.turns[-6:])
 
-PURPOSE = {"plan": ("Plan", "Planning"), "replan": ("Re-plan", "Re-planning"), "review": ("Review", "Reviewing")}
+PURPOSE = {"plan": ("Plan", "Planning"), "replan": ("Re-plan", "Re-planning"), "review": ("Review", "Reviewing"),
+           "document": ("Write", "Writing")}
 
 
 TOOL_VERBS = {"read": "Reading", "view": "Reading", "grep": "Searching for", "search": "Searching for",
@@ -556,8 +605,11 @@ class Phase:
         e, provider = ev.get("event"), ev.get("provider")
         if e == "thinking":
             purpose = ev.get("purpose")
-            self.verb = {"replan": "Expanding the plan", "review": "Reviewing the changes"}.get(purpose, self.verb)
+            self.verb = {"replan": "Expanding the plan", "review": "Reviewing the changes",
+                         "document": "Writing the document"}.get(purpose, self.verb)
             self.who = provider or self.who
+        elif e == "impact":
+            self.verb = "Checking the impact before editing"
         elif e == "plan":
             steps = (ev.get("plan") or {}).get("steps") or []
             projects = sorted({s.get("project") for s in steps if s.get("project")})
@@ -610,7 +662,8 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None) -> Optional[
     e = ev.get("event")
     if e == "thinking":
         name = PURPOSE.get(ev.get("purpose"), ("Think", ""))[0]
-        return ui.tool(name, ev.get("purpose") == "review" and "changes" or "request", ev.get("provider", ""))
+        arg = {"review": "changes", "document": "document"}.get(ev.get("purpose"), "request")
+        return ui.tool(name, arg, ev.get("provider", ""))
     if e == "activity":
         text = ev.get("text", "")
         prefix = f"[{ev['where']}] " if ev.get("where") and ev.get("where") != current else ""
@@ -622,6 +675,15 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None) -> Optional[
             return ui.result("answered directly, no workers needed")
         return ui.result(f"{len(steps)} step{'s' if len(steps) != 1 else ''}: "
                          + "; ".join(f"{s.get('kind')} {s.get('project')}" for s in steps), ui.BLUE)
+    if e == "mode":
+        how = "your choice" if ev.get("source") == "user" else (ev.get("reason") or "recommended")
+        return ui.tool("Mode", ev.get("title") or ev.get("mode", ""), how)
+    if e == "impact":
+        who = ", ".join(ev.get("consumers") or [])
+        return ui.tool("Impact", f"{ev.get('risk', '?')} risk",
+                       "checking " + (f"consumers {who}" if who else "what the change affects") + " before editing")
+    if e == "document":
+        return ui.result(f"saved {ev.get('project')}/{ev.get('path')}", ui.GREEN)
     if e == "replan":
         return ui.tool("Expand plan", "new dependency") + "\n" + ui.result("; ".join(ev.get("discoveries", [])))
     if e == "step_start":

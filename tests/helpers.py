@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from orchestrator.brain import PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA  # noqa: E402
+from orchestrator.brain import DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA  # noqa: E402
 from orchestrator.config import load_config  # noqa: E402
 from orchestrator.engine import Engine  # noqa: E402
 from orchestrator.providers.base import RunRequest, RunResult  # noqa: E402
@@ -92,6 +92,8 @@ class Script:
                                                                "steps": [], "questions": []}
         self.step: Callable[[RunRequest], Dict] = lambda req: {"status": "done", "summary": "did it"}
         self.review: Callable[[RunRequest], Dict] = lambda req: {"verdict": "approve", "summary": "looks right", "issues": []}
+        self.document: Callable[[RunRequest], Dict] = lambda req: {"title": "Doc", "document": "# Doc\n\nBody.",
+                                                                   "summary": "Wrote the document."}
         self.fail_steps = False
         self.delay = 0.0
         self.log: List[str] = []
@@ -102,6 +104,9 @@ class Script:
             if req.schema is PLAN_SCHEMA:
                 self.log.append(f"{provider_name}:plan")
                 return RunResult(True, "", session_id=f"{provider_name}-brain", data=self.plan(req))
+            if req.schema is DOC_SCHEMA:
+                self.log.append(f"{provider_name}:document")
+                return RunResult(True, "", session_id=f"{provider_name}-doc", data=self.document(req))
             if req.schema is REVIEW_SCHEMA:
                 self.log.append(f"{provider_name}:review")
                 return RunResult(True, "", session_id=f"{provider_name}-rev", data=self.review(req))

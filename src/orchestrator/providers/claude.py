@@ -1,4 +1,6 @@
-"""Claude Code (`claude -p`). Supports resume/fork, JSON-schema output, tool-level permissions, session discovery."""
+"""Claude Code (`claude -p`). Supports resume/fork, JSON-schema output, tool-level permissions, session discovery.
+Web research (verified 2026-10-25): read steps with `web` add WebSearch/WebFetch to --allowedTools; without it
+they are not allowed, so web access is enforced at the tool level."""
 
 import json
 import os
@@ -30,7 +32,7 @@ def encode_cwd(path: str) -> str:
 class ClaudeProvider(Provider):
     name = "claude"
     capabilities = Capabilities(resume=True, fork=True, structured_output=True,
-                                session_discovery=True, enforced_read_only=True)
+                                session_discovery=True, enforced_read_only=True, web=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
         cmd = [self._binary or self.settings.command, "-p"]
@@ -52,7 +54,8 @@ class ClaudeProvider(Provider):
             cmd += ["--permission-mode", "acceptEdits", "--allowedTools", "Bash", "Edit", "Write",
                     "--disallowedTools", *WRITE_DENY]
         else:
-            cmd += ["--allowedTools", *READ_TOOLS, "--disallowedTools", "Edit", "Write", "NotebookEdit"]
+            cmd += ["--allowedTools", *READ_TOOLS, *(["WebSearch", "WebFetch"] if req.web else []),
+                    "--disallowedTools", "Edit", "Write", "NotebookEdit"]
         if req.schema:
             cmd += ["--json-schema", json.dumps(req.schema)]
         # Prompt is passed after `--` so it can never be parsed as a flag (variadic tool lists above).

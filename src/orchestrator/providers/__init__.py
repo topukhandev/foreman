@@ -1,4 +1,5 @@
-"""Provider factory. Add a provider by writing one module and registering its class here."""
+"""Provider factory. Add a provider by writing one module and registering its class here, or, for any other CLI,
+with `type: generic` in config.yaml (see generic.py)."""
 
 from typing import Dict
 
@@ -7,6 +8,7 @@ from orchestrator.providers.antigravity import AntigravityProvider
 from orchestrator.providers.base import (Capabilities, Provider, RunRequest, RunResult,  # noqa: F401
                                          SessionInfo)
 from orchestrator.providers.claude import ClaudeProvider
+from orchestrator.providers.generic import GenericProvider
 from orchestrator.providers.opencode import OpenCodeProvider
 
 PROVIDER_CLASSES = {
@@ -20,7 +22,7 @@ def build_providers(cfg: Config) -> Dict[str, Provider]:
     """Instantiate configured providers (in preference order), skipping unknown names."""
     out: Dict[str, Provider] = {}
     for name, settings in cfg.providers.items():
-        cls = PROVIDER_CLASSES.get(name)
+        cls = GenericProvider if (settings.extra or {}).get("type") == "generic" else PROVIDER_CLASSES.get(name)
         if cls:
             out[name] = cls(settings)
     return out

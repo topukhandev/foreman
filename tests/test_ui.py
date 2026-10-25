@@ -77,8 +77,11 @@ class ProviderHealthTest(unittest.TestCase):
             eng.registry.ensure_scanned()
             eng._activity("9", "claude", "plan", f"Read({ws.api}/server.js)")
             eng._activity("9", "claude", "plan", f"Read({ws.api}/server.js)")  # duplicate dropped
+            eng._activity("9", "claude", "review", f"Read({ws.api}/{'deep/' * 30}x.js)")  # long path: name, then cut
             acts = [e for e in eng.store.events("9") if e["event"] == "activity"]
-            self.assertEqual([a["text"] for a in acts], ["Read(orders-api/server.js)"])
+            self.assertEqual(acts[0]["text"], "Read(orders-api/server.js)")
+            self.assertTrue(acts[1]["text"].startswith("Read(orders-api/deep/") and acts[1]["text"].endswith("…)"))
+            acts = acts[:1]
             line = format_event(acts[0], current="other")
             self.assertIn("[plan] Read(orders-api/server.js)", line)
         finally:
@@ -92,6 +95,21 @@ class CleanTextTest(unittest.TestCase):
         self.assertEqual(clean_text('Run it.\\n\\nThen check."'), "Run it.\n\nThen check.")
         self.assertEqual(clean_text('Say "hi" twice'), 'Say "hi" twice')
         self.assertEqual(clean_text("line1\nline2 has a \\n literal"), "line1\nline2 has a \\n literal")
+
+
+class ClipTest(unittest.TestCase):
+    def test_long_line_becomes_one_row_with_ellipsis(self):
+        line = ui.c("› " + "word " * 40, ui.BOLD)
+        clipped = ui.clip(line, 30)
+        self.assertEqual(len(ui.hard_wrap(clipped, 30)), 1)
+        self.assertIn("…", clipped)
+
+    def test_short_line_is_untouched(self):
+        self.assertEqual(ui.clip("short", 30), "short")
+
+    def test_wide_characters_are_measured_by_columns(self):
+        clipped = ui.clip("日本語" * 20, 20)
+        self.assertEqual(len(ui.hard_wrap(clipped, 20)), 1)
 
 
 class MarkdownTest(unittest.TestCase):

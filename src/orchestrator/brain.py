@@ -1,4 +1,5 @@
-"""AI reasoning used by the orchestrator itself: planning (scope + steps), re-planning, and independent review.
+"""AI reasoning used by the orchestrator itself: planning (mode, scope, steps), re-planning, independent review, and
+turning a mode's findings into its document (research brief, plan, QA report, release document).
 
 Everything here returns validated JSON. The brain runs read-only; it may look at code to settle scope,
 but is told to stop as soon as scope is clear (progressive context expansion).
@@ -27,6 +28,9 @@ PLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "intent": {"type": "string", "enum": ["answer", "change"]},
+        "mode": _STR,
+        "mode_reason": _STR,
+        "feature": _STR,
         "title": _STR,
         "answer": _STR,
         "projects": {"type": "array", "items": {"type": "object", "properties": {
@@ -41,8 +45,18 @@ PLAN_SCHEMA = {
         "questions": QUESTIONS,
         "decisions": _STRS,
         "suggestions": SUGGESTIONS,
+        "impact": {"type": "object", "properties": {
+            "summary": _STR, "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+            "consumers": _STRS, "tests": _STRS, "business_rules": _STRS, "interface_change": {"type": "boolean"}},
+            "required": ["summary", "risk"]},
     },
     "required": ["intent", "title", "projects", "steps", "questions"],
+}
+
+DOC_SCHEMA = {
+    "type": "object",
+    "properties": {"title": _STR, "document": _STR, "summary": _STR, "open_problems": _STRS},
+    "required": ["title", "document", "summary"],
 }
 
 STEP_SCHEMA = {
@@ -98,11 +112,29 @@ How to plan (be proportional - most requests are small):
 7. Questions: only when a business/product rule cannot be inferred from code, docs or conventions and a wrong
    guess would be costly (kind "business"). Make technical decisions yourself and list them in "decisions".
 8. Suggestions: at most 2. See the suggestion rule below; small in-scope fixes belong in the steps.
+9. Impact (whenever steps change code): what existing behaviour, consumers, tests and confirmed business
+   decisions the change touches, and the risk: low = local and covered by tests; medium = shared code, an
+   interface, or business logic; high = money, data, auth, migrations, or several consumers. Foreman adds an
+   impact investigation before the edits when the risk is medium or high, or when known consumers are left out.
 Project names in steps/checks/projects must be registry names.
 When answering, talk about the work itself; don't mention internal task numbers (like #12) unless the user did.
 You are read-only and nobody can approve tool permissions for you. Never ask the user to approve commands; if
 something must be run to answer, add an investigate step or say what you could not verify.
 """ + SUGGESTION_RULE
+
+
+MODE_RULES = """\
+Lifecycle modes. Choose one in "mode" and say why in "mode_reason" (a few words):
+- "none" for a quick question answered now that is not lifecycle work (intent "answer").
+- Otherwise the mode that fits the request and the project's current lifecycle state. Planning never assumes a
+  blank slate: it starts from the current implementation. Changing an existing feature in a way that is large,
+  ambiguous or risky -> planning first (the user can override); small, clear changes -> development.
+- "feature": a short name for the feature or topic this belongs to; reuse a lifecycle name for the same feature.
+- Read-only modes (research, planning, deployment) use investigate steps only. In qa, implement steps may only
+  change tests. Steps get the chosen mode's worker guidance from Foreman."""
+MODE_RULES_FIXED = """\
+The user chose the "{mode}" mode: set "mode" to "{mode}" and plan within its rules below.
+"feature": a short name for the feature or topic this belongs to; reuse a lifecycle name for the same feature."""
 
 
 class BrainError(Exception):
@@ -123,7 +155,7 @@ class Brain:
         self.on_fail = on_fail or (lambda name, error: None)
 
     def call(self, prompt: str, schema: Dict[str, Any], cwd: str, extra_dirs: Optional[List[str]] = None,
-             exclude: Optional[List[str]] = None, purpose: str = "plan") -> Dict[str, Any]:
+             exclude: Optional[List[str]] = None, purpose: str = "plan", web: bool = False) -> Dict[str, Any]:
         errors = []
         for p in self.providers:
             if exclude and p.name in exclude:
@@ -135,7 +167,7 @@ class Brain:
             act = (lambda text, _n=p.name: self.on_activity(_n, purpose, text)) if self.on_activity else None
             res = p.run(RunRequest(prompt=prompt, cwd=cwd, mode="read", extra_dirs=extra_dirs or [], persist=False,
                                    schema=schema, timeout=self.timeout, model=self.model_for.get(p.name),
-                                   on_activity=act))
+                                   on_activity=act, web=web))
             if res.ok and isinstance(res.data, dict):
                 res.data["_provider"] = p.name
                 res.data["_errors"] = errors
@@ -147,7 +179,8 @@ class Brain:
     # ------------------------------------------------------------------ prompts
     @staticmethod
     def plan_prompt(request: str, cwd: str, registry_ctx: str, history: str, suggestions_seen: str,
-                    task_ctx: str = "", conversation: str = "") -> str:
+                    task_ctx: str = "", conversation: str = "", modes_ctx: str = "", fixed_mode: str = "",
+                    knowledge_ctx: str = "") -> str:
         parts = [
             "You are the planning layer of Foreman, an orchestrator that coordinates AI coding sessions across "
             "related projects. You decide scope and steps; worker sessions do the work; Foreman runs validation "
@@ -162,10 +195,35 @@ class Brain:
             parts.append(f"RECENT TASKS IN THESE PROJECTS:\n{history}")
         if task_ctx:
             parts.append(f"TASK BEING CONTINUED (plan only what remains; re-verify conclusions where code changed):\n{task_ctx}")
+        if knowledge_ctx:
+            parts.append(f"PROJECT KNOWLEDGE (from each project's .foreman folder):\n{knowledge_ctx}")
         if suggestions_seen:
             parts.append(f"SUGGESTIONS ALREADY MADE OR DISMISSED (never repeat):\n{suggestions_seen}")
+        if modes_ctx:
+            parts.append(MODE_RULES_FIXED.format(mode=fixed_mode) if fixed_mode else MODE_RULES)
+            parts.append(f"MODES:\n{modes_ctx}")
         parts.append(PLANNING_RULES)
         return "\n\n".join(p for p in parts if p)
+
+    @staticmethod
+    def document_prompt(task: Dict[str, Any], mode_title: str, output_spec: str, findings: str, checks: str) -> str:
+        return "\n\n".join(x for x in [
+            f"You are writing the {mode_title} document for Foreman, from work that AI sessions already did. "
+            "Use only the findings below (you may read code to confirm a detail). Be concrete: file references, "
+            "sources, commands. No filler. Markdown.",
+            f"REQUEST:\n{task['request']}",
+            f"THE DOCUMENT MUST CONTAIN:\n{output_spec}" if output_spec else "",
+            "CONFIRMED DECISIONS:\n" + "\n".join(f"- {d['text']}" for d in task["decisions"][-12:])
+            if task["decisions"] else "",
+            "ANSWERED QUESTIONS:\n" + "\n".join(f"- {q['text']} -> {q['answer']}" for q in task["questions"]
+                                                  if q.get("answer") and q.get("kind") == "business")
+            if any(q.get("answer") and q.get("kind") == "business" for q in task["questions"]) else "",
+            f"FINDINGS FROM THE STEPS:\n{findings}",
+            f"CHECKS RUN BY FOREMAN:\n{checks}" if checks else "",
+            "Return the full document in 'document', a title, and a two-sentence summary for the user. In "
+            "'open_problems', list each defect, failed criterion or blocker that must be fixed or decided before "
+            "moving on to the next stage (one line each; empty if none).",
+        ] if x)
 
     @staticmethod
     def replan_prompt(task: Dict[str, Any], discoveries: List[str], registry_ctx: str) -> str:
@@ -183,28 +241,34 @@ class Brain:
         ])
 
     @staticmethod
-    def review_prompt(task: Dict[str, Any], diffs: Dict[str, str], checks: List[Dict[str, Any]]) -> str:
+    def review_prompt(task: Dict[str, Any], diffs: Dict[str, str], checks: List[Dict[str, Any]],
+                      knowledge: str = "") -> str:
         diff_txt = "\n\n".join(f"### {p}\n{d or '(no changes)'}" for p, d in diffs.items())
         check_txt = "\n".join(f"- {c['project']}: `{c['command']}` -> {'PASS' if c['ok'] else 'FAIL'}"
                               + ("" if c["ok"] else f"\n  {c.get('tail', '')[-600:]}") for c in checks) or "(none run)"
         steps = "\n".join(f"- {s['project']}: {s.get('summary', '')}" for s in task["steps"] if s["kind"] == "implement")
-        return "\n\n".join([
+        return "\n\n".join(x for x in [
             "You are an independent reviewer for Foreman. You did not write this change. Judge whether the request "
             "is fully and correctly achieved across all projects. Focus on correctness, consistency of interfaces "
             "between projects, missing pieces, and adequate tests. Ignore style nits. Use read-only tools to inspect "
             "code if the diff is not enough. Verdict 'revise' only for real problems, each with a concrete fix.",
             f"REQUEST:\n{task['request']}",
             "DECISIONS:\n" + ("\n".join(f"- {d['text']}" for d in task["decisions"]) or "(none)"),
+            f"PROJECT KNOWLEDGE (confirmed business decisions must hold):\n{knowledge}" if knowledge else "",
             f"WORKER SUMMARIES:\n{steps or '(none)'}",
             f"VALIDATION RESULTS (run by Foreman):\n{check_txt}",
             f"DIFFS (uncommitted changes made by this task):\n{diff_txt}",
             "Small problems worth fixing now are issues (verdict revise), not suggestions. " + SUGGESTION_RULE,
-        ])
+        ] if x)
 
 
 def task_context(task: Dict[str, Any], changes_since: Dict[str, List[str]]) -> str:
     """Compact task record for continuing work."""
     lines = [f"#{task['id']} {task['title']} [status: {task['status']}]", f"Original request: {task['request']}"]
+    if task.get("mode"):
+        lines.append(f"Mode: {task['mode']} ({task.get('mode_source')}) · feature: {task.get('feature', '')}")
+    if task.get("document"):
+        lines.append(f"Document written: {task['document']['project']}/{task['document']['path']}")
     for s in task["steps"]:
         lines.append(f"- step {s['id']} [{s['status']}] {s['kind']} in {s['project']}: "
                      f"{(s.get('summary') or s['instructions'])[:200]}")

@@ -1,16 +1,20 @@
 """Orchestration core.
 
-    request ─► local fast path (status / resume, no AI)
-            └► plan (brain: scope, steps, checks, questions)
+    request ─► local fast path (status / resume / lifecycle "what's next", no AI)
+            └► plan (brain: mode, scope, steps, checks, questions, impact)
+                 ├─ risky change or consumers left out ─► impact investigation before any edit
                  ├─ blocking business question ─► needs_input (stop, ask user)
                  ├─ answer ─► done
                  └─ steps (DAG, parallel across projects, one session per step)
                       ├─ workers report new dependencies ─► learn relation, re-plan (bounded)
                       └─ validate: Foreman runs checks + diffs itself, independent review
                            └─ problems ─► fix rounds in the same sessions (bounded) ─► report
+                 └─ mode with a document (R&D, planning, QA, deployment) ─► document saved in the project
+            lifecycle: the project's .foreman records the stage reached and the recommended next mode
 
 Deterministic: state, scheduling, provider/session selection, budget, check-command safety, git guards,
-change detection, report. AI: scope/planning, the work itself, review.
+change detection, mode permissions (read-only / tests-only / web), impact gate, lifecycle and next step, report.
+AI: mode choice and planning, the work itself, review, documents.
 """
 
 import os
@@ -20,10 +24,13 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from orchestrator.brain import (PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA, Brain, BrainError, task_context)
+from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA, Brain, BrainError,
+                                task_context)
 from orchestrator.budget import Budget
 from orchestrator.config import Config
-from orchestrator.providers.base import FOREMAN_PROMPT_PREFIXES, Provider, RunRequest, RunResult
+from orchestrator.knowledge import ProjectKnowledge, slug
+from orchestrator.modes import Mode, catalog, load_modes, resolve as resolve_mode
+from orchestrator.providers.base import OWN_PROMPT_PREFIXES, Provider, RunRequest, RunResult
 from orchestrator.registry import Registry
 from orchestrator.report import notify, render_report, render_status
 from orchestrator.store import FINAL, Store
@@ -46,6 +53,17 @@ SMALL_TALK_RE = re.compile(
     r"ok(ay)?|cool|nice|great|awesome|perfect|bye|goodbye|see you)( there| foreman| again)?\s*[!.?]*\s*$", re.I)
 PREVIOUS_RE = re.compile(r"\b(previous|last|earlier|that|ongoing|current|i was|we were|my task|the task)\b", re.I)
 RESUME_RE = re.compile(r"^\s*(please\s+)?(continue|resume|finish|pick up|carry on|keep going|complete the remaining)\b", re.I)
+# Lifecycle: "what's next?" is answered from the project's records; "next" starts the recommended step.
+NEXT_Q_RE = re.compile(r"^\s*(what('?s| is) next|what (should|do) (i|we) do next|where (are|do) we stand|"
+                       r"(show )?(the )?lifecycle|which stage)\b.{0,60}$", re.I)
+NEXT_DO_RE = re.compile(r"^\s*(ok(ay)?,?\s*)?(next|go to the next step|start the next step|do the next step|"
+                        r"next step,? please|proceed to the next (step|stage))\s*[.!]*\s*$", re.I)
+TEST_PATH_RE = re.compile(r"(^|/)(tests?|specs?|__tests__|e2e|cypress|playwright)/|(\.|_)(test|spec)\.[a-z]+$|"
+                          r"(^|/)(tests?|specs?)\.[a-z]+$|"
+                          r"(^|/)test_[^/]+\.py$|Test\.php$|_test\.go$", re.I)
+NEXT_REASONS = {"planning": "turn the findings into a plan", "development": "implement it",
+                "qa": "test it against the requirements, including related projects",
+                "deployment": "prepare the release (checklist, rollback, verification)"}
 
 SAFE_CHECK_PREFIXES = ("npm ", "npx ", "pnpm ", "yarn ", "bun ", "go ", "make ", "php ", "vendor/bin/",
                        "./vendor/bin/", "composer test", "composer run", "python", "pytest", "cargo ", "mvn ",
@@ -53,7 +71,8 @@ SAFE_CHECK_PREFIXES = ("npm ", "npx ", "pnpm ", "yarn ", "bun ", "go ", "make ",
                        "vitest", "phpunit", "phpstan", "dotnet test", "bash -n", "sh -n", "true")
 DENY_CHECK = re.compile(r"(rm\s+-rf|\bgit\s|\bsudo\b|curl[^|]*\|\s*(ba)?sh|migrate:fresh|migrate:reset|db:wipe|"
                         r"drop\s+(database|table)|docker\s+(rm|system|volume)|\bdeploy\b|\bpublish\b|kubectl|"
-                        r"terraform\s+apply|`|\$\(|>\s*/dev/|\bnpm\s+(i|install|ci)\b|composer\s+(install|update|require))",
+                        r"terraform\s+apply|`|\$\(|>\s*/dev/|\bnpm\s+(i|install|ci)\b|composer\s+(install|update|require)|"
+                        r"\bmigrate(?!:status\b)|\bdb:seed\b|alembic\s+(upgrade|downgrade)|db\s+push|\brelease\b)",
                         re.I)
 
 
@@ -73,6 +92,8 @@ class Interrupted(Exception):
 
 def is_task_status_query(request: str) -> bool:
     """Status of recorded work (instant), as opposed to a question about a project's code (planner)."""
+    if re.match(r"^\s*(show|give me)\b", request, re.I) and not TASK_REF_RE.search(request):
+        return False  # "show VIP status in the API response" is a request, not a status query
     return bool(STATUS_RE.search(request)) and (bool(TASK_REF_RE.search(request)) or not PROJECT_Q_RE.search(request))
 
 
@@ -110,25 +131,31 @@ class Engine:
         self._last_activity: Dict[Any, Tuple[float, str]] = {}
 
     # ================================================================== entry points
-    def handle(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False) -> Dict[str, Any]:
+    def handle(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
+               mode: Optional[str] = None) -> Dict[str, Any]:
         """Single entry for free-form requests from any interface. Returns {"task": ..., "report": str}."""
-        task, msg = self.route(request, cwd, conversation, confirm_plan)
+        task, msg = self.route(request, cwd, conversation, confirm_plan, mode)
         return self.execute(task) if task else {"task": None, "report": msg}
 
-    def route(self, request: str, cwd: str, conversation: str = "",
-              confirm_plan: bool = False) -> Tuple[Optional[Dict[str, Any]], str]:
+    def route(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
+              mode: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+        """mode: a lifecycle mode the user chose (name or title), or None to let the planner recommend one."""
         """Decide what a request is without executing it: an instant answer (returned as text) or a task to run."""
         cwd = os.path.abspath(cwd)
         self.registry.ensure_scanned()
         if SMALL_TALK_RE.match(request):
             return None, self.small_talk(request, cwd)
+        if NEXT_DO_RE.match(request):
+            return self.prepare_next(cwd)
+        if NEXT_Q_RE.match(request):
+            return None, self.lifecycle_text(cwd)
         if is_task_status_query(request):
             res = self.status(self._ref_from(request), cwd, request)
             if res["task"] is not None or TASK_REF_RE.search(request):
                 return None, res["report"]  # otherwise nothing recorded matches: let the planner answer it
         if RESUME_RE.search(request):
             return self.prepare_resume(self._ref_from(request), note=request, cwd=cwd)
-        return self.prepare_new(request, cwd, conversation, confirm_plan), ""
+        return self.prepare_new(request, cwd, conversation, confirm_plan, mode), ""
 
     def small_talk(self, text: str, cwd: str) -> str:
         """Instant, AI-free reply to greetings/thanks so a 'hey' never costs a model call."""
@@ -211,6 +238,14 @@ class Engine:
             self.store.event(task["id"], "cancelled", text=text)
             return None, f"Cancelled #{task['id']}. Nothing was changed."
         yes = bool(YES_RE.match(text))
+        home = self._home_project(task)
+        business = [q for q in open_q if q.get("kind") == "business"]
+        targets = {q.get("project") for q in business} - {None} or ({home.name} if home and business else set())
+        for name in targets:  # confirmed business rules outlive the task: keep them in the project(s)
+            proj = self.registry.projects.get(name)
+            if proj:
+                asked = " / ".join(q["text"] for q in business if q.get("project") in (None, name))
+                ProjectKnowledge(proj.path).add_decision(asked, text, task["id"], task.get("feature", ""))
         for q in open_q:
             q["answer"] = text
             if q.get("kind") == "budget" and yes:
@@ -225,13 +260,110 @@ class Engine:
         self.store.event(task["id"], "answered", text=text)
         return task, ""
 
-    def prepare_new(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False) -> Dict[str, Any]:
+    def prepare_new(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
+                    mode: Optional[str] = None, feature: Optional[str] = None,
+                    parent: Optional[str] = None) -> Dict[str, Any]:
         task = self.store.new_task(request, os.path.abspath(cwd))
         task["status"] = "queued"
         task["conversation"] = conversation[-2500:]
         task["confirm_plan"] = confirm_plan
+        chosen = resolve_mode(mode, self.modes(cwd))
+        if chosen:
+            task["mode"], task["mode_source"] = chosen, "user"
+        if feature:
+            task["feature"] = feature
+        if parent:
+            task["parent"] = parent
         self.store.save(task)
         return task
+
+    # ================================================================== lifecycle
+    def modes(self, cwd: str) -> Dict[str, Mode]:
+        """Mode templates for a directory: built-in < ~/.foreman/modes < <project>/.foreman/modes."""
+        proj = self.registry.project_for_path(cwd)
+        return load_modes(self.cfg.home, proj.path if proj else None)
+
+    def _mode(self, task: Dict[str, Any]) -> Optional[Mode]:
+        return self.modes(task["cwd"]).get(task.get("mode") or "")
+
+    def _home_project(self, task: Dict[str, Any]):
+        """Project that holds the task's documents and lifecycle: the current directory's, else the first changed."""
+        proj = self.registry.project_for_path(task["cwd"])
+        if proj:
+            return proj
+        names = [n for n, e in task["projects"].items() if e.get("role") == "modify"] + list(task["projects"])
+        return self.registry.projects.get(names[0]) if names else None
+
+    def lifecycle_text(self, cwd: str) -> str:
+        """Where the project's features stand and the recommended next step (instant, no AI)."""
+        self.registry.ensure_scanned()
+        proj = self.registry.project_for_path(cwd)
+        modes = self.modes(cwd)
+        names = " · ".join(m.title for m in modes.values())
+        if not proj:
+            return f"This folder is not a known project. Modes: {names}."
+        kn = ProjectKnowledge(proj.path)
+        feats = kn.lifecycle()
+        if not feats:
+            return (f"No lifecycle recorded for {proj.name} yet. Modes: {names}. Describe what you want and I'll "
+                    "recommend a mode, or choose one yourself (/mode in the chat).")
+        lines = [f"Lifecycle of {proj.name}:"]
+        recent = sorted(feats.items(), key=lambda kv: str(kv[1].get("updated", "")), reverse=True)
+        for key, f in recent[:8]:
+            stage = modes[f["stage"]].title if f.get("stage") in modes else f.get("stage")
+            nxt = modes[f["next"]].title if f.get("next") in modes else None
+            lines.append(f"  {key:<24} {stage} ({str(f.get('status', '')).replace('_', ' ')}, {str(f.get('updated', ''))[:10]})"
+                         + (f" → next: {nxt}, {f.get('next_reason', '')}" if nxt else ""))
+        key, f = recent[0]
+        if f.get("next") in modes:
+            lines.append(f"Recommended: {modes[f['next']].title} for {key}. Say \"next\" to start it, or pick another mode.")
+        dec = kn.decisions(1000)
+        if dec:
+            lines.append(f"{len(dec)} confirmed decision{'s' if len(dec) != 1 else ''} on record (.foreman/decisions.md).")
+        return "\n".join(lines)
+
+    def prepare_next(self, cwd: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Start the recommended next mode for the most recent piece of work here."""
+        self.registry.ensure_scanned()
+        proj = self.registry.project_for_path(cwd)
+        cands = [t for t in self.store.all() if t.get("next") and not t.get("next_started")
+                 and t["status"] not in ("running", "queued", "planning")
+                 and (not proj or proj.name in t["projects"] or self.registry.project_for_path(t["cwd"]) == proj)]
+        if not cands:
+            return None, "Nothing is waiting for a next step here. " + self.lifecycle_text(cwd)
+        prev = cands[0]
+        nxt = prev["next"]
+        mode = self.modes(cwd).get(nxt["mode"])
+        title = mode.title if mode else nxt["mode"]
+        doc = prev.get("document") or {}
+        request = (f"{title} for \"{prev.get('feature') or prev['title']}\": {nxt.get('reason', '')}.\n"
+                   f"Previous step ({prev.get('mode')}, task #{prev['id']}): {short(prev.get('summary') or prev['title'], 400)}"
+                   + (f"\nIts document: {doc['project']}/{doc['path']}" if doc else "")
+                   + f"\nOriginal request: {prev['request']}")
+        task = self.prepare_new(request, prev["cwd"], mode=nxt["mode"], feature=prev.get("feature"), parent=prev["id"])
+        prev["next_started"] = task["id"]
+        self.store.save(prev)
+        return task, ""
+
+    def _next_step(self, task: Dict[str, Any], mode: Mode) -> Optional[Dict[str, str]]:
+        """Recommended next mode, from the mode's template and the outcome (deterministic)."""
+        if task["status"] in ("interrupted", "cancelled", "failed", "needs_input"):
+            return None
+        latest = {}
+        for e in task["evidence"]:
+            if e["kind"] in ("check", "review"):
+                latest[(e["kind"], e["project"], e.get("command"))] = e
+        problems = task["status"] in ("partial", "blocked") or bool(task["remaining"]) or \
+            any(not e["ok"] for e in latest.values())
+        if problems and mode.writes == "code":
+            return {"mode": mode.name, "reason": "finish the remaining items"}
+        if problems and mode.name == "qa":
+            return {"mode": "development", "reason": "fix what QA found"}
+        if problems:
+            return {"mode": mode.name, "reason": "resolve what is blocking it"}
+        if not mode.next:
+            return None
+        return {"mode": mode.next, "reason": NEXT_REASONS.get(mode.next, "")}
 
     # ================================================================== execution
     def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
@@ -279,6 +411,9 @@ class Engine:
             task["status"] = "needs_input"
             return
         if task["intent"] == "answer" and task.get("answer") and not self._pending(task):
+            mode = self._mode(task)
+            if mode and mode.document:  # the planner wrote the result directly: it is the document
+                self._document(task, direct=True)
             task["status"] = "answered"
             return
         if not self._plan_approved(task) or not self._budget_ok(task):
@@ -298,6 +433,20 @@ class Engine:
             break
         if any(s["status"] in ("failed", "blocked", "skipped") for s in task["steps"]):
             task["status"] = "blocked"
+        mode = self._mode(task)
+        if any(s["kind"] == "implement" and s["status"] == "done" for s in task["steps"]):
+            self._verify(task)
+            if task["status"] == "needs_input":
+                return
+        elif mode and mode.writes != "code" and mode.checks:
+            # QA / deployment: Foreman runs the projects' checks itself; failures are findings for the user
+            failing = [c for c in self._run_checks(task, {}) if not c["ok"]]
+            task["remaining"] += [f"{c['project']}: `{c['command']}` fails" for c in failing]
+        if mode and mode.document:
+            self._document(task)
+            if task["status"] == "running":
+                task["status"] = "done"
+            return
         if task["intent"] == "answer":
             task["answer"] = "\n\n".join(s.get("summary", "") + ("\n" + "\n".join("- " + f for f in s.get("findings", []))
                                                                   if s.get("findings") else "")
@@ -305,8 +454,6 @@ class Engine:
             if task["status"] != "blocked":
                 task["status"] = "answered"
             return
-        if any(s["kind"] == "implement" and s["status"] == "done" for s in task["steps"]):
-            self._verify(task)
 
     # ------------------------------------------------------------------ planning
     def _plan(self, task: Dict[str, Any]) -> bool:
@@ -321,14 +468,20 @@ class Engine:
             for t in self.store.all() if t["id"] != task["id"] and names & set(t["projects"]))[:2500]
         seen = "\n".join(f"- [{s['status']}] {s['text']}" for s in self.store.suggestions()
                          if not s["project"] or s["project"] in names)[:1500]
+        modes = self.modes(task["cwd"])
+        fixed = task.get("mode") if task.get("mode_source") == "user" else ""
+        knowledge = "\n".join(k for k in (ProjectKnowledge(p.path).context(p.name) for p in sel.focus) if k)
         prompt = Brain.plan_prompt(task["request"], task["cwd"], ctx, history, seen,
-                                   task_context(task, changes) if resume else "", task.get("conversation", ""))
+                                   task_context(task, changes) if resume else "", task.get("conversation", ""),
+                                   modes_ctx=catalog(modes, only=fixed or None), fixed_mode=fixed or "",
+                                   knowledge_ctx=knowledge)
         cwd = sel.anchor.path if sel.anchor else (sel.focus[0].path if sel.focus else task["cwd"])
         extra = [p.path for p in sel.focus if p.path != cwd][:6]
         self._say(task, "planning…")
         before = snapshot(cwd)
         try:
-            plan = self._brain(task).call(prompt, PLAN_SCHEMA, cwd, extra, purpose="plan")
+            plan = self._brain(task).call(prompt, PLAN_SCHEMA, cwd, extra, purpose="plan",
+                                          web=bool(fixed and modes[fixed].web))
         except BrainError as e:
             task["status"] = "blocked"
             task["remaining"].append(f"Planning failed: {e}")
@@ -341,6 +494,12 @@ class Engine:
             self._notice(task, f"The planner ({plan.get('_provider')}) changed files while it should only read: "
                                f"{', '.join(touched[:6])}")
         self._apply_plan(task, plan, replace_pending=True)
+        mode = self._mode(task)
+        if mode:
+            task["mode_title"] = mode.title
+            self.store.event(task["id"], "mode", mode=mode.name, title=mode.title, source=task.get("mode_source"),
+                             reason=task.get("mode_reason", ""))
+        self._ensure_impact(task)
         if changes:
             task["evidence"].append({"kind": "freshness", "project": ", ".join(changes), "ok": True, "at": now_iso(),
                                      "summary": "code changed since last run; plan re-verified against current state"})
@@ -367,14 +526,23 @@ class Engine:
             task["answered_by"] = plan.get("_provider")
             task["steps"] = [s for s in task["steps"] if s["status"] == "done"]
             task["checks"] = []
+            if not task.get("mode"):  # decided once per task; moving on to another mode is the user's "next"
+                task["mode"] = resolve_mode(plan.get("mode"), self.modes(task["cwd"]))
+                task["mode_source"] = "auto" if task["mode"] else None
+                task["mode_reason"] = short(plan.get("mode_reason") or "", 160)
+            task["feature"] = task.get("feature") or slug(plan.get("feature") or task["title"])
+            if plan.get("impact"):
+                task["impact"] = plan["impact"]
         for p in plan.get("projects", []):
             proj = self.registry.find(p.get("name", ""))
             if not proj:
                 task["notices"].append(f"Planner referenced unknown project '{p.get('name')}' (ignored)")
                 continue
-            entry = task["projects"].setdefault(proj.name, {"path": proj.path, "role": p["role"], "why": p.get("why", "")})
-            if p["role"] == "modify" or entry["role"] != "modify":
-                entry["role"] = p["role"]
+            mode = self._mode(task)
+            role = "inspect" if p["role"] == "modify" and mode and mode.writes == "none" else p["role"]
+            entry = task["projects"].setdefault(proj.name, {"path": proj.path, "role": role, "why": p.get("why", "")})
+            if role == "modify" or entry["role"] != "modify":
+                entry["role"] = role
         prefix = f"r{task['runs']}.{task['replans']}."
         ids = {s.get("id"): prefix + re.sub(r"^(r\d+\.\d+\.)+", "", str(s.get("id"))) for s in plan.get("steps", [])}
         for s in plan.get("steps", []):
@@ -382,11 +550,16 @@ class Engine:
             if not proj:
                 task["notices"].append(f"Step for unknown project '{s.get('project')}' dropped")
                 continue
-            task["projects"].setdefault(proj.name, {"path": proj.path, "why": "has a planned step",
-                                                    "role": "modify" if s["kind"] == "implement" else "inspect"})
-            if s["kind"] == "implement":
-                task["projects"][proj.name]["role"] = "modify"
+            task["projects"].setdefault(proj.name, {"path": proj.path, "why": "has a planned step", "role": "inspect"})
             reads = [self.registry.find(r) for r in s.get("read_projects", [])]
+            mode = self._mode(task)
+            if s["kind"] == "implement" and mode and mode.writes == "none":  # read-only mode: analyse, don't edit
+                s = {**s, "kind": "investigate", "instructions": f"Read-only ({mode.title} mode: no files are changed). "
+                     f"Analyse and describe precisely what this would require, with file references: {s['instructions']}"}
+                task["projects"][proj.name]["role"] = "inspect" if task["projects"][proj.name].get("role") == "modify" \
+                    else task["projects"][proj.name].get("role")
+            elif s["kind"] == "implement":
+                task["projects"][proj.name]["role"] = "modify"
             task["steps"].append({
                 "id": ids[s.get("id")], "project": proj.name, "kind": s["kind"], "instructions": s["instructions"],
                 "depends_on": [ids[d] for d in s.get("depends_on", []) if d in ids],
@@ -409,6 +582,50 @@ class Engine:
                 task["decisions"].append({"text": f"Open technical question left to workers: {q['text']}",
                                           "by": "planner", "at": now_iso()})
         task.setdefault("suggestion_buffer", []).extend(plan.get("suggestions", []) or [])
+
+    def _ensure_impact(self, task: Dict[str, Any]) -> None:
+        """Before code changes: if the planner rates the risk medium/high, or a known consumer of a project being
+        changed is left out of the plan, run a read-only impact investigation first (implement steps wait for it)."""
+        mode = self._mode(task)
+        impl = [s for s in task["steps"] if s["status"] == "pending" and s["kind"] == "implement"]
+        if not impl or (mode and mode.writes != "code"):
+            return
+        if any(s["kind"] == "investigate" and s["status"] in ("pending", "done") for s in task["steps"]):
+            return  # the plan already investigates first
+        modified = {s["project"] for s in impl}
+        # Relations point from the consumer to what it uses (admin-ui --related--> orders-api): changing the
+        # provider can break its consumers, not the other way round. Shared contracts cut both ways.
+        left_out = set()
+        for r in self.registry.relations:
+            if r.type == "mentions":
+                continue
+            pairs = [(r.dst, r.src)] + ([(r.src, r.dst)] if r.type == "shares_contract_with" else [])
+            for changed, other in pairs:
+                if changed in modified and other not in task["projects"] and other in self.registry.projects:
+                    left_out.add(other)
+        risk = (task.get("impact") or {}).get("risk", "low")
+        if risk == "low" and not left_out:
+            return
+        home = impl[0]["project"]
+        for name in sorted(left_out):
+            task["projects"][name] = {"path": self.registry.projects[name].path, "role": "inspect",
+                                      "why": "known consumer or dependency of a project being changed (impact check)"}
+        reads = sorted((left_out | modified | {n for n, e in task["projects"].items() if e.get("role") == "test"})
+                       - {home})[:5]
+        sid = f"r{task['runs']}.{task['replans']}.impact"
+        task["steps"].append({
+            "id": sid, "project": home, "kind": "investigate", "status": "pending", "attempts": 0, "provider": None,
+            "session_id": None, "summary": "", "depends_on": [], "read_projects": reads, "impact": True,
+            "instructions": (
+                "Impact analysis before anything is changed. The planned change: " + task["request"] + "\n"
+                "Find everything the change could affect, here and in the related projects: callers and consumers of the "
+                "code or interfaces involved, tests that cover them, and confirmed business decisions or rules that "
+                "constrain it. List concrete risks and regressions with file references, and what the implementation "
+                "must keep compatible. If a business rule is unclear and a wrong guess would be costly, return it as a "
+                "business question. Do not change files.")})
+        for s in impl:
+            s["depends_on"].append(sid)
+        self.store.event(task["id"], "impact", risk=risk, consumers=sorted(left_out))
 
     # ------------------------------------------------------------------ steps
     def _run_steps(self, task: Dict[str, Any]) -> None:
@@ -465,7 +682,9 @@ class Engine:
             self._say(task, f"{step['kind']} {step['project']} via {provider.name}" + (f" ({why})" if why else ""))
             self.store.event(task["id"], "step_start", step=step["id"], provider=provider.name, project=step["project"],
                              step_kind=step["kind"], session=session_id, fork=fork, why=why)
+            mode = self._mode(task)
             result = provider.run(RunRequest(
+                web=bool(mode and mode.web and step["kind"] == "investigate"),
                 prompt=prompt, cwd=proj.path, mode="write" if step["kind"] == "implement" else "read",
                 session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=self.cfg.limits.step_timeout_sec,
                 extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects],
@@ -514,6 +733,12 @@ class Engine:
             touched = changed_since(proj.path, before)
             if touched:
                 self._notice(task, f"Read-only step changed files in {proj.name}: {', '.join(touched[:8])}")
+        mode = self._mode(task)
+        if step["kind"] == "implement" and mode and mode.writes == "tests":
+            app = [f for f in changed_since(proj.path, before) if not TEST_PATH_RE.search(f)]
+            if app:
+                self._notice(task, f"QA rule broken: application files changed in {proj.name} (QA may only change "
+                                   f"tests): {', '.join(app[:8])}. Review them.")
         for q in data.get("questions", []) or []:
             if q.get("kind") == "business":
                 task["questions"].append({"text": q["text"], "kind": "business", "options": q.get("options", []),
@@ -537,6 +762,9 @@ class Engine:
         avail = [p for n, p in self.providers.items() if n not in tried and self._usable(n)]
         if not avail:
             return None
+        mode = self._mode(task)
+        if mode and mode.web and step["kind"] == "investigate":  # research steps go to providers that can browse
+            avail = [p for p in avail if p.capabilities.web] + [p for p in avail if not p.capabilities.web]
         if step.get("session_id") and step.get("provider") and not step.get("no_reuse"):
             prov = self.providers.get(step["provider"])
             if prov and prov in avail:
@@ -555,7 +783,7 @@ class Engine:
                     continue
                 for sess in prov.discover_sessions(cwd):
                     if sess.updated_at >= horizon and sess.session_id not in ours and \
-                            not sess.title.startswith(FOREMAN_PROMPT_PREFIXES):
+                            not sess.title.startswith(OWN_PROMPT_PREFIXES):
                         age = int((time.time() - sess.updated_at) / 3600)
                         return prov, sess.session_id, True, f"forked your session '{short(sess.title, 40)}' ({age}h old)"
                 break  # only the preferred provider's sessions are worth forking
@@ -567,8 +795,14 @@ class Engine:
                          if r.type != "mentions")[:2000]
         decisions = "\n".join(f"- {d['text']}" for d in task["decisions"][-10:])
         answers = "\n".join(f"- Q: {q['text']}\n  A: {q['answer']}" for q in task["questions"] if q.get("answer"))
-        others = "\n".join(f"- {s['project']} ({s['kind']}): {s['summary'][:300]}" for s in task["steps"]
-                           if s["status"] == "done" and s["id"] != step["id"] and s.get("summary"))
+        others = "\n".join(f"- {s['project']} ({s['kind']}): {s['summary'][:300]}"
+                           + "".join(f"\n    · {short(f, 200)}" for f in (s.get("findings") or [])[:8]
+                                     if s["kind"] == "investigate")
+                           for s in task["steps"] if s["status"] == "done" and s["id"] != step["id"] and s.get("summary"))
+        mode = self._mode(task)
+        knowledge = "\n".join(k for k in [ProjectKnowledge(proj.path).context(proj.name)] + [
+            ProjectKnowledge(self.registry.projects[r].path).context(r) for r in step["read_projects"]
+            if r in self.registry.projects] if k)[:3500]
         rules = (
             "- Edit files only inside this project. Other projects are read-only for you.\n"
             "- Complete the change fully, including routine refactors and tests it needs, and run the project's "
@@ -578,10 +812,17 @@ class Engine:
             if step["kind"] == "implement" else
             "- Read-only step: do not create, modify or delete files.\n"
             "- Answer precisely with file references; stop as soon as you have enough evidence.\n")
+        if mode and mode.writes == "tests" and step["kind"] == "implement":
+            rules += "- QA: change TEST files only. Never change application code; report bugs as findings instead.\n"
+        if step["kind"] == "investigate":
+            rules += ("- Web research is allowed for this step; cite URLs.\n" if mode and mode.web
+                      else "- Work from the code and documents; do not search the web.\n")
         return "\n\n".join(x for x in [
             "You are a worker session coordinated by Foreman, an orchestrator for related projects.",
             f"OVERALL REQUEST:\n{task['request']}",
             f"YOUR STEP ({step['kind']}) in project {proj.name} at {proj.path}:\n{step['instructions']}",
+            f"MODE: {mode.title}. {mode.summary}\n{mode.section('worker')}" if mode else "",
+            f"PROJECT KNOWLEDGE (from .foreman; confirmed decisions must be followed):\n{knowledge}" if knowledge else "",
             f"OTHER PROJECTS YOU MAY READ:\n{reads}" if reads else "",
             f"KNOWN RELATIONS OF {proj.name}:\n{rels}" if rels else "",
             f"RESULTS OF OTHER STEPS:\n{others}" if others else "",
@@ -602,7 +843,10 @@ class Engine:
                 entry["baseline"] = snapshot(entry["path"])
 
     def _verify(self, task) -> None:
-        for rnd in range(self.cfg.limits.max_fix_rounds + 1):
+        mode = self._mode(task)
+        # QA reports problems instead of fixing them (fixes would touch application code): no fix rounds.
+        max_rounds = 0 if mode and mode.writes == "tests" else self.cfg.limits.max_fix_rounds
+        for rnd in range(max_rounds + 1):
             changed = {n: changed_since(e["path"], e["baseline"]) for n, e in task["projects"].items()
                        if e.get("baseline")}
             for n, files in changed.items():
@@ -620,11 +864,12 @@ class Engine:
                         if a < b:
                             self.registry.mark_verified(a, b)
                 return
-            if rnd == self.cfg.limits.max_fix_rounds:
+            if rnd == max_rounds:
                 task["status"] = "partial"
                 task["remaining"] += [f"{c['project']}: `{c['command']}` still failing" for c in failing]
                 task["remaining"] += [f"{i['project']}: {i['problem']}" for i in issues]
-                self._notice(task, f"Stopped after {rnd} fix round(s); escalating remaining problems to you.")
+                self._notice(task, "QA found problems; they are listed under Remaining for development to fix."
+                             if max_rounds == 0 else f"Stopped after {rnd} fix round(s); escalating remaining problems to you.")
                 return
             task["fix_rounds"] += 1
             self._schedule_fixes(task, failing, issues)
@@ -633,14 +878,33 @@ class Engine:
                 task["status"] = "needs_input"
                 return
 
+    def _project_checks(self, name: str) -> Dict[str, str]:
+        """Check commands by kind: detected by the registry, overridden by the repo's .foreman/checks.yaml."""
+        proj = self.registry.projects.get(name)
+        if not proj:
+            return {}
+        out = {**({"test": proj.test} if proj.test else {}), **proj.checks}
+        out.update(ProjectKnowledge(proj.path).checks())
+        return out
+
     def _run_checks(self, task, changed: Dict[str, List[str]]) -> List[Dict[str, Any]]:
         checks = list(task["checks"])
-        for name, files in changed.items():
-            proj = self.registry.projects.get(name)
-            if files and proj and proj.test and not any(c["project"] == name for c in checks):
-                ok, why = check_command_allowed(proj.test)
-                checks.append({"project": name, "command": proj.test, "why": "registry test command",
-                               "allowed": ok, "blocked_reason": why})
+        mode = self._mode(task)
+
+        def add(name: str, command: str, why: str) -> None:
+            if command and not any(c["project"] == name and c["command"] == command for c in checks):
+                ok, reason = check_command_allowed(command)
+                checks.append({"project": name, "command": command, "why": why, "allowed": ok, "blocked_reason": reason})
+
+        for name, files in changed.items():  # tests of every changed project
+            if files and not any(c["project"] == name for c in checks):
+                add(name, self._project_checks(name).get("test", ""), "registry test command")
+        for name, e in task["projects"].items():
+            if e.get("role") == "test" and any(changed.values()):  # regression: test projects related to the change
+                add(name, self._project_checks(name).get("test", ""), "regression tests of a related project")
+            if mode and mode.writes != "code":  # QA / deployment: every check kind the mode asks for
+                for kind in mode.checks:
+                    add(name, self._project_checks(name).get(kind, ""), f"{mode.title} {kind} check")
         results = []
         for c in checks:
             proj = self.registry.projects.get(c["project"])
@@ -670,7 +934,9 @@ class Engine:
         extra = [task["projects"][n]["path"] for n in names[1:]]
         brain = self._brain(task, prefer_not=implementers)
         try:
-            review = brain.call(Brain.review_prompt(task, diffs, checks), REVIEW_SCHEMA, cwd, extra, purpose="review")
+            knowledge = "\n".join(k for k in (ProjectKnowledge(task["projects"][n]["path"]).context(n) for n in names) if k)
+            review = brain.call(Brain.review_prompt(task, diffs, checks, knowledge[:4000]), REVIEW_SCHEMA, cwd, extra,
+                                purpose="review")
         except BrainError as e:
             self._notice(task, f"Independent review unavailable: {e}")
             return None
@@ -704,6 +970,42 @@ class Engine:
                 "session_id": prev.get("session_id") if prev else None, "summary": "",
             })
 
+    # ------------------------------------------------------------------ documents
+    def _document(self, task: Dict[str, Any], direct: bool = False) -> None:
+        """Write the mode's result (research brief, plan, QA report, release document) into the project's
+        .foreman folder. direct: the planner already wrote it as its answer; otherwise one AI call turns the
+        steps' findings into the document (falling back to the raw findings if no provider can)."""
+        mode, home = self._mode(task), self._home_project(task)
+        if not mode or not mode.document or not home:
+            return
+        findings = "\n\n".join(
+            f"## {s['project']} ({s['kind']})\n{s.get('summary', '')}" + "".join(f"\n- {f}" for f in s.get("findings") or [])
+            for s in task["steps"] if s["status"] == "done")
+        checks = "\n".join(f"- {e['project']}: {e['summary']}" for e in task["evidence"] if e["kind"] == "check")
+        if direct:
+            text, summary = task.get("answer") or "", short(task.get("answer") or "", 300)
+        else:
+            try:
+                data = self._brain(task).call(
+                    Brain.document_prompt(task, mode.title, mode.section("output"), findings or "(none)", checks),
+                    DOC_SCHEMA, home.path, [e["path"] for n, e in task["projects"].items() if n != home.name][:5],
+                    purpose="document")
+                self._provider_errors(task, data)
+                text, summary = clean_text(data.get("document", "")), clean_text(data.get("summary", ""))
+                task["remaining"] += [short(p, 200) for p in data.get("open_problems") or [] if p.strip()][:8]
+            except BrainError as e:
+                self._notice(task, f"Could not write the {mode.title} document with an AI provider ({short(str(e), 120)}); "
+                                   "saved the raw findings instead.")
+                text, summary = f"# {task['title']}\n\n{findings}\n\n## Checks\n{checks or '(none)'}", task["title"]
+        if not text.strip():
+            return
+        path = ProjectKnowledge(home.path).save_document(mode.document, task.get("feature") or task["title"], text,
+                                                         task["id"])
+        task["document"] = {"project": home.name, "path": path, "kind": mode.document}
+        task["intent"] = "answer"
+        task["answer"] = summary or task.get("answer")
+        self.store.event(task["id"], "document", project=home.name, path=path)
+
     # ------------------------------------------------------------------ finalize
     def _finalize(self, task) -> None:
         if task["status"] == "running":
@@ -721,8 +1023,33 @@ class Engine:
         task["outcome"] = {"done": "achieved", "answered": "achieved", "partial": "partially achieved",
                            "needs_input": "waiting for your input", "blocked": "blocked"}.get(task["status"], task["status"])
         task["summary"] = self._summary(task)
+        self._record_lifecycle(task)
         self.store.save(task)
         self.store.event(task["id"], "finished", status=task["status"])
+
+    def _record_lifecycle(self, task) -> None:
+        """Note the stage this feature reached, and the recommended next mode, in each involved project."""
+        mode = self._mode(task)
+        if not mode or task["status"] in ("interrupted", "cancelled"):
+            return
+        task["next"] = self._next_step(task, mode)
+        if task["next"]:
+            nxt = self.modes(task["cwd"]).get(task["next"]["mode"])
+            task["next"]["title"] = nxt.title if nxt else task["next"]["mode"]
+        home = self._home_project(task)
+        names = {n for n, e in task["projects"].items() if e.get("role") == "modify"} | ({home.name} if home else set())
+        doc = (task.get("document") or {}).get("path")
+        for name in sorted(names):
+            proj = self.registry.projects.get(name)
+            if not proj or not os.path.isdir(proj.path):
+                continue
+            try:
+                ProjectKnowledge(proj.path).update_feature(
+                    task.get("feature") or task["title"], task["title"], mode.name, task["status"], task["id"],
+                    task.get("summary", ""), (task.get("next") or {}).get("mode"), (task.get("next") or {}).get("reason", ""),
+                    doc if home and name == home.name else None)
+            except OSError as e:
+                self._notice(task, f"Could not update {name}/.foreman: {e}")
 
     def _summary(self, task) -> str:
         if task.get("answer") and task["intent"] == "answer":
@@ -786,6 +1113,9 @@ class Engine:
         self._last_activity[key] = (time.time(), text)
         for p in sorted(self.registry.projects.values(), key=lambda p: -len(p.path)):  # show paths as project/…
             text = text.replace(p.path.rstrip("/") + "/", p.name + "/").replace(p.path, p.name)
+        m = re.match(r"^(\w+)\((.*)\)$", text, re.S)
+        if m and len(m.group(2)) > 90:
+            text = f"{m.group(1)}({m.group(2)[:89]}…)"
         self.store.event(task_id, "activity", provider=provider, where=where, text=text)
 
     def _provider_errors(self, task, data: Dict[str, Any]) -> None:

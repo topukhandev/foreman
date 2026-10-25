@@ -1,4 +1,4 @@
-"""Command-line interface (thin). `orchestrator "<request>"` is the main entry; subcommands cover state and setup."""
+"""Command-line interface (thin). `foreman "<request>"` is the main entry; subcommands cover state and setup."""
 
 import argparse
 import json
@@ -7,11 +7,13 @@ import signal
 import sys
 from typing import List, Optional
 
+from orchestrator import completion
 from orchestrator.app import build_engine
+from orchestrator.completion import SHELLS
 from orchestrator.config import load_config, set_option
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
-               "accept", "dismiss", "config", "doctor", "mcp", "run-task", "help", "-h", "--help"}
+               "accept", "dismiss", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "completion", "version"}
 
 
 def _progress(msg: str) -> None:
@@ -50,18 +52,40 @@ def _print_result(eng, result) -> None:
                 _print_result(eng, eng.execute(eng.prepare_new(s["text"], proj.path if proj else task["cwd"])))
 
 
+def version_string() -> str:
+    """`foreman 0.2.0`, plus the commit when running from a git checkout (`foreman 0.2.0+g1a2b3c4`)."""
+    import subprocess
+    from orchestrator import __version__
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if os.path.exists(os.path.join(root, ".git")):
+        try:
+            sha = subprocess.run(["git", "-C", root, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                                 timeout=5).stdout.strip()
+            if sha:
+                return f"foreman {__version__}+g{sha}"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return f"foreman {__version__}"
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--version", "-V", "version"):
+        print(version_string())
+        return 0
     chat_flags = {"--visual", "--headless", "-c", "--continue", "-r", "--resume"}
     if not argv or all(a in chat_flags for a in argv):
         if not sys.stdin.isatty():
             print(HELP)
             return 0
         argv = ["chat"] + argv
+    flags = [a for a in argv[:2] if a in ("--visual", "--headless")]
+    if flags and len(argv) > len(flags) and argv[len(flags)] in SUBCOMMANDS:  # `--headless answer 4 ...`
+        argv = [argv[len(flags)]] + flags + argv[len(flags) + 1:]
     if argv[0] not in SUBCOMMANDS:
         argv = ["ask"] + argv
 
-    ap = argparse.ArgumentParser(prog="orchestrator", description="Foreman: orchestrate AI sessions across projects")
+    ap = argparse.ArgumentParser(prog="foreman", description="Foreman: orchestrate AI sessions across projects")
     sub = ap.add_subparsers(dest="cmd")
 
     def add(name, help_):
@@ -77,6 +101,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = add("ask", "submit a request (default when no subcommand is given)")
     p.add_argument("request", nargs="+")
     p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--mode", help="lifecycle mode: research, planning, development, qa, deployment (default: recommended)")
+    p = add("next", "start the recommended next lifecycle step for the latest work here")
+    p.add_argument("--cwd", default=os.getcwd())
+    p = sub.add_parser("lifecycle", help="where this project's features stand and what's next (no AI)")
+    p.add_argument("--cwd", default=os.getcwd())
+    sub.add_parser("modes", help="list lifecycle modes and where their templates come from")
     p = add("status", "state of a task (no AI)")
     p.add_argument("task", nargs="*")
     p.add_argument("--cwd", default=os.getcwd())
@@ -107,6 +137,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("key", nargs="?", choices=["display", "notify", "reuse", "planner", "first-worker"])
     p.add_argument("value", nargs="?")
     sub.add_parser("doctor", help="check providers, terminal, MCP registration")
+    sub.add_parser("version", help="print the version")
+    p = sub.add_parser("completion", help="print a shell completion script (bash or zsh)")
+    p.add_argument("shell", choices=SHELLS)
     p = sub.add_parser("mcp", help="run the MCP server (stdio), or `mcp install [claude|antigravity|codex|all]`")
     p.add_argument("action", nargs="?", default="serve", choices=["serve", "install", "status"])
     p.add_argument("targets", nargs="*")
@@ -119,6 +152,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if cmd in (None, "help"):
         print(HELP)
+        return 0
+
+    if cmd == "completion":
+        print(completion.script(args.shell), end="")
         return 0
 
     if cmd == "mcp":
@@ -159,7 +196,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 from orchestrator.config import set_first_provider
                 set_first_provider(cfg.home, value)
         else:
-            print("usage: orchestrator config display terminal|headless | notify on|off | reuse fork|off | "
+            print("usage: foreman config display terminal|headless | notify on|off | reuse fork|off | "
                   "planner <provider> | first-worker <provider>")
             return 1
         print(f"{args.key} = {value}")
@@ -176,7 +213,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         Chat(args.cwd, visual=visual, engine=eng).run(resume="last" if args.cont else "pick" if args.resume else None)
         return 0
     if cmd == "ask":
-        _print_result(eng, eng.handle(" ".join(args.request), args.cwd))
+        from orchestrator.modes import resolve
+        if args.mode and not resolve(args.mode, eng.modes(args.cwd)):
+            print(f"unknown mode '{args.mode}'. Modes: " + ", ".join(eng.modes(args.cwd)), file=sys.stderr)
+            return 1
+        _print_result(eng, eng.handle(" ".join(args.request), args.cwd, mode=args.mode))
+        return 0
+    if cmd == "next":
+        task, msg = eng.prepare_next(args.cwd)
+        if not task:
+            print(msg)
+            return 0
+        _print_result(eng, eng.execute(task))
+        return 0
+    if cmd == "lifecycle":
+        print(eng.lifecycle_text(args.cwd))
+        return 0
+    if cmd == "modes":
+        for name, m in eng.modes(os.getcwd()).items():
+            print(f"{m.title:<12} {name:<12} [{m.source}] {m.summary}")
+        print("\nOverride a template by copying it to ~/.foreman/modes/<name>.md or <project>/.foreman/modes/<name>.md")
         return 0
     if cmd == "status":
         print(eng.status(" ".join(args.task) or None, args.cwd)["report"])
@@ -313,7 +369,7 @@ def projects_cmd(eng, action: str, rest: List[str]) -> int:
         reg.save()
         print(f"{p.name} test command: {p.test}")
         return 0
-    print("usage: orchestrator projects [list|scan|show NAME|add PATH [NAME]|link A B TYPE [note]|unlink A B|test NAME CMD]")
+    print("usage: foreman projects [list|scan|show NAME|add PATH [NAME]|link A B TYPE [note]|unlink A B|test NAME CMD]")
     return 1
 
 
@@ -345,21 +401,26 @@ def doctor() -> int:
 
 
 HELP = """\
-Foreman orchestrator
+Foreman
 
-  orchestrator                        open the chat (plain language for everything)
-  orchestrator -c | -r                continue the latest chat here | pick an earlier one
-  orchestrator "<request>"            do something (plans, picks projects/sessions, executes, validates, reports)
-  orchestrator status [task]          state of a task (instant, no AI)
-  orchestrator resume [task] [note]   continue a task, re-verifying against current code
-  orchestrator answer <task> <text>   answer a task's open question
-  orchestrator tasks | show <task>    history and details (show --events for the audit log)
-  orchestrator suggestions | accept <id> | dismiss <id>
-  orchestrator projects [list|scan|show|add|link|unlink|test]
-  orchestrator sessions [project]     existing Claude/OpenCode/Antigravity sessions for a project
-  orchestrator config [display terminal|headless | notify on|off | reuse fork|off]
-  orchestrator doctor                 providers, display, MCP registration
-  orchestrator mcp [install [claude|antigravity|codex]]   MCP server for Claude Code, Antigravity, Codex…
+  foreman                          open the chat (plain language for everything)
+  foreman -c | -r                  continue the latest chat here | pick an earlier one
+  foreman "<request>"              do something (plans, picks projects/sessions, executes, validates, reports)
+  foreman --mode qa "<request>"    same, in a chosen mode (research, planning, development, qa, deployment)
+  foreman lifecycle | next         where this project's features stand | start the recommended next step
+  foreman modes                    the mode templates and where each comes from
+  foreman status [task]            state of a task (instant, no AI)
+  foreman resume [task] [note]     continue a task, re-verifying against current code
+  foreman answer <task> <text>     answer a task's open question
+  foreman tasks | show <task>      history and details (show --events for the audit log)
+  foreman suggestions | accept <id> | dismiss <id>
+  foreman projects [list|scan|show|add|link|unlink|test]
+  foreman sessions [project]       existing Claude/OpenCode/Antigravity sessions for a project
+  foreman config [display terminal|headless | notify on|off | reuse fork|off]
+  foreman doctor                   providers, display, MCP registration
+  foreman completion bash|zsh      shell completion script (eval "$(foreman completion bash)")
+  foreman --version                version (with the commit when run from a checkout)
+  foreman mcp [install [claude|antigravity|codex]]   MCP server for Claude Code, Antigravity, Codex…
 
   --visual / --headless               override the display mode for one run
 """

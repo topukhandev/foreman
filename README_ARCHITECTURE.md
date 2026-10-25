@@ -5,8 +5,9 @@
                                │                         │  (long tasks run detached: app.spawn_task)
                                └──────────┬──────────────┘
                                           ▼
- Core (engine.py)   request ─► fast path: status / resume (no AI)
-                            └► plan (brain.py) ─► questions? ─► needs_input
+ Core (engine.py)   request ─► fast path: status / resume / "what's next" / "next" (no AI)
+                            └► plan (brain.py): mode, scope, steps, impact ─► questions? ─► needs_input
+                                   │   risky change or consumers left out ─► impact investigation first
                                    │
                                    ▼
                        steps DAG ─ parallel across projects, one session per step
@@ -15,14 +16,18 @@
                        validate: checks run by Foreman + diffs + independent review
                                    │   problems ─► fix rounds in the same sessions (bounded)
                                    ▼
-                       finalize: state, relations verified, suggestions, report, one notification
+                       document modes ─► research brief / plan / QA report / release doc in the project
+                       finalize: state, lifecycle + next step, relations verified, suggestions, report, notification
                                           │
  State (~/.foreman)   registry.py  projects.yaml      projects + relations (declared/discovered/learned)
                       store.py     tasks/<id>/        task.json, events.jsonl, logs/, report.md
                       budget.py    budget.json        daily runs per provider
                                           │
- Providers            providers/claude.py · antigravity.py · opencode.py   (mock.py for tests)
-                      Capabilities: resume, fork, structured output, session discovery, enforced read-only
+ Per project (git)    knowledge.py .foreman/       decisions.md, lifecycle.yaml, plans/ research/ qa/ releases/
+ Modes                modes.py     modes/*.md         R&D, planning, development, QA, deployment templates
+                                                      (overridable in ~/.foreman/modes or .foreman/modes)
+ Providers            providers/claude.py · antigravity.py · opencode.py · generic.py (any CLI via config)
+                      Capabilities: resume, fork, structured output, session discovery, enforced read-only, web
 ```
 
 ## Responsibilities
@@ -36,6 +41,8 @@
 | `providers/*` | adapter | One small module per CLI. Builds commands, parses output, discovers sessions. Nothing provider-specific leaks out. |
 | `terminal.py` | adapter | Optional visible terminal windows. Same capture and exit semantics as headless runs. |
 | `report.py` | deterministic | Short reports and status built from the task record, plus the single desktop notification. |
+| `modes.py` + `modes/*.md` | data | Lifecycle mode templates: what workers may write (none / code / tests), web access, which checks run, where the result document goes, the usual next mode, and guidance for planner and workers. |
+| `knowledge.py` | deterministic | The project's `.foreman/` folder: confirmed decisions, feature lifecycle, documents, team notes, check overrides. |
 
 ## Key decisions
 
@@ -57,6 +64,16 @@
   uncommitted work isn't attributed to the task.
 - **Asking.** Only business/product questions and the 80% budget sign-off pause a task. Technical choices
   are recorded as decisions.
+- **Modes are data, not code.** One pipeline; a mode only changes instructions, permissions (read-only,
+  tests-only, web) and checks. The planner recommends a mode per request (with a reason) unless the user fixed
+  one. A task keeps its mode; the next mode is recommended deterministically from the template and the outcome
+  (problems found → back to development) and started only when the user says "next".
+- **Impact gate.** Before code changes, Foreman adds a read-only impact investigation when the planner rates
+  the risk medium/high or when a known consumer of a changed project (relation pointing at it) is not in the
+  plan; implement steps wait for it.
+- **Knowledge lives with the code.** Answers to business questions go to `.foreman/decisions.md` in the
+  project and are given to every later planner, worker and reviewer there. Lifecycle and documents sit next to
+  them, so a team shares them through git. Change detection ignores `.foreman/`.
 
 ## Provider notes (verified)
 
@@ -65,8 +82,14 @@
 | Claude Code 2.1 | `claude -p --output-format json` | `--resume` + `--fork-session`; sessions found in `~/.claude/projects/<cwd>` | tool allow/deny lists | `--json-schema` |
 | Antigravity `agy` 1.4 | `agy --output-format json -p=…` | `--conversation=<id>` (no fork); index `~/.gemini/antigravity/conversation_summaries.db` | `--mode plan` + no terminal | `--json-schema` |
 | OpenCode | `opencode run --format json` | `-s` + `--fork`; `opencode session list` | `--agent plan` | prompt + JSON extraction |
+| Any CLI (`type: generic`) | `read_args` / `write_args` from config | none | only if the CLI enforces it | prompt + JSON extraction |
+
+Web research: Claude gets `WebSearch`/`WebFetch` in allowed tools only for R&D/planning steps (tool-level); agy's
+`search_web` can't be disabled per run, so it is allowed or forbidden in the prompt.
 
 ## Adding a provider
 
-Write `providers/<name>.py` with a `Provider` subclass (`build_command`, `run`, optional `discover_sessions`,
-honest `capabilities`), register it in `providers/__init__.py`, and add it to `config.yaml`.
+For a quick start, add it to `config.yaml` with `type: generic`, `command`, `read_args` and `write_args`
+(placeholders `{prompt}`, `{cwd}`); the default config has a disabled Codex preset. For full support (sessions,
+structured output, live activity), write `providers/<name>.py` with a `Provider` subclass (`build_command`,
+`run`, optional `discover_sessions`, honest `capabilities`) and register it in `providers/__init__.py`.

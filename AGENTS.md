@@ -2,7 +2,7 @@
 
 ## Working on this codebase
 
-- Python ≥ 3.9, one dependency (`pyyaml`). Tests: `python3 -m unittest discover tests` (must stay green and fast;
+- Python ≥ 3.9, one dependency (`pyyaml`). Tests: `python3 -m unittest discover tests`; lint: `ruff check .` (both run in CI; must stay green and fast;
   use `tests/helpers.py` workspaces and the scripted `MockProvider`, never real CLIs, in unit tests).
 - Keep the split described in `README_ARCHITECTURE.md`: deterministic state/safety in `registry.py`,
   `store.py`, `engine.py`; AI prompts and schemas only in `brain.py`; CLI specifics only in `providers/`.
@@ -21,6 +21,12 @@
 4. Don't invent business rules: return a `business` question instead.
 5. Report discovered cross-project dependencies with evidence; they become `learned` relations.
 6. Fix small related problems in place; only major, out-of-scope items become suggestions to the user.
+7. Follow the mode: R&D, planning and deployment are read-only; QA may change test files only (other changes are
+   reported); web research only in R&D and planning. Deployment never runs deploy, publish, migration or
+   infrastructure commands; it prepares and verifies, and the user deploys.
+8. Follow the confirmed decisions in the project's `.foreman/decisions.md`. Only Foreman writes to
+   `.foreman/`; workers never do.
+9. Before code changes that are risky or touch something with known consumers, an impact investigation runs first.
 
 ## Limits (config.yaml → `limits`)
 
@@ -30,3 +36,4 @@
 - `max_replans` (default 2) plan expansions after discoveries.
 - Daily runs per provider: hard stop at 100%, user sign-off at `warn_at_percent` (80%).
 - The user is notified once per task run, when it finishes.
+- A task's mode is decided once; moving to the next mode is the user's call ("next").

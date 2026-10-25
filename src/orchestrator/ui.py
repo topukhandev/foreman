@@ -141,6 +141,13 @@ def hard_wrap(line: str, cols: int) -> List[str]:
     return rows
 
 
+def clip(line: str, cols: int) -> str:
+    """The line cut to a single terminal row, with an ellipsis when it was longer."""
+    if len(hard_wrap(line, cols)) == 1:
+        return line
+    return hard_wrap(line, cols - 1)[0] + "…" + RESET
+
+
 class Scrollback:
     """The full-screen chat runs in the terminal's alternate screen, which has no scrollback, so the chat keeps
     its own: everything printed through out()/Spinner.say is recorded, and the mouse wheel or PgUp/PgDn scroll
@@ -584,23 +591,35 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
     sel = max(0, min(start, len(items) - 1))
     out(box(body, title, color))
 
+    def visible() -> int:
+        """Items shown at once: all of them, or a window that fits the terminal (a menu taller than the screen
+        can't be redrawn in place, and a wrapped row would make every redraw drift)."""
+        return max(1, min(len(items), shutil.get_terminal_size((100, 24)).lines - 2))
+
     def lines() -> List[str]:
+        n, cols = visible(), width()
+        top = max(0, min(sel - n // 2, len(items) - n))
         rows = []
-        for i, it in enumerate(items):
+        for i in range(top, top + n):
             mark = c("›", ACCENT) if i == sel else " "
-            label = c(f"{i + 1}. {it}", BOLD) if i == sel else f"{i + 1}. {it}"
-            rows.append(f" {mark} {label}")
-        return rows + [c(f"   ↑/↓ or number, Enter to choose · Esc to {esc}", GREY)]
+            label = c(f"{i + 1}. {items[i]}", BOLD) if i == sel else f"{i + 1}. {items[i]}"
+            rows.append(clip(f" {mark} {label}", cols))
+        more = f"{sel + 1}/{len(items)} · " if n < len(items) else ""
+        return rows + [clip(c(f"   {more}↑/↓ or number, Enter to choose · Esc to {esc}", GREY), cols)]
 
     def body() -> str:
         return "".join("\r" + eol(l, width()) + "\n" for l in lines())
 
+    drawn = [0]
+
     def draw(first=False):
         with OUTPUT_LOCK:
-            frame(("" if first else f"\033[{len(items) + 1}A") + body())
+            up = "" if first else f"\033[{drawn[0]}A"
+            drawn[0] = visible() + 1
+            frame(up + body())
 
     class _Live:  # the menu stays at the bottom while the transcript above scrolls
-        live_height = staticmethod(lambda: len(items) + 1)
+        live_height = staticmethod(lambda: visible() + 1)
         frame = staticmethod(body)
 
     fd = sys.stdin.fileno()

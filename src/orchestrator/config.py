@@ -35,6 +35,16 @@ providers:
     command: agy
     model: null
     max_runs_per_day: 300
+  # Any other AI CLI can be added without code (type: generic). Codex preset, not yet verified against an
+  # installed codex; check `codex exec --help` and set enabled: true.
+  codex:
+    enabled: false
+    type: generic
+    command: codex
+    read_args: [exec, --sandbox, read-only, --skip-git-repo-check, "{prompt}"]
+    write_args: [exec, --sandbox, workspace-write, --skip-git-repo-check, "{prompt}"]
+    read_only_enforced: true
+    max_runs_per_day: 300
 
 limits:
   max_parallel: 4          # concurrent worker sessions
@@ -97,7 +107,17 @@ class Config:
 
 
 def foreman_home() -> str:
-    return os.path.abspath(os.path.expanduser(os.environ.get("FOREMAN_HOME", "~/.foreman")))
+    """~/.foreman (or $FOREMAN_HOME). Data from the name Switchyard, ~/.switchyard, is moved here on first use."""
+    env = os.environ.get("FOREMAN_HOME") or os.environ.get("SWITCHYARD_HOME")
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    home, legacy = os.path.expanduser("~/.foreman"), os.path.expanduser("~/.switchyard")
+    if not os.path.exists(home) and os.path.isdir(legacy):
+        try:
+            os.rename(legacy, home)
+        except OSError:
+            return legacy
+    return home
 
 
 def load_config(home: Optional[str] = None) -> Config:

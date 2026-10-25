@@ -228,6 +228,8 @@ def snapshot(path: str) -> Dict[str, Any]:
     files = {}
     for line in status.splitlines():
         rel = line[3:].split(" -> ")[-1].strip().strip('"')
+        if rel.startswith(".foreman/"):  # Foreman's own project knowledge, never a worker's change
+            continue
         files[rel] = _file_hash(os.path.join(path, rel))
     return {"git": True, "head": git_head(path), "dirty": files}
 

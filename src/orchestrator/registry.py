@@ -1,7 +1,7 @@
 """Project registry and relationship model (~/.foreman/projects.yaml).
 
 Deterministic and cheap: projects are found under configured roots; relationships come from three sources:
-  declared   - added by the user (`orchestrator projects link`)
+  declared   - added by the user (`foreman projects link`)
   discovered - static evidence in files (paths, module/package names, mentions)
   learned    - reported by workers during tasks, with evidence
 Every relation records when it was verified and the git HEADs at that time, so the engine can tell
@@ -37,6 +37,7 @@ class Project:
     stack: List[str] = field(default_factory=list)
     summary: str = ""
     test: Optional[str] = None
+    checks: Dict[str, str] = field(default_factory=dict)   # lint / typecheck / build / e2e commands (test is `test`)
     components: Dict[str, List[str]] = field(default_factory=dict)
     aliases: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
@@ -170,6 +171,7 @@ class Registry:
             stack=sorted(set(stack + [s for v in components.values() for s in v])),
             summary=_summary(path) or (prev.summary if prev else ""),
             test=(prev.test if prev and prev.source == "declared" and prev.test else test),
+            checks=_detect_checks(path),
             components=components,
             aliases=prev.aliases if prev else [],
             notes=prev.notes if prev else [],
@@ -333,6 +335,7 @@ class Registry:
     def _card(self, p: Project, anchor: bool = False) -> str:
         comp = (" components: " + ", ".join(f"{c}({'/'.join(s)})" for c, s in p.components.items())) if p.components else ""
         test = f" | test: `{p.test}`" if p.test else ""
+        test += "".join(f" | {k}: `{v}`" for k, v in p.checks.items())
         notes = (" | notes: " + "; ".join(p.notes[-3:])) if p.notes else ""
         tag = " [current directory]" if anchor else ""
         return f"- {p.name}{tag}: {p.path} [{', '.join(p.stack) or '?'}]{comp}{test} — {short(p.summary, 140)}{notes}"
@@ -385,6 +388,40 @@ def _detect_test(path: str) -> Optional[str]:
             os.path.isdir(os.path.join(path, "tests")):
         return "python3 -m pytest -q"
     return None
+
+
+def _detect_checks(path: str) -> Dict[str, str]:
+    """Lint / type-check / build / end-to-end commands a project already defines (never invented)."""
+    out: Dict[str, str] = {}
+    pkg = os.path.join(path, "package.json")
+    if os.path.isfile(pkg):
+        try:
+            scripts = json.loads(read_text(pkg)).get("scripts") or {}
+        except ValueError:
+            scripts = {}
+        runner = "pnpm" if os.path.exists(os.path.join(path, "pnpm-lock.yaml")) else \
+                 "yarn" if os.path.exists(os.path.join(path, "yarn.lock")) else "npm"
+        for kind, names in (("lint", ["lint"]), ("typecheck", ["typecheck", "type-check", "tsc", "check-types"]),
+                            ("build", ["build"]), ("e2e", ["test:e2e", "e2e", "test-e2e"])):
+            name = next((n for n in names if n in scripts), None)
+            if name:
+                out[kind] = f"{runner} run {name}"
+    if os.path.isfile(os.path.join(path, "vendor/bin/pint")):
+        out.setdefault("lint", "vendor/bin/pint --test")
+    if any(os.path.isfile(os.path.join(path, f)) for f in ("phpstan.neon", "phpstan.neon.dist")):
+        out.setdefault("typecheck", "vendor/bin/phpstan analyse --no-progress")
+    pyproject = read_text(os.path.join(path, "pyproject.toml"), 50_000)
+    if "[tool.ruff" in pyproject:
+        out.setdefault("lint", "ruff check .")
+    if "[tool.mypy" in pyproject:
+        out.setdefault("typecheck", "mypy .")
+    if os.path.isfile(os.path.join(path, "go.mod")):
+        out.setdefault("lint", "go vet ./...")
+        out.setdefault("build", "go build ./...")
+    if os.path.isfile(os.path.join(path, "Cargo.toml")):
+        out.setdefault("lint", "cargo clippy --quiet")
+        out.setdefault("build", "cargo build --quiet")
+    return out
 
 
 def _summary(path: str) -> str:

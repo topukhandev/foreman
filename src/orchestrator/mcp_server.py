@@ -23,20 +23,34 @@ and returns a short report.
   `answer_question`. Never answer business questions on the user's behalf.
 - If a report has "Worth considering", show those items briefly as options; act only if the user accepts
   (`suggestion` with action=accept).
+- Work moves through lifecycle modes: research (R&D), planning, development, qa, deployment. Foreman recommends
+  one per request; pass `mode` only when the user asks for a specific one. Deployment mode prepares and verifies
+  releases but never deploys.
+- Use `project_state` for "where are we / what's next" (instant). If a report has "Next step", offer it to the
+  user and call `next_step` if they accept.
 - Show the report to the user as-is; it is already concise."""
 
 _CWD = {"type": "string", "description": "Absolute path of the directory the user is working in."}
 _WAIT = {"type": "integer", "description": "Seconds to wait for completion before returning (default 240)."}
 _TASK = {"type": "string", "description": "Task number (e.g. '7') or words from its title. Omit for the most recent task here."}
+_MODE = {"type": "string", "enum": ["research", "planning", "development", "qa", "deployment"],
+         "description": "Only when the user asks for a specific mode; otherwise Foreman recommends one."}
 _DISPLAY = {"type": "string", "enum": ["terminal", "headless"],
             "description": "Show workers in visible terminal windows or run under the hood (default: user config)."}
 
 TOOLS = [
     {"name": "orchestrate",
-     "description": "Submit a request (task, change, investigation or question). Foreman selects projects, sessions "
-                    "and providers, executes, validates and reports.",
+     "description": "Submit a request (task, change, investigation or question). Foreman selects the lifecycle mode, "
+                    "projects, sessions and providers, executes, validates and reports.",
      "inputSchema": {"type": "object", "properties": {"request": {"type": "string"}, "cwd": _CWD, "wait_seconds": _WAIT,
-                                                      "display": _DISPLAY}, "required": ["request", "cwd"]}},
+                                                      "display": _DISPLAY, "mode": _MODE}, "required": ["request", "cwd"]}},
+    {"name": "project_state", "description": "Lifecycle of the project: features, the stage each reached, the "
+                                             "recommended next step, confirmed decisions (instant, no AI).",
+     "inputSchema": {"type": "object", "properties": {"cwd": _CWD}, "required": ["cwd"]}},
+    {"name": "next_step", "description": "Start the recommended next lifecycle step (e.g. QA after development) for the "
+                                         "latest work in this project. Only when the user agrees.",
+     "inputSchema": {"type": "object", "properties": {"cwd": _CWD, "wait_seconds": _WAIT, "display": _DISPLAY},
+                     "required": ["cwd"]}},
     {"name": "task_status", "description": "Current state of a task from Foreman's records (instant, no AI).",
      "inputSchema": {"type": "object", "properties": {"task": _TASK, "cwd": _CWD}}},
     {"name": "resume_task", "description": "Continue an unfinished or previous task; re-verifies against the current code.",
@@ -76,7 +90,12 @@ class MCPServer:
         visual = None if not display else display == "terminal"
 
         if name == "orchestrate":
-            task, msg = eng.route(args["request"], cwd)
+            task, msg = eng.route(args["request"], cwd, mode=args.get("mode"))
+            return self._launch(eng, task, msg, wait, visual)
+        if name == "project_state":
+            return eng.lifecycle_text(cwd)
+        if name == "next_step":
+            task, msg = eng.prepare_next(cwd)
             return self._launch(eng, task, msg, wait, visual)
         if name == "task_status":
             return eng.status(args.get("task"), cwd)["report"]

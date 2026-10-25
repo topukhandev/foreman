@@ -10,8 +10,9 @@ from orchestrator.finder import find_executable
 from orchestrator.util import extract_json, run_process, run_streaming
 
 # Opening lines of prompts Foreman sends; sessions starting with these are Foreman's, never the user's.
-FOREMAN_PROMPT_PREFIXES = ("You are the planning layer of Foreman", "You are a worker session coordinated by Foreman",
-                           "You are an independent reviewer for Foreman")
+# "Switchyard" was the project's name for a while: sessions created under it are ours too.
+OWN_PROMPT_PREFIXES = tuple(f"{opening} {name}" for name in ("Foreman", "Switchyard") for opening in (
+    "You are the planning layer of", "You are a worker session coordinated by", "You are an independent reviewer for"))
 
 # Instruction appended to every worker prompt; enforced again by the engine's HEAD check.
 GIT_POLICY = ("Never run git commit, git push, git reset, git checkout/switch of branches, git stash, or git clean. "
@@ -25,6 +26,7 @@ class Capabilities:
     structured_output: bool = False  # native JSON-schema constrained output
     session_discovery: bool = False  # list existing sessions per directory
     enforced_read_only: bool = False  # tool-level (not just prompt-level) read-only mode
+    web: bool = False                # can search / fetch the web in read-only steps
 
 
 @dataclass
@@ -42,6 +44,7 @@ class RunRequest:
     visual: bool = False                   # show the worker in a visible terminal window
     title: str = ""                        # window title when visual
     on_activity: Optional[Callable[[str], None]] = field(default=None, repr=False)  # live "Read(x)" lines
+    web: bool = False                      # read steps may search / fetch the web (R&D and planning modes)
 
 
 @dataclass
@@ -61,7 +64,7 @@ def tool_line(name: str, arg: Any, cwd: str) -> str:
     arg = " ".join(str(arg or "").split())
     if cwd and arg.startswith(cwd.rstrip("/") + "/"):
         arg = arg[len(cwd.rstrip("/")) + 1:]
-    return f"{name}({arg[:90] + ('…' if len(arg) > 90 else '')})"
+    return f"{name}({arg[:400]})"  # the engine shortens it after turning project paths into names
 
 
 @dataclass

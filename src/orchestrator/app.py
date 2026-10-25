@@ -6,7 +6,7 @@ import sys
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
-from orchestrator.config import Config, load_config
+from orchestrator.config import load_config
 from orchestrator.engine import Engine
 from orchestrator.providers import build_providers
 from orchestrator.registry import Registry
@@ -21,7 +21,7 @@ def build_engine(visual: Optional[bool] = None, out: Callable[[str], None] = pri
 
 def entry_command() -> List[str]:
     """Command that launches this orchestrator, usable from other tools' configs (MCP registration, background runs)."""
-    script = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "orchestrator")
+    script = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "foreman")
     if os.path.isfile(script):
         return [sys.executable, script]
     return [sys.executable, "-m", "orchestrator.cli"]

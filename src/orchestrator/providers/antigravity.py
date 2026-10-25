@@ -7,6 +7,8 @@
   `--dangerously-skip-permissions`. Read steps add `--mode plan` + a read-only rule; Foreman flags any file the
   planner or a read step changes. Git safety: prompt policy plus the engine's HEAD check.
 - `-p` must be attached (`-p=<prompt>`), otherwise agy parses the next flag as the prompt.
+- Web (verified 2026-10-25): plan mode has `search_web` (and `read_url_content`); agy cannot disable them per run,
+  so the read-only rule tells it whether web research is allowed (prompt-level only).
 """
 
 import json
@@ -22,6 +24,8 @@ from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, Run
 # Plan mode denies terminal commands; if the agent tries one anyway, agy aborts with no output.
 READ_ONLY_RULE = ("Use only your built-in file reading and search tools. Terminal commands and MCP tools are "
                   "unavailable in this read-only session; do not attempt them.")
+WEB_RULE = {True: " Web search and reading web pages are allowed for this research.",
+            False: " Do not search the web; work from the code and documents."}
 
 
 def antigravity_index() -> str:
@@ -31,7 +35,7 @@ def antigravity_index() -> str:
 class AntigravityProvider(Provider):
     name = "antigravity"
     capabilities = Capabilities(resume=True, fork=False, structured_output=True,
-                                session_discovery=True, enforced_read_only=True)
+                                session_discovery=True, enforced_read_only=True, web=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
         streamed = req.visual or req.on_activity is not None
@@ -52,7 +56,7 @@ class AntigravityProvider(Provider):
             cmd += ["--mode=plan", "--dangerously-skip-permissions"]
         if req.schema:
             cmd.append("--json-schema=" + json.dumps(req.schema))
-        prompt = req.prompt + "\n\n" + (GIT_POLICY if req.mode == "write" else READ_ONLY_RULE)
+        prompt = req.prompt + "\n\n" + (GIT_POLICY if req.mode == "write" else READ_ONLY_RULE + WEB_RULE[req.web])
         cmd.append(f"-p={prompt}")
         return cmd
 
@@ -96,10 +100,10 @@ class AntigravityProvider(Provider):
             info = su.get("tool_info") or {}
             params = info.get("parameters") or {}
             arg = next((v for k, v in params.items() if k.lower() in ("path", "command", "commandline", "query",
-                                                                       "pattern", "file", "absolutepath")), "")
+                                                                       "pattern", "file", "absolutepath", "url")), "")
             name = {"read_file": "Read", "run_command": "Bash", "grep_search": "Grep", "list_dir": "List",
                     "write_to_file": "Write", "replace_file_content": "Edit", "find_by_name": "Glob",
-                    "view_file": "Read"}.get(info.get("name") or su.get("tool_name"), info.get("name") or "Tool")
+                    "view_file": "Read", "search_web": "WebSearch", "read_url_content": "WebFetch"}.get(info.get("name") or su.get("tool_name"), info.get("name") or "Tool")
             return tool_line(name, arg, cwd)
         return None
 

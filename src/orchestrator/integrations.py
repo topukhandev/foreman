@@ -7,6 +7,7 @@ from orchestrator.app import entry_command
 from orchestrator.finder import find_executable
 
 SERVER_NAME = "foreman"
+LEGACY_NAME = "switchyard"  # registered while the project was called Switchyard; replaced on install
 
 
 def _run(cmd: List[str]) -> str:
@@ -26,13 +27,15 @@ def install(targets: List[str]) -> Dict[str, str]:
             if not exe:
                 results[t] = "skipped: claude not installed"
                 continue
-            _run([exe, "mcp", "remove", "--scope", "user", SERVER_NAME])
+            for name in (SERVER_NAME, LEGACY_NAME):
+                _run([exe, "mcp", "remove", "--scope", "user", name])
             results[t] = _run([exe, "mcp", "add", "--scope", "user", SERVER_NAME, "--", *launch])
         elif t == "antigravity":
             exe = find_executable("agy")
             if not exe:
                 results[t] = "skipped: agy not installed (the Antigravity app and agy share ~/.gemini/antigravity/mcp_config.json)"
                 continue
+            _run([exe, "mcp", "remove", LEGACY_NAME])
             results[t] = _run([exe, "mcp", "add", SERVER_NAME, "--", *launch])
         elif t == "codex":
             exe = find_executable("codex")

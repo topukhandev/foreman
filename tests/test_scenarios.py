@@ -132,7 +132,7 @@ class ScenarioTest(unittest.TestCase):
         self.assertIn("TASK BEING CONTINUED", prompts[0])
         self.assertIn("[done] implement in orders-api", prompts[0])
         self.assertEqual(res["task"]["status"], "done")
-        api_steps = [s for s in res["task"]["steps"] if s["project"] == "orders-api"]
+        api_steps = [s for s in res["task"]["steps"] if s["project"] == "orders-api" and s["kind"] == "implement"]
         self.assertEqual(len(api_steps), 1, "completed work is not redone")
 
     # 6 ---------------------------------------------------------------------------------------
@@ -278,6 +278,8 @@ class ScenarioTest(unittest.TestCase):
         attempts = []
 
         def worker(req):
+            if req.mode != "write":  # the impact investigation (orders-api has consumers) only reads
+                return {"status": "done", "summary": "consumers read id and total only"}
             attempts.append(req.prompt)
             if len(attempts) == 1:
                 write(req.cwd, "test.js", "process.exit(1)\n")  # breaks the suite

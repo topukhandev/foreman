@@ -291,5 +291,31 @@ class StoreAndMcpTest(unittest.TestCase):
         self.assertTrue(resp[3]["result"]["isError"])
 
 
+
+class RenameCompatibilityTest(unittest.TestCase):
+    """Foreman was briefly called Switchyard: its data and sessions from then must still be recognised."""
+
+    def test_sessions_from_the_old_name_are_ours(self):
+        from orchestrator.providers.base import OWN_PROMPT_PREFIXES
+        for title in ("You are the planning layer of Switchyard, an orchestrator",
+                      "You are a worker session coordinated by Foreman, an orchestrator"):
+            self.assertTrue(title.startswith(OWN_PROMPT_PREFIXES))
+
+    def test_old_home_is_moved_once(self):
+        import os
+        import tempfile
+        from unittest import mock
+        from orchestrator.config import foreman_home
+        fake = tempfile.mkdtemp()
+        os.makedirs(os.path.join(fake, ".switchyard", "tasks"))
+        env = {k: v for k, v in os.environ.items() if k not in ("SWITCHYARD_HOME", "FOREMAN_HOME")}
+        env["HOME"] = fake
+        with mock.patch.dict(os.environ, env, clear=True):
+            home = foreman_home()
+        self.assertEqual(home, os.path.join(fake, ".foreman"))
+        self.assertTrue(os.path.isdir(os.path.join(home, "tasks")), "tasks kept")
+        self.assertFalse(os.path.exists(os.path.join(fake, ".switchyard")))
+
+
 if __name__ == "__main__":
     unittest.main()
