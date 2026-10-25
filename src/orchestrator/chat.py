@@ -28,7 +28,6 @@ COMMANDS = [
     ("/resume", "pick up an earlier conversation in this project"),
     ("/new", "start a new conversation"),
     ("/display", "terminal | headless: show workers in windows or run under the hood"),
-    ("/projects", "projects related to this folder"),
     ("/suggestions", "open suggestions"),
     ("/providers", "choose the planner (and first worker) with ↑/↓"),
     ("/mode", "lifecycle mode: R&D, planning, development, QA, deployment, or auto"),
@@ -43,7 +42,7 @@ Just type what you need, for example:
   • what's the status of my task? · continue the previous task · yes / no
 Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
-  /mode  /lifecycle  /providers  /display terminal|headless  /projects  /suggestions  /exit
+  /mode  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
 Wheel or PgUp/PgDn scroll the chat; hold Shift to select text with the mouse.
 While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
@@ -383,8 +382,6 @@ class Chat:
                 mark = ui.c("✔", ui.GREEN) if ok and not bad else ui.c("✘", ui.RED)
                 lines.append(f"  {mark} {name:<12} {('skipped: ' + bad) if bad else info}")
             return "\n".join(lines)
-        if cmd == "/projects":
-            return self.eng.registry.render_context(self.eng.registry.select("", self.cwd))
         if cmd == "/suggestions":
             items = [s for s in self.eng.store.suggestions() if s["status"] == "open"]
             return "\n".join(f"[{s['id']}] {s['text']}" for s in items) or "No open suggestions."
