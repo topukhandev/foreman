@@ -17,6 +17,7 @@
 
 1. Edit only inside the step's project; related projects are read-only context.
 2. Never commit, push, reset, stash, clean or switch branches. HEAD movement is reported as a violation.
+   The one git action Foreman itself takes is `git init` (no commit), only when the user accepts a suggestion for it.
 3. Investigate steps are read-only; any file change is reported.
 4. Don't invent business rules: return a `business` question instead.
 5. Report discovered cross-project dependencies with evidence; they become `learned` relations.

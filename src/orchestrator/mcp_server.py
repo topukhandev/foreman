@@ -116,8 +116,8 @@ class MCPServer:
                 return f"No suggestion {args['id']}."
             if args["action"] == "dismiss":
                 return f"Dismissed {s['id']}; it will not be suggested again."
-            proj = eng.registry.projects.get(s["project"])
-            return self._launch(eng, eng.prepare_new(s["text"], proj.path if proj else cwd), "", wait, visual)
+            task, msg = eng.accept_suggestion(s, cwd)
+            return self._launch(eng, task, msg, wait, visual)
         if name == "list_tasks":
             tasks = eng.store.all()[: int(args.get("limit", 15))]
             return "\n".join(f"#{t['id']} [{t['status']}] {t['title']} ({t['updated_at']})" for t in tasks) or "No tasks."

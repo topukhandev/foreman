@@ -69,6 +69,30 @@ class ChatTest(unittest.TestCase):
         proc = self._watch_with_keys(["\x1b", "", "\x1b[A", "\x1b[B"])
         self.assertIsNone(proc.poll())
 
+    def test_accepting_a_git_init_suggestion_makes_foreman_run_it_without_any_ai_or_commit(self):
+        import os
+        import subprocess
+        folder = os.path.join(self.ws.root, "dataset-tool")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "package.json"), "w") as f:
+            f.write('{"name": "dataset-tool"}')
+        self.eng.registry.scan()
+        task = self.eng.store.new_task("plan the dataset", folder)
+        added = self.eng.store.add_suggestions(task["id"], [{
+            "project": "dataset-tool", "text": "Run `git init` (no commit) in the project before development",
+            "why": "so changes can be detected", "impact": "major"}])
+        task["suggestions"] = [added[0]["id"]]
+        self.eng.store.save(task)
+        self.chat.focus = task["id"]
+        out = self.chat.respond(f"do {added[0]['id']}")
+        self.assertIn("Ran `git init`", out)
+        self.assertTrue(os.path.isdir(os.path.join(folder, ".git")))
+        self.assertNotEqual(subprocess.run(["git", "-C", folder, "rev-parse", "HEAD"], capture_output=True).returncode, 0,
+                            "no commit was made")
+        self.assertEqual(self.s.log, [], "no provider was involved")
+        self.assertEqual(self.eng.store.suggestions()[0]["status"], "accepted")
+        self.assertIn("already a git repository", self.eng.accept_suggestion(added[0], folder)[1])
+
     def test_only_a_bare_yes_or_no_gets_the_nothing_is_waiting_answer(self):
         self.assertIn("Nothing is waiting", self.chat.respond("yes"))
         self.assertIn("Nothing is waiting", self.chat.respond("Go ahead!"))

@@ -348,9 +348,8 @@ class Chat:
             return ui.bullet(f"Dismissed {', '.join(s['id'] for s in chosen)}; I won't suggest {'it' if n == 1 else 'them'} again.")
         s = chosen[0]
         self.eng.store.set_suggestion(s["id"], "accepted")
-        proj = self.eng.registry.projects.get(s["project"])
-        task = self.eng.prepare_new(s["text"], proj.path if proj else self.cwd, self._conversation(), confirm_plan=True)
-        return self._run(text, task, "")
+        task, msg = self.eng.accept_suggestion(s, self.cwd, self._conversation(), confirm_plan=True)
+        return self._run(text, task, msg)
 
     def _slash(self, text: str) -> str:
         cmd, _, arg = text.partition(" ")

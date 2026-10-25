@@ -191,6 +191,8 @@ Details: foreman show 2
 
 "Worth considering" lists at most three *major* items you probably forgot, such as a consumer that will break or
 a missing migration. Minor issues are fixed by the workers instead. Dismissed items are never shown again.
+Workers never run git. The one exception is a "run `git init`" suggestion for a project without a repository: when you
+accept it (`do s6`), Foreman itself runs `git init` (no commit), so it can detect and review changes there.
 
 ## Tests
 

@@ -46,6 +46,7 @@ STATUS_RE = re.compile(
 TASK_REF_RE = re.compile(r"(#\d+|\b(task|tasks|working on|work(ed)? on|left|remaining|progress|blocked|previous|last)\b)", re.I)
 PROJECT_Q_RE = re.compile(r"\b(project|repo|repository|codebase|code base|service|app|application|branch)\b", re.I)
 YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|continue|do it|approved?|lgtm)\b", re.I)
+GIT_INIT_RE = re.compile(r"\bgit init\b", re.I)
 BARE_YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|do it|approved?|lgtm)\s*[.!]*\s*$", re.I)
 NO_RE = re.compile(r"^\s*(n|no|nope|cancel|stop|abort|don'?t)\s*[.!]*\s*$", re.I)
 AUTH_RE = re.compile(r"api key|expired|unauthori[sz]ed|\b401\b|not logged in|log ?in required|authenticat|credential",
@@ -287,6 +288,26 @@ class Engine:
         return task
 
     # ================================================================== lifecycle
+    def accept_suggestion(self, s: Dict[str, Any], cwd: str, conversation: str = "",
+                          confirm_plan: bool = False) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Act on an accepted suggestion: a task to run, or (for "git init") something Foreman does itself.
+        Workers never run git; initialising a repository (no commit, nothing else) is the one git action the engine
+        takes, and only because the user accepted this suggestion."""
+        proj = self.registry.projects.get(s["project"])
+        path = proj.path if proj else cwd
+        if GIT_INIT_RE.search(s["text"]) and os.path.isdir(path):
+            if os.path.isdir(os.path.join(path, ".git")):
+                return None, f"{path} is already a git repository."
+            res = run_process(["git", "init", "-q"], cwd=path, timeout=30)
+            if res.code != 0:
+                return None, f"✘ `git init` failed in {path}: {short(res.err or res.out, 200)}"
+            if proj:
+                self.registry.projects[proj.name] = self.registry._describe(proj.name, proj.path, proj)
+                self.registry.save()
+            return None, (f"✔ Ran `git init` in {path} (no commit was made). Foreman can now detect and review changes "
+                          "there; commit when you like.")
+        return self.prepare_new(s["text"], path, conversation, confirm_plan), ""
+
     def modes(self, cwd: str) -> Dict[str, Mode]:
         """Mode templates for a directory: built-in < ~/.foreman/modes < <project>/.foreman/modes."""
         proj = self.registry.project_for_path(cwd)

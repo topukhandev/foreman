@@ -42,6 +42,11 @@ def _dump(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _accept(eng, suggestion, cwd: str, as_json: bool = False) -> None:
+    task, msg = eng.accept_suggestion(suggestion, cwd)
+    _print_result(eng, eng.execute(task) if task else {"task": None, "report": msg}, as_json)
+
+
 def _print_result(eng, result, as_json: bool = False) -> None:
     task = result.get("task")
     if as_json:
@@ -56,8 +61,7 @@ def _print_result(eng, result, as_json: bool = False) -> None:
         if choice:
             s = eng.store.set_suggestion(choice, "accepted")
             if s:
-                proj = eng.registry.projects.get(s["project"])
-                _print_result(eng, eng.execute(eng.prepare_new(s["text"], proj.path if proj else task["cwd"])))
+                _accept(eng, s, task["cwd"])
 
 
 def version_string() -> str:
@@ -319,8 +323,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not s:
             print("not found")
             return 1
-        proj = eng.registry.projects.get(s["project"])
-        _print_result(eng, eng.execute(eng.prepare_new(s["text"], proj.path if proj else os.getcwd())), args.json)
+        _accept(eng, s, os.getcwd(), args.json)
         return 0
     if cmd == "dismiss":
         print("dismissed" if eng.store.set_suggestion(args.id, "dismissed") else "not found")
