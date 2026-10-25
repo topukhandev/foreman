@@ -3,6 +3,7 @@ teal palette, a turning-circle spinner with a shimmering status line, "◆ Tool(
 Plain ANSI + termios; no dependencies.
 """
 
+import base64
 import os
 import re
 import shutil
@@ -12,7 +13,7 @@ import threading
 import time
 from typing import List, Optional
 
-from orchestrator.clipboard import CHIP_RE, MAX_PASTE_LINES, Attachments, clipboard_image, dropped_images
+from orchestrator.clipboard import CHIP_RE, MAX_PASTE_LINES, Attachments, clipboard_image, copy_text, dropped_images
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 TTY = sys.stdout.isatty()
@@ -81,6 +82,7 @@ def clear_screen() -> None:
 SEQ_RE = re.compile(r"\x1b(\[<[0-9;]*[Mm]|\[[0-9;]*[A-Za-z~]|O[A-Za-z])")
 PARTIAL_RE = re.compile(r"\x1b(\[[<0-9;]*|O)")
 MOUSE_RE = re.compile(r"\x1b\[<(\d+);\d+;\d+[Mm]")
+MOUSE_FULL_RE = re.compile(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])")
 PAGE = 10 ** 6  # scroll amount meaning "one screen"
 # Frames are written in one piece inside a synchronized update (terminals that support it show the frame only
 # when complete; others ignore the mode), with the cursor hidden while it moves around. Lines are overwritten in
@@ -143,6 +145,34 @@ def hard_wrap(line: str, cols: int) -> List[str]:
     return rows
 
 
+def cells(row: str) -> List[tuple]:
+    """(character, first column, width) for every visible character of a row."""
+    out, col = [], 0
+    for ch in ANSI.sub("", row):
+        w = char_width(ch)
+        out.append((ch, col, w))
+        col += w
+    return out
+
+
+def highlight(row: str, first: int, last: int) -> str:
+    """The row with the characters in columns first..last (inclusive) in reverse video."""
+    out, col, on = [], 0, False
+    for tok in re.findall(r"\x1b\[[0-9;?]*[A-Za-z]|.", row, re.S):
+        if tok.startswith("\x1b"):
+            out.append(tok)
+            if on and tok in (RESET, "\033[m"):  # a reset inside the selection must not end it
+                out.append("\033[7m")
+            continue
+        inside = first <= col <= last
+        if inside != on:
+            out.append("\033[7m" if inside else "\033[27m")
+            on = inside
+        out.append(tok)
+        col += char_width(tok)
+    return "".join(out) + ("\033[27m" if on else "")
+
+
 def clip(line: str, cols: int) -> str:
     """The line cut to a single terminal row, with an ellipsis when it was longer."""
     if len(hard_wrap(line, cols)) == 1:
@@ -163,28 +193,37 @@ class Scrollback:
         self.offset = 0          # rows scrolled up from the bottom; 0 = following the output
         self.enabled = False     # only inside FullScreen (mouse reporting on)
         self._live: List[object] = []
-        self._cache = (0, 0, [])  # (logical lines wrapped, columns, rows)
+        self._cache = (0, 0, [], [])  # (logical lines wrapped, columns, rows, row continues the previous one)
         self.dirty = False       # offset changed, repaint pending
+        self.select_enabled = False  # mouse selection with copy to the clipboard (config ui.copy_on_select)
+        self.sel: Optional[tuple] = None   # ((row, col), (row, col)) on screen, while a selection is highlighted
+        self._anchor: Optional[tuple] = None
+        self._shown: List[str] = []        # transcript rows currently on screen (top to bottom)
+        self._shown_cont: List[bool] = []
 
     def add(self, text: str) -> None:
         with OUTPUT_LOCK:
             before = len(self.rows()) if self.offset else 0
             self.lines.extend(text.split("\n"))
+            self.sel = self._anchor = None  # the rows moved
             if self.offset:  # keep the view where the user scrolled it
                 self.offset += len(self.rows()) - before
                 self.render()
 
     def clear(self) -> None:
-        self.lines, self.offset, self._cache = [], 0, (0, 0, [])
+        self.lines, self.offset, self._cache = [], 0, (0, 0, [], [])
+        self.sel = self._anchor = None
 
     def rows(self) -> List[str]:
         cols = max(10, shutil.get_terminal_size((100, 24)).columns)
-        done, wrapped_at, rows = self._cache
+        done, wrapped_at, rows, conts = self._cache
         if wrapped_at != cols or done > len(self.lines):
-            done, rows = 0, []
+            done, rows, conts = 0, [], []
         for line in self.lines[done:]:
-            rows.extend(hard_wrap(line, cols))
-        self._cache = (len(self.lines), cols, rows)
+            pieces = hard_wrap(line, cols)
+            rows.extend(pieces)
+            conts.extend([False] + [True] * (len(pieces) - 1))
+        self._cache = (len(self.lines), cols, rows, conts)
         return rows
 
     def push(self, live) -> None:
@@ -211,8 +250,11 @@ class Scrollback:
             offset = max(0, min(self.offset + amount, total - region + 1))
             if offset != self.offset:
                 self.offset, self.dirty = offset, True
+                self.sel = self._anchor = None
 
     def bottom(self) -> None:
+        if self.sel:  # any key ends the highlight
+            self.sel, self.dirty = None, True
         if self.offset:
             self.offset, self.dirty = 0, True
 
@@ -223,23 +265,105 @@ class Scrollback:
         self.render()
         return True
 
+    def _visible(self) -> List[str]:
+        """Transcript rows that are on screen, top to bottom (also remembered for mouse selection)."""
+        rows, region, conts = self.rows(), self._region(), self._cache[3]
+        if self.offset:
+            end = len(rows) - self.offset
+            first = max(0, end - (region - 1))
+            rows, conts = rows[first:end], conts[first:end]
+        else:
+            rows, conts = rows[-region:], conts[-region:]
+        self._shown, self._shown_cont = list(rows), list(conts)
+        return list(rows)
+
     def render(self) -> None:
         self.dirty = False
         if not (self.enabled and self._live and TTY):
             return
         with OUTPUT_LOCK:
-            rows, region = self.rows(), self._region()
+            body = self._visible()
             if self.offset:
-                end = len(rows) - self.offset
-                body = rows[max(0, end - (region - 1)):end]
                 body.append(c(f"  ↓ {self.offset} more line{'s' if self.offset != 1 else ''} below · "
                               f"scroll or PgDn to go down · Esc to jump back", GREY))
-            else:
-                body = rows[-region:]
+            if self.sel:
+                body = [self._highlighted(i, r) for i, r in enumerate(body)]
             cols = max(10, shutil.get_terminal_size((100, 24)).columns)
             live = self._live[-1]
             frame("\033[H" + "".join(eol(r + RESET, cols) + "\r\n" for r in body) + live.frame(),
                   show_cursor=getattr(live, "shows_cursor", True))
+
+
+    # ---- mouse selection: press, drag, release copies the highlighted text
+    def _span(self, i: int):
+        """Columns (first, last) selected in screen row i, or None."""
+        (r0, c0), (r1, c1) = sorted(self.sel)
+        if not r0 <= i <= r1:
+            return None
+        return (c0 if i == r0 else 0, c1 if i == r1 else 10 ** 6)
+
+    def _highlighted(self, i: int, row: str) -> str:
+        span = self._span(i) if i < len(self._shown) else None
+        return highlight(row, *span) if span else row
+
+    def selected_text(self) -> str:
+        parts = []
+        for i, row in enumerate(self._shown):
+            span = self._span(i)
+            if span is None:
+                continue
+            text = "".join(ch for ch, col, _w in cells(row) if span[0] <= col <= span[1]).rstrip()
+            if parts and self._shown_cont[i]:
+                parts[-1] += text  # a wrapped line is one line again
+            else:
+                parts.append(text)
+        return "\n".join(parts).strip("\n")
+
+    def mouse(self, key: str) -> bool:
+        """Left-button press / drag / release over the transcript selects text; releasing copies it. False for
+        everything else (the wheel scrolls through scroll())."""
+        m = MOUSE_FULL_RE.fullmatch(key)
+        if not (m and self.select_enabled and self._live):
+            return False
+        button, x, y, kind = int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4)
+        if button >= 64:
+            return False
+        if button & 3 != 0:
+            return True  # other buttons are ignored
+        self._visible()
+        if not self._shown:
+            return True
+        point = (max(0, min(y, len(self._shown) - 1)), max(0, x))
+        if kind == "M" and not button & 32:  # press
+            self._anchor = point if y < len(self._shown) else None
+            if self.sel:
+                self.sel, self.dirty = None, True
+        elif kind == "M" and self._anchor:  # drag
+            self.sel, self.dirty = (self._anchor, point), True
+        elif kind == "m" and self._anchor:  # release
+            if self.sel:
+                text = self.selected_text()
+                if text:
+                    self.toast(copy_message(text))
+                else:
+                    self.sel, self.dirty = None, True
+            self._anchor = None
+        return True
+
+    def toast(self, message: str) -> None:
+        """A one-line notice in place of the live area's hint (it goes away with the next key)."""
+        if self._live:
+            self._live[-1].notice = message
+            self.dirty = True
+
+
+def copy_message(text: str) -> str:
+    n = len(text)
+    if copy_text(text):
+        return f"{n:,} character{'s' if n != 1 else ''} copied to clipboard"
+    write("\033]52;c;" + base64.b64encode(text.encode("utf-8")).decode() + "\a")  # terminals that allow it
+    return (f"{n:,} character{'s' if n != 1 else ''} sent to the terminal's clipboard; if nothing arrives, install xclip or "
+            f"wl-clipboard (Shift+drag selects with the terminal itself)")
 
 
 SCROLL = Scrollback()
@@ -471,6 +595,8 @@ class LineEditor:
                     return "", None
                 return (None, None) if PARTIAL_RE.fullmatch(s) else (s[1:], None)
             seq, rest = m.group(1), s[len(m.group(0)):]
+            if SCROLL.mouse(m.group(0)):
+                return rest, None
             amount = scroll_amount(m.group(0))
             if amount is not None:  # mouse wheel / PgUp / PgDn scroll the transcript; other clicks are ignored
                 SCROLL.scroll(amount)
@@ -714,6 +840,8 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
         while not done:
             keys, pending = split_keys(pending + os.read(fd, 64).decode("utf-8", "ignore"))
             for key in keys:
+                if SCROLL.mouse(key):
+                    continue
                 amount = scroll_amount(key)
                 if amount is not None:
                     SCROLL.scroll(amount)
@@ -767,22 +895,25 @@ def shimmer(text: str, tick: int) -> str:
 class FullScreen:
     """Run inside the terminal's alternate screen (like vim/htop): on exit the shell view is restored as it was.
     The alternate screen has no scrollback, so the chat captures the mouse wheel and scrolls itself (Scrollback);
-    selecting text with the mouse then needs Shift."""
+    selecting text with the mouse is done by the chat itself (copied on release), or with Shift when that is off."""
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = True, select: bool = True):
         self.enabled = enabled and TTY
+        self.select = select
 
     def __enter__(self):
         if self.enabled:
             SCROLL.clear()
             SCROLL.enabled = True
-            write("\033[?1049h\033[H\033[2J\033[?1000h\033[?1006h")  # alt screen; wheel arrives as mouse events
+            SCROLL.select_enabled = self.select
+            # alt screen; the wheel (and, to select text, button presses and drags) arrive as mouse events
+            write("\033[?1049h\033[H\033[2J\033[?1000h" + ("\033[?1002h" if self.select else "") + "\033[?1006h")
         return self
 
     def __exit__(self, *exc):
         if self.enabled:
-            SCROLL.enabled = False
-            write("\033[?1000l\033[?1006l\033[?25h\033[?2004l\033[?1049l")
+            SCROLL.enabled = SCROLL.select_enabled = False
+            write("\033[?1002l\033[?1000l\033[?1006l\033[?25h\033[?2004l\033[?1049l")
         return False
 
 
@@ -902,6 +1033,8 @@ class Spinner:
 
     def _type(self, data: str) -> None:
         for ch in split_keys(data)[0]:
+            if SCROLL.mouse(ch):
+                continue
             amount = scroll_amount(ch)
             if amount is not None:
                 SCROLL.scroll(amount)

@@ -12,7 +12,7 @@ COMMANDS: List[Tuple[str, str]] = [
     ("completion", "print a shell completion script"), ("version", "print the version"), ("help", "usage"),
 ]
 ARGUMENTS: Dict[str, List[str]] = {
-    "config": ["display", "notify", "reuse", "planner", "first-worker"],
+    "config": ["display", "notify", "reuse", "planner", "first-worker", "copy-on-select"],
     "mcp": ["serve", "install", "status"],
     "projects": ["list", "scan", "show", "add", "link", "unlink", "test"],
     "completion": ["bash", "zsh"],

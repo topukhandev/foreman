@@ -185,3 +185,49 @@ def clipboard_image(dest_dir: str) -> Tuple[Optional[str], str]:
     if not (shutil.which("xclip") or shutil.which("wl-paste") or shutil.which("pngpaste")):
         return None, "No image on the clipboard (if there is one, install xclip or wl-clipboard to paste it)"
     return None, "No image on the clipboard"
+
+
+# ---------------------------------------------------------------------- copying text
+
+_GTK_HOLD = """
+import sys, time, gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+start = time.time()
+board = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+board.set_text(sys.stdin.read(), -1)
+board.store()  # hand the text to the desktop's clipboard manager when there is one
+def lost(*_):
+    if time.time() - start > 1:  # someone else copied (or the manager took over): nothing left to serve
+        Gtk.main_quit()
+board.connect("owner-change", lost)
+GLib.timeout_add_seconds(3600, Gtk.main_quit)
+Gtk.main()
+"""
+
+
+def copy_text(text: str) -> bool:
+    """Put text on the system clipboard: wl-copy (Wayland), xclip / xsel (X11), pbcopy (macOS), else GTK through
+    python3-gi (a small background process keeps serving the text). False when none of them is available."""
+    data = text.encode("utf-8")
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        cmds = [["wl-copy"]]
+    elif os.environ.get("DISPLAY") and shutil.which("xclip"):
+        cmds = [["xclip", "-selection", "clipboard", "-i"]]
+    elif os.environ.get("DISPLAY") and shutil.which("xsel"):
+        cmds = [["xsel", "--clipboard", "--input"]]
+    elif sys.platform == "darwin" and shutil.which("pbcopy"):
+        cmds = [["pbcopy"]]
+    elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        cmds = [[sys.executable, "-c", _GTK_HOLD]]
+    else:
+        return False
+    try:
+        proc = subprocess.Popen(cmds[0], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)  # xclip / wl-copy / the GTK holder stay alive to serve pastes
+        proc.stdin.write(data)
+        proc.stdin.close()
+        time.sleep(0.15)
+        return proc.poll() in (None, 0)
+    except OSError:
+        return False

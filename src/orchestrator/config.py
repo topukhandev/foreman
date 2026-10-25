@@ -59,6 +59,7 @@ ui:
   display: terminal        # terminal = show workers in visible terminal windows; headless = under the hood
   notify: true             # one desktop notification when a task run finishes (never mid-run)
   alt_screen: true         # chat uses its own screen; your terminal is restored as it was on exit
+  copy_on_select: true     # selecting text with the mouse in the chat copies it to the clipboard
 
 sessions:
   reuse: fork              # fork | off  - continue context from your recent sessions
@@ -100,6 +101,7 @@ class Config:
     display: str = "terminal"
     notify: bool = True
     alt_screen: bool = True
+    copy_on_select: bool = True
 
     @property
     def provider_order(self) -> List[str]:
@@ -162,6 +164,7 @@ def load_config(home: Optional[str] = None) -> Config:
         display="headless" if str(ui.get("display", "terminal")).lower() == "headless" else "terminal",
         notify=bool(ui.get("notify", True)),
         alt_screen=bool(ui.get("alt_screen", True)),
+        copy_on_select=bool(ui.get("copy_on_select", True)),
     )
 
 

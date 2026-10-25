@@ -82,8 +82,11 @@ Conversations are saved per project. `/resume` (or `foreman -r`) lists earlier c
 with ↑/↓ and restores the transcript and its context; `foreman -c` continues the latest one. The chat runs in
 its own screen like vim, so your terminal is restored as it was when you exit. The mouse wheel or PgUp/PgDn
 scroll the whole conversation (back to the welcome box) while the input box stays at the bottom; typing or Esc
-returns to the latest output, and ↑/↓ stay for your earlier messages. Because the chat captures the mouse, hold
-Shift to select text. `ui.alt_screen: false` in `~/.foreman/config.yaml` uses the terminal's normal scrollback instead.
+returns to the latest output, and ↑/↓ stay for your earlier messages. Select text with the mouse (press, drag,
+release) and it is copied to the clipboard, with a "N characters copied to clipboard" note (needs `xclip`,
+`wl-clipboard` or `pbcopy`, or `python3-gi`; over SSH it uses the terminal's own clipboard escape). Turn this off with
+`foreman config copy-on-select off` (`ui.copy_on_select`), then hold Shift to select with the terminal itself.
+`ui.alt_screen: false` in `~/.foreman/config.yaml` uses the terminal's normal scrollback instead.
 
 ### One-shot commands
 

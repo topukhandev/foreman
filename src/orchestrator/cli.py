@@ -147,7 +147,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("dismiss", help="dismiss a suggestion")
     p.add_argument("id")
     p = sub.add_parser("config", help="show or change settings")
-    p.add_argument("key", nargs="?", choices=["display", "notify", "reuse", "planner", "first-worker"])
+    p.add_argument("key", nargs="?", choices=["display", "notify", "reuse", "planner", "first-worker", "copy-on-select"])
     p.add_argument("value", nargs="?")
     p = sub.add_parser("doctor", help="check providers, terminal, MCP registration")
     p.add_argument("--json", action="store_true", help="print the findings as JSON")
@@ -193,7 +193,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.key:
             print(f"config file: {os.path.join(cfg.home, 'config.yaml')}")
             print(f"planner: {cfg.brain}   workers: {', '.join(cfg.provider_order)}")
-            print(f"display: {cfg.display}   notify: {cfg.notify}   session reuse: {cfg.reuse_sessions}")
+            print(f"display: {cfg.display}   notify: {cfg.notify}   session reuse: {cfg.reuse_sessions}   "
+                  f"copy on select: {'on' if cfg.copy_on_select else 'off'}")
             print(f"roots: {', '.join(cfg.roots)}")
             return 0
         value = args.value or ""
@@ -201,6 +202,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             set_option(cfg.home, "ui.display", value)
         elif args.key == "notify" and value in ("on", "off"):
             set_option(cfg.home, "ui.notify", value == "on")
+        elif args.key == "copy-on-select" and value in ("on", "off"):
+            set_option(cfg.home, "ui.copy_on_select", value == "on")
         elif args.key == "reuse" and value in ("fork", "off"):
             set_option(cfg.home, "sessions.reuse", value)
         elif args.key in ("planner", "first-worker") and {"agy": "antigravity"}.get(value, value) in cfg.providers:
@@ -212,7 +215,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 set_first_provider(cfg.home, value)
         else:
             print("usage: foreman config display terminal|headless | notify on|off | reuse fork|off | "
-                  "planner <provider> | first-worker <provider>")
+                  "planner <provider> | first-worker <provider> | copy-on-select on|off")
             return 1
         print(f"{args.key} = {value}")
         return 0

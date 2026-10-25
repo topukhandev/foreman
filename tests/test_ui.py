@@ -97,6 +97,84 @@ class CleanTextTest(unittest.TestCase):
         self.assertEqual(clean_text("line1\nline2 has a \\n literal"), "line1\nline2 has a \\n literal")
 
 
+class SelectionTest(unittest.TestCase):
+    """Mouse selection in the chat: press, drag, release copies the highlighted text and says how much."""
+
+    class Live:
+        notice = ""
+
+        def live_height(self):
+            return 3
+
+        def frame(self):
+            return ""
+
+    def setUp(self):
+        from unittest import mock
+        self.scroll = ui.Scrollback()
+        self.scroll.enabled = self.scroll.select_enabled = True
+        self.live = self.Live()
+        self.scroll.push(self.live)
+        self.copied = []
+        self.patches = [mock.patch("orchestrator.ui.copy_text", side_effect=lambda t: self.copied.append(t) or True),
+                        mock.patch("orchestrator.ui.SCROLL", self.scroll),
+                        mock.patch("orchestrator.ui.shutil.get_terminal_size", return_value=__import__("os").terminal_size((40, 12)))]
+        for p in self.patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def event(self, button, x, y, kind="M"):
+        return self.scroll.mouse(f"\x1b[<{button};{x};{y}{kind}")
+
+    def drag(self, start, end):
+        self.event(0, *start)
+        self.event(32, *end)
+        self.event(0, *end, kind="m")
+
+    def test_dragging_over_two_rows_copies_the_text_and_reports_the_size(self):
+        self.scroll.add("first line here\nsecond line there")
+        self.drag((7, 1), (6, 2))  # from "line here" to "second"
+        self.assertEqual(self.copied, ["line here\nsecond"])
+        self.assertEqual(self.live.notice, "16 characters copied to clipboard")
+
+    def test_the_highlight_is_reverse_video_on_the_selected_columns(self):
+        self.assertEqual(ui.highlight("abcdef", 1, 2), "a\033[7mbc\033[27mdef")
+        bold = ui.highlight("\033[1mabcdef\033[0m", 4, 99)
+        self.assertEqual(bold, "\033[1mabcd\033[7mef\033[0m\033[7m\033[27m")  # a reset inside the selection keeps it
+        self.assertEqual(ui.cells("日a")[1], ("a", 2, 1))
+
+    def test_a_wrapped_line_is_copied_as_one_line(self):
+        self.scroll.add("x" * 60)  # wraps at 40 columns
+        self.drag((1, 1), (20, 2))
+        self.assertEqual(self.copied, ["x" * 60])
+
+    def test_a_plain_click_copies_nothing_and_the_wheel_still_scrolls(self):
+        self.scroll.add("some text")
+        self.event(0, 3, 1)
+        self.event(0, 3, 1, kind="m")
+        self.assertEqual(self.copied, [])
+        self.assertFalse(self.event(64, 3, 1), "wheel events are not selection events")
+
+    def test_clicks_below_the_transcript_do_not_start_a_selection(self):
+        self.scroll.add("some text")
+        self.event(0, 3, 9)
+        self.event(32, 5, 1)
+        self.event(0, 5, 1, kind="m")
+        self.assertEqual(self.copied, [])
+
+    def test_selection_is_off_when_disabled(self):
+        self.scroll.select_enabled = False
+        self.scroll.add("some text")
+        self.assertFalse(self.event(0, 1, 1))
+
+    def test_a_key_or_new_output_clears_the_highlight(self):
+        self.scroll.add("some text here")
+        self.drag((1, 1), (4, 1))
+        self.assertTrue(self.scroll.sel)
+        self.scroll.bottom()
+        self.assertIsNone(self.scroll.sel)
+
+
 class ClipTest(unittest.TestCase):
     def test_long_line_becomes_one_row_with_ellipsis(self):
         line = ui.c("› " + "word " * 40, ui.BOLD)

@@ -47,7 +47,8 @@ Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
   /mode  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
-Wheel or PgUp/PgDn scroll the chat; hold Shift to select text with the mouse.
+Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it (it says how many characters);
+`foreman config copy-on-select off` gives selection back to the terminal (then hold Shift).
 While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
 ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2}  # not "one": "the second one"
 SECTION_TITLES = {"What changed", "Needs your decision", "Remaining", "Notes", "Worth considering (your call)"}
@@ -74,7 +75,7 @@ class Chat:
         """resume: None (new chat), "last" (continue the latest chat here) or "pick" (choose from a list)."""
         ui.set_editor(ui.LineEditor(COMMANDS, os.path.join(self.eng.cfg.home, "chat_history"),
                                     image_dir=os.path.join(self.eng.cfg.home, "images")))
-        with ui.FullScreen(self.eng.cfg.alt_screen):
+        with ui.FullScreen(self.eng.cfg.alt_screen, self.eng.cfg.copy_on_select):
             if not self.eng.registry.projects:
                 with ui.Spinner("Indexing your projects", footer=False):
                     self.eng.registry.ensure_scanned()
