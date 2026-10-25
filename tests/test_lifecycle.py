@@ -127,6 +127,19 @@ class LifecycleTest(unittest.TestCase):
                          ("qa", "user", task["id"], "vip-badge"))
         self.assertEqual(self.eng.store.load(task["id"])["next_started"], nxt["id"])
 
+    def test_go_for_plan_after_research_starts_the_planning_step(self):
+        from orchestrator.engine import NEXT_DO_RE
+        self.s.plan = lambda req: with_mode(plan([("orders-api", "inspect")], [step("1", "orders-api", kind="investigate")]),
+                                            "research", feature="dataset")
+        done = self.eng.handle("research the dataset options", self.ws.api)["task"]
+        self.assertEqual(done["next"]["mode"], "planning")
+        nxt, _ = self.eng.route("go for plan", self.ws.api)
+        self.assertEqual((nxt["mode"], nxt["parent"]), ("planning", done["id"]))
+        for phrase in ("go for planning", "Start planning", "let's go", "do the plan", "go for the next step", "go for QA mode"):
+            self.assertTrue(NEXT_DO_RE.match(phrase), phrase)
+        for phrase in ("go for a walk", "go for plan B and explain it", "start the server"):
+            self.assertFalse(NEXT_DO_RE.match(phrase), phrase)
+
     def test_problems_found_in_the_qa_report_send_it_back_to_development(self):
         self.s.plan = lambda req: with_mode(plan([("admin-ui", "test")], [step("1", "admin-ui", kind="investigate")]), "qa")
         self.s.document = lambda req: {"title": "QA", "document": "# QA\n", "summary": "One defect.",

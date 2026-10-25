@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from orchestrator import ui
 from orchestrator.app import build_engine, spawn_task
 from orchestrator.config import set_first_provider, set_option
-from orchestrator.engine import NO_RE, RESUME_RE, YES_RE, clean_text, is_task_status_query
+from orchestrator.engine import BARE_YES_RE, NO_RE, RESUME_RE, YES_RE, clean_text, is_task_status_query
 from orchestrator.report import render_report
 from orchestrator.store import ACTIVE
 from orchestrator.util import short
@@ -295,7 +295,7 @@ class Chat:
         handled = self._suggestion_reply(focus, text)
         if handled is not None:
             return handled
-        if (YES_RE.match(text) or NO_RE.match(text)) and len(text.split()) <= 3 and not RESUME_RE.search(text):
+        if (BARE_YES_RE.match(text) or NO_RE.match(text)) and not RESUME_RE.search(text):
             return ui.bullet("Nothing is waiting for a yes/no right now. What would you like to do?")
         task, msg = self.eng.route(text, self.cwd, self._conversation(), confirm_plan=True, mode=self.mode)
         return self._run(text, task, msg)

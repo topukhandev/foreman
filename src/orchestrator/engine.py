@@ -46,6 +46,7 @@ STATUS_RE = re.compile(
 TASK_REF_RE = re.compile(r"(#\d+|\b(task|tasks|working on|work(ed)? on|left|remaining|progress|blocked|previous|last)\b)", re.I)
 PROJECT_Q_RE = re.compile(r"\b(project|repo|repository|codebase|code base|service|app|application|branch)\b", re.I)
 YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|continue|do it|approved?|lgtm)\b", re.I)
+BARE_YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|do it|approved?|lgtm)\s*[.!]*\s*$", re.I)
 NO_RE = re.compile(r"^\s*(n|no|nope|cancel|stop|abort|don'?t)\s*[.!]*\s*$", re.I)
 AUTH_RE = re.compile(r"api key|expired|unauthori[sz]ed|\b401\b|not logged in|log ?in required|authenticat|credential",
                      re.I)
@@ -57,8 +58,10 @@ RESUME_RE = re.compile(r"^\s*(please\s+)?(continue|resume|finish|pick up|carry o
 # Lifecycle: "what's next?" is answered from the project's records; "next" starts the recommended step.
 NEXT_Q_RE = re.compile(r"^\s*(what('?s| is) next|what (should|do) (i|we) do next|where (are|do) we stand|"
                        r"(show )?(the )?lifecycle|which stage)\b.{0,60}$", re.I)
+_MODE_WORDS = r"(next( step)?|plan(ning)?|r&d|research|dev(elopment)?|qa|deployment)( mode)?"
 NEXT_DO_RE = re.compile(r"^\s*(ok(ay)?,?\s*)?(next|go to the next step|start the next step|do the next step|"
-                        r"next step,? please|proceed to the next (step|stage))\s*[.!]*\s*$", re.I)
+                        r"next step,? please|proceed to the next (step|stage)|go for (the )?" + _MODE_WORDS +
+                        r"|start (the )?" + _MODE_WORDS + r"|do the plan|plan it|let'?s (go|plan|start))\s*[.!]*\s*$", re.I)
 TEST_PATH_RE = re.compile(r"(^|/)(tests?|specs?|__tests__|e2e|cypress|playwright)/|(\.|_)(test|spec)\.[a-z]+$|"
                           r"(^|/)(tests?|specs?)\.[a-z]+$|"
                           r"(^|/)test_[^/]+\.py$|Test\.php$|_test\.go$", re.I)

@@ -31,6 +31,12 @@ class ChatTest(unittest.TestCase):
         return plan([("orders-api", "modify"), ("admin-ui", "modify")],
                     [step("api", "orders-api", text="add currency"), step("ui", "admin-ui", deps=["api"], text="show currency")])
 
+    def test_only_a_bare_yes_or_no_gets_the_nothing_is_waiting_answer(self):
+        self.assertIn("Nothing is waiting", self.chat.respond("yes"))
+        self.assertIn("Nothing is waiting", self.chat.respond("Go ahead!"))
+        self.assertNotIn("yes/no", self.chat.respond("go for plan"), "a request, not an answer")
+        self.assertNotIn("yes/no", self.chat.respond("ok let's look at the tests"))
+
     def test_pasted_text_is_sent_in_full_but_shown_and_saved_as_a_chip(self):
         from unittest import mock
         seen = []
