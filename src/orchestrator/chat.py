@@ -119,7 +119,6 @@ class Chat:
     def banner(self) -> str:
         proj = self.eng.registry.project_for_path(self.cwd)
         cwd = ui.short_path(self.cwd, ui.width() - 16)
-        workers = [n for n in self.eng.providers if self.eng._usable(n)]
         skipped = self.eng.unhealthy()
         lines = [f"{ui.c('◈', ui.ACCENT, ui.BOLD)} {ui.c('Foreman', ui.BOLD, ui.ACCENT)}  {ui.c('· orchestrating your AI sessions', ui.GREY)}", "",
                  ui.c("  /help for help · Ctrl+D to exit", ui.GREY), "",
