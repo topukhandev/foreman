@@ -89,6 +89,24 @@ class LifecycleTest(unittest.TestCase):
         self.eng.handle("add the badge", self.ws.ui)
         self.assertFalse(self.calls(STEP_SCHEMA)[-1].web)
 
+    def test_a_new_empty_folder_is_the_home_of_its_own_work(self):
+        """A folder created after the last scan, with no git or manifest yet, is still the project the work belongs to."""
+        self.eng.registry.scan()
+        fresh = os.path.join(self.ws.root, "fresh-dataset")
+        os.makedirs(fresh)
+        self.assertIsNone(self.eng.registry.project_for_path(fresh))
+        self.s.plan = lambda req: with_mode(plan([("orders-api", "inspect")], [step("1", "orders-api", kind="investigate")]),
+                                            "research")
+        task = self.eng.handle("research the orders service for a dataset", fresh)["task"]
+        proj = self.eng.registry.project_for_path(fresh)
+        self.assertEqual((proj.name, proj.source), ("fresh-dataset", "declared"))
+        self.assertTrue(os.path.isdir(os.path.join(fresh, ".foreman", "research")), "the document is written in the new folder")
+        self.assertEqual(task["document"]["project"], "fresh-dataset")
+        self.assertFalse(os.path.exists(os.path.join(self.ws.api, ".foreman", "research")), "not in the project it only read")
+        self.eng.registry.scan()
+        self.assertIn("fresh-dataset", self.eng.registry.projects, "a rescan keeps it")
+        self.assertIsNone(self.eng.registry.adopt("/tmp"), "folders outside the project roots are not adopted")
+
     # ------------------------------------------------------------------ auto mode + next step
     def test_recommended_mode_then_next_starts_qa(self):
         self.s.plan = lambda req: with_mode(plan([("admin-ui", "modify")], [step("1", "admin-ui")]), "development",

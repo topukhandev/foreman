@@ -78,6 +78,7 @@ class Chat:
             if not self.eng.registry.projects:
                 with ui.Spinner("Indexing your projects", footer=False):
                     self.eng.registry.ensure_scanned()
+            self.eng.registry.adopt(self.cwd)
             ui.out(self.banner())
             if resume == "last":
                 chats = self.history.list()
@@ -240,7 +241,7 @@ class Chat:
         return ui.bullet(msg + " (saved)", ui.GREEN)
 
     def _project_key(self) -> str:
-        self.eng.registry.ensure_scanned()
+        self.eng.registry.ensure_scanned(self.cwd)
         proj = self.eng.registry.project_for_path(self.cwd)
         return proj.name if proj else self.cwd
 

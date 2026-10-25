@@ -146,7 +146,7 @@ class Engine:
         """mode: a lifecycle mode the user chose (name or title), or None to let the planner recommend one."""
         """Decide what a request is without executing it: an instant answer (returned as text) or a task to run."""
         cwd = os.path.abspath(cwd)
-        self.registry.ensure_scanned()
+        self.registry.ensure_scanned(cwd)
         if SMALL_TALK_RE.match(request):
             return None, self.small_talk(request, cwd)
         if NEXT_DO_RE.match(request):
@@ -181,7 +181,7 @@ class Engine:
 
     def status(self, ref: Optional[str], cwd: str, request: str = "") -> Dict[str, Any]:
         """Current state of a task from the store, plus a deterministic freshness check. Never calls AI."""
-        self.registry.ensure_scanned()
+        self.registry.ensure_scanned(cwd)
         anchor = self.registry.project_for_path(cwd)
         cands = self.store.resolve(ref, cwd=cwd, project_names=[anchor.name] if anchor else None,
                                    fallback=ref is None or bool(PREVIOUS_RE.search(request or "")))
@@ -208,7 +208,7 @@ class Engine:
     def prepare_resume(self, ref: Optional[str], note: str = "", cwd: str = ".") -> Tuple[Optional[Dict[str, Any]], str]:
         """Pick the task to continue and mark it for re-planning. Does not execute."""
         cwd = os.path.abspath(cwd)
-        self.registry.ensure_scanned()
+        self.registry.ensure_scanned(cwd)
         anchor = self.registry.project_for_path(cwd)
         cands = self.store.resolve(ref, cwd=cwd, project_names=[anchor.name] if anchor else None,
                                    fallback=ref is None or bool(PREVIOUS_RE.search(note or "")))
@@ -302,7 +302,7 @@ class Engine:
 
     def lifecycle_text(self, cwd: str) -> str:
         """Where the project's features stand and the recommended next step (instant, no AI)."""
-        self.registry.ensure_scanned()
+        self.registry.ensure_scanned(cwd)
         proj = self.registry.project_for_path(cwd)
         modes = self.modes(cwd)
         names = " · ".join(m.title for m in modes.values())
@@ -330,7 +330,7 @@ class Engine:
 
     def lifecycle_data(self, cwd: str) -> Dict[str, Any]:
         """The same facts as lifecycle_text, as data (instant, no AI)."""
-        self.registry.ensure_scanned()
+        self.registry.ensure_scanned(cwd)
         proj = self.registry.project_for_path(cwd)
         modes = self.modes(cwd)
         if not proj:
@@ -345,7 +345,7 @@ class Engine:
 
     def prepare_next(self, cwd: str) -> Tuple[Optional[Dict[str, Any]], str]:
         """Start the recommended next mode for the most recent piece of work here."""
-        self.registry.ensure_scanned()
+        self.registry.ensure_scanned(cwd)
         proj = self.registry.project_for_path(cwd)
         cands = [t for t in self.store.all() if t.get("next") and not t.get("next_started")
                  and t["status"] not in ("running", "queued", "planning")

@@ -98,9 +98,37 @@ class Registry:
                          + yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
     # ------------------------------------------------------------------ discovery
-    def ensure_scanned(self) -> None:
+    def ensure_scanned(self, cwd: Optional[str] = None) -> None:
+        """Scan once; and recognise the directory the user works in, even if it was created after the last scan."""
         if not self.projects:
             self.scan()
+        if cwd:
+            self.adopt(cwd)
+
+    def adopt(self, path: str) -> Optional[Project]:
+        """The project that holds path. A folder directly under a project root that is not known yet (a new project,
+        possibly still empty, no git or manifest) is registered as declared, so work started there stays there."""
+        path = os.path.abspath(path)
+        known = self.project_for_path(path)
+        if known:
+            return known
+        for root in self.roots:
+            root = os.path.abspath(os.path.expanduser(root)).rstrip("/")
+            if not path.startswith(root + "/"):
+                continue
+            top = os.path.join(root, path[len(root) + 1:].split("/")[0])
+            base = os.path.basename(top)
+            if not os.path.isdir(top) or base.startswith(".") or base in SKIP_DIRS:
+                return None
+            with self._lock:
+                name = base if base not in self.projects else f"{base}@{os.path.basename(root)}"
+                proj = self._describe(name, top, None)
+                proj.source = "declared"
+                self.projects[name] = proj
+                self._discover_relations()
+                self.save()
+                return proj
+        return None
 
     def scan(self) -> List[str]:
         """Discover projects under roots and refresh discovered relations. Returns project names found."""
