@@ -1,0 +1,151 @@
+"""Pasted text and images for the chat input: long pastes collapse to a chip such as `[Pasted text #1 +545 lines]`,
+dragged-in or pasted image files become `[Image #1]`. The chips are what the input box shows; `expand` turns a message
+back into the full text (with image paths) for the AI. Pure functions and a small state class, no terminal here."""
+
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote
+
+MAX_PASTE_LINES = 2000          # per message, over all pastes
+COLLAPSE_LINES = 4              # pastes with at least this many lines (or CHARS characters) become a chip
+COLLAPSE_CHARS = 400
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".svg")
+CHIP_RE = re.compile(r"\[(?:Pasted text|Image) #\d+[^\]\n]*\]")
+IMAGE_REF_RE = re.compile(r"\[Image #\d+: ([^\]\n]+)\]")  # how an image appears in the text the AI receives
+
+
+def dropped_images(text: str) -> List[str]:
+    """Image files named by a paste. Terminals paste the path when a file is dragged in: bare, 'quoted',
+    backslash-escaped or as a file:// URI, one or several. Empty unless every item is an existing image file."""
+    text = text.strip()
+    if not text or len(text) > 8000:
+        return []
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    paths = []
+    for tok in tokens:
+        if tok.startswith("file://"):
+            tok = unquote(tok[7:])
+        tok = os.path.expanduser(tok)
+        if not (os.path.isabs(tok) and tok.lower().endswith(IMAGE_EXTS) and os.path.isfile(tok)):
+            return []
+        paths.append(tok)
+    return paths
+
+
+def image_dirs(text: str) -> List[str]:
+    """Directories of the image files referenced as `[Image #n: path]` in a request (the AI is given read access)."""
+    return list(dict.fromkeys(os.path.dirname(p) for p in IMAGE_REF_RE.findall(text) if os.path.isfile(p)))
+
+
+class Attachments:
+    """Chips created in this input session and the content behind each."""
+
+    def __init__(self) -> None:
+        self.items: Dict[str, Tuple[str, str]] = {}   # chip -> (kind, content or image path)
+        self._n = {"text": 0, "image": 0}
+
+    def known(self, buf: str):
+        return [m for m in CHIP_RE.finditer(buf) if m.group(0) in self.items]
+
+    def pasted_lines(self, buf: str) -> int:
+        return sum(self.items[m.group(0)][1].count("\n") + 1 for m in self.known(buf) if self.items[m.group(0)][0] == "text")
+
+    def paste(self, text: str, buf: str = "") -> Tuple[str, str]:
+        """What to insert for pasted text and a notice ("" if none). Short pastes stay as they are; long ones become
+        a chip; the whole message never holds more than MAX_PASTE_LINES pasted lines."""
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if text.endswith("\n") and text.count("\n") > 1:
+            text = text[:-1]
+        lines = text.count("\n") + 1
+        room = MAX_PASTE_LINES - self.pasted_lines(buf)
+        note = ""
+        if lines >= COLLAPSE_LINES and room <= 0:
+            return "", f"Paste limit reached: at most {MAX_PASTE_LINES} lines per message"
+        if lines > room:
+            text, note = "\n".join(text.split("\n")[:room]), (
+                f"Kept {room} of {lines} pasted lines (limit {MAX_PASTE_LINES} per message)")
+            lines = room
+        if lines < COLLAPSE_LINES and len(text) < COLLAPSE_CHARS:
+            return text, note
+        self._n["text"] += 1
+        size = f"+{lines} lines" if lines > 1 else f"{len(text):,} chars"
+        chip = f"[Pasted text #{self._n['text']} {size}]"
+        self.items[chip] = ("text", text)
+        return chip, note
+
+    def image(self, path: str) -> str:
+        self._n["image"] += 1
+        chip = f"[Image #{self._n['image']}]"
+        self.items[chip] = ("image", path)
+        return chip
+
+    def expand(self, buf: str) -> str:
+        """The message with every chip replaced by what it stands for."""
+        def fill(m):
+            kind, content = self.items[m.group(0)]
+            return content if kind == "text" else f"[Image #{m.group(0)[8:-1]}: {content}]"
+        return CHIP_RE.sub(lambda m: fill(m) if m.group(0) in self.items else m.group(0), buf)
+
+
+# ---------------------------------------------------------------------- clipboard images
+
+_GTK_SCRIPT = """
+import sys, gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk
+img = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_image()
+if img is None:
+    sys.exit(3)
+img.savev(sys.argv[1], "png", [], [])
+"""
+
+
+def _capture(cmd: List[str], dest: str, input_check: Optional[List[str]] = None) -> bool:
+    try:
+        if input_check:
+            probe = subprocess.run(input_check, capture_output=True, text=True, timeout=5)
+            if probe.returncode != 0 or "image/png" not in probe.stdout:
+                return False
+        res = subprocess.run(cmd, capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if res.returncode != 0 or not res.stdout.startswith(b"\x89PNG"):
+        return False
+    with open(dest, "wb") as f:
+        f.write(res.stdout)
+    return True
+
+
+def clipboard_image(dest_dir: str) -> Tuple[Optional[str], str]:
+    """Save the clipboard's image as a PNG in dest_dir. Returns (path, "") or (None, reason). Uses wl-paste (Wayland),
+    xclip (X11), pngpaste (macOS), else GTK through python3-gi when it is installed."""
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, time.strftime("clipboard-%Y%m%d-%H%M%S.png"))
+    if shutil.which("wl-paste") and os.environ.get("WAYLAND_DISPLAY"):
+        ok = _capture(["wl-paste", "--type", "image/png"], dest, ["wl-paste", "--list-types"])
+    elif shutil.which("xclip") and os.environ.get("DISPLAY"):
+        ok = _capture(["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], dest,
+                      ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
+    elif sys.platform == "darwin" and shutil.which("pngpaste"):
+        ok = _capture(["pngpaste", "-"], dest)
+    elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        try:
+            ok = subprocess.run([sys.executable, "-c", _GTK_SCRIPT, dest], capture_output=True, timeout=10).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+    else:
+        return None, "Image paste needs a graphical session (and xclip, wl-clipboard or pngpaste)"
+    if ok and os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        return dest, ""
+    if not (shutil.which("xclip") or shutil.which("wl-paste") or shutil.which("pngpaste")):
+        return None, "No image on the clipboard (if there is one, install xclip or wl-clipboard to paste it)"
+    return None, "No image on the clipboard"

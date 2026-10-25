@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA, Brain, BrainError,
                                 task_context)
 from orchestrator.budget import Budget
+from orchestrator.clipboard import image_dirs
 from orchestrator.config import Config
 from orchestrator.knowledge import ProjectKnowledge, slug
 from orchestrator.modes import Mode, catalog, load_modes, resolve as resolve_mode
@@ -511,7 +512,7 @@ class Engine:
                                    modes_ctx=catalog(modes, only=fixed or None), fixed_mode=fixed or "",
                                    knowledge_ctx=knowledge)
         cwd = sel.anchor.path if sel.anchor else (sel.focus[0].path if sel.focus else task["cwd"])
-        extra = [p.path for p in sel.focus if p.path != cwd][:6]
+        extra = [p.path for p in sel.focus if p.path != cwd][:6] + image_dirs(task["request"])
         self._say(task, "planning…")
         before = snapshot(cwd)
         try:
@@ -722,7 +723,8 @@ class Engine:
                 web=bool(mode and mode.web and step["kind"] == "investigate"),
                 prompt=prompt, cwd=proj.path, mode="write" if step["kind"] == "implement" else "read",
                 session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=self.cfg.limits.step_timeout_sec,
-                extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects],
+                extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
+                + image_dirs(task["request"]),
                 visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
                 on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text)))
             self.store.write_log(task["id"], f"step-{step['id']}-{provider.name}", result.raw or result.text or str(result.error))

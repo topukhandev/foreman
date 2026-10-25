@@ -12,6 +12,8 @@ import threading
 import time
 from typing import List, Optional
 
+from orchestrator.clipboard import CHIP_RE, Attachments, clipboard_image, dropped_images
+
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 TTY = sys.stdout.isatty()
 
@@ -353,23 +355,33 @@ def text_width(s: str) -> int:
     return sum(char_width(ch) for ch in s)
 
 
+class Typed(str):
+    """What the user submitted, in full (pastes expanded); `.shown` is the compact form with chips such as
+    `[Pasted text #1 +545 lines]`, for the transcript."""
+    shown = ""
+
+
 class LineEditor:
     """Claude Code-style input: prompt between two rules, hint line below, live '/' command menu, history,
-    bracketed paste. Raw terminal mode; small on purpose."""
+    bracketed paste. Long pastes and images become chips (see clipboard.py): drag an image file in or press Ctrl+V
+    with an image on the clipboard. Raw terminal mode; small on purpose."""
 
-    def __init__(self, commands: List[tuple], history_path: Optional[str] = None):
+    def __init__(self, commands: List[tuple], history_path: Optional[str] = None, image_dir: Optional[str] = None):
         self.commands = commands            # [(command, description)]
+        self.image_dir = image_dir or os.path.join(os.path.expanduser("~"), ".foreman", "images")
+        self.attach = Attachments()
+        self.notice = ""                    # one-line message in place of the hint until the next key
         self.history_path = history_path
         self.history: List[str] = []
         if history_path and os.path.exists(history_path):
             with open(history_path, encoding="utf-8", errors="replace") as f:
                 self.history = [l.rstrip("\n").replace("\x1f", "\n") for l in f if l.strip()][-500:]
 
-    def _save(self, line: str) -> None:
+    def _save(self, line: str, persist: bool = True) -> None:
         if not line.strip() or (self.history and self.history[-1] == line):
             return
         self.history.append(line)
-        if self.history_path:
+        if self.history_path and persist:
             try:
                 with open(self.history_path, "a", encoding="utf-8") as f:
                     f.write(line.replace("\n", "\x1f") + "\n")
@@ -393,7 +405,7 @@ class LineEditor:
         new[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG | termios.IEXTEN)
         new[6][termios.VMIN], new[6][termios.VTIME] = 1, 0
         dec = codecs.getincrementaldecoder("utf-8")("ignore")
-        self.buf, self.cur, self.sel, self.row = "", 0, 0, 0
+        self.buf, self.cur, self.sel, self.row, self.notice = "", 0, 0, 0, ""
         self.hist_i = len(self.history)
         self.hints = (hint_left, hint_right)
         write(c("─" * width(), ACCENT_DEEP) + "\n\033[?2004h")
@@ -414,8 +426,10 @@ class LineEditor:
                             raise KeyboardInterrupt
                         if result is EOFError:
                             raise EOFError
-                        self._save(result)
-                        return result
+                        typed = Typed(self.attach.expand(result))
+                        typed.shown = result
+                        self._save(result, persist=not self.attach.known(result))  # chips only mean something now
+                        return typed
                     if pending is None:  # incomplete escape sequence: wait for the rest
                         pending = before
                         break
@@ -438,12 +452,13 @@ class LineEditor:
 
     # key handling: returns (remaining input, result-or-None); remaining None = incomplete escape sequence
     def _key(self, s: str):
+        self.notice = ""
         menu = self.matches(self.buf)
         if s.startswith("\x1b[200~"):
             end = s.find("\x1b[201~")
             if end == -1:
                 return None, None
-            self._insert(s[6:end].replace("\r\n", "\n").replace("\r", "\n"))
+            self._paste(s[6:end])
             return s[end + 6:], None
         if s.startswith("\x1b"):
             m = SEQ_RE.match(s)
@@ -476,15 +491,15 @@ class LineEditor:
                     self.buf = self.history[self.hist_i] if self.hist_i < len(self.history) else ""
                     self.cur = len(self.buf)
             elif seq in ("[C", "OC"):
-                self.cur = min(len(self.buf), self.cur + 1)
+                self.cur = min(len(self.buf), self._chip_end(self.cur) or self.cur + 1)
             elif seq in ("[D", "OD"):
-                self.cur = max(0, self.cur - 1)
+                self.cur = max(0, self._chip_start(self.cur) if self._chip_start(self.cur) is not None else self.cur - 1)
             elif seq in ("[H", "OH", "[1~"):
                 self.cur = 0
             elif seq in ("[F", "OF", "[4~"):
                 self.cur = len(self.buf)
             elif seq == "[3~":
-                self.buf = self.buf[:self.cur] + self.buf[self.cur + 1:]
+                self._delete_forward()
             return rest, None
         ch, rest = s[0], s[1:]
         SCROLL.bottom()
@@ -505,12 +520,16 @@ class LineEditor:
         if ch == "\x04":
             if not self.buf:
                 return rest, EOFError
-            self.buf = self.buf[:self.cur] + self.buf[self.cur + 1:]
+            self._delete_forward()
             return rest, None
-        if ch in ("\x7f", "\x08"):
+        if ch == "\x16":  # Ctrl+V: an image on the clipboard (text is pasted by the terminal itself)
+            self._paste_clipboard_image()
+        elif ch in ("\x7f", "\x08"):
             if self.cur:
-                self.buf = self.buf[:self.cur - 1] + self.buf[self.cur:]
-                self.cur -= 1
+                start = self._chip_start(self.cur)
+                start = self.cur - 1 if start is None else start
+                self.buf = self.buf[:start] + self.buf[self.cur:]
+                self.cur = start
         elif ch == "\x01":
             self.cur = 0
         elif ch == "\x05":
@@ -532,7 +551,39 @@ class LineEditor:
         self.buf = self.buf[:self.cur] + text + self.buf[self.cur:]
         self.cur += len(text)
 
+    def _chip_start(self, pos: int) -> Optional[int]:
+        """Start of the chip that ends exactly at pos (Backspace and ← treat a chip as one character)."""
+        return next((m.start() for m in self.attach.known(self.buf) if m.end() == pos), None)
+
+    def _chip_end(self, pos: int) -> Optional[int]:
+        return next((m.end() for m in self.attach.known(self.buf) if m.start() == pos), None)
+
+    def _delete_forward(self) -> None:
+        end = self._chip_end(self.cur) or self.cur + 1
+        self.buf = self.buf[:self.cur] + self.buf[end:]
+
+    def _paste(self, text: str) -> None:
+        """Bracketed paste: dragged-in image files and long text become chips, short text goes in as typed."""
+        if not text.strip():  # terminals send an empty paste when the clipboard holds only an image
+            self._paste_clipboard_image()
+            return
+        images = dropped_images(text)
+        if images:
+            self._insert(" ".join(self.attach.image(p) for p in images) + " ")
+            return
+        insert, self.notice = self.attach.paste(text, self.buf)
+        self._insert(insert)
+
+    def _paste_clipboard_image(self) -> None:
+        path, why = clipboard_image(self.image_dir)
+        if path:
+            self._insert(self.attach.image(path) + " ")
+        else:
+            self.notice = why
+
     def _below(self) -> List[str]:
+        if self.notice:
+            return [c("  " + self.notice[: width() - 4], YELLOW)]
         menu = self.matches(self.buf)
         if menu:
             w = max(len(cmd) for cmd, _ in menu) + 3
@@ -554,7 +605,8 @@ class LineEditor:
         text_rows = max(1, -(-total // cols))
         below = self._below()
         up = f"\033[{self.row}A" if self.row and not fresh else ""
-        out = [up, "\r", c(">", BOLD, ACCENT), " ", shown, "" if total % cols == 0 else "\033[K", "\r\n",
+        styled = CHIP_RE.sub(lambda m: c(m.group(0), ACCENT) if m.group(0) in self.attach.items else m.group(0), shown)
+        out = [up, "\r", c(">", BOLD, ACCENT), " ", styled, "" if total % cols == 0 else "\033[K", "\r\n",
                c("─" * cols, ACCENT_DEEP), "\r\n", "\r\n".join(eol(b, cols) for b in below), "\033[J"]
         target = 2 + text_width(shown[: self.cur])
         trow, tcol = target // cols, target % cols
@@ -717,6 +769,9 @@ class Spinner:
         self.start = time.time()
         self.typed = ""
         self.queued: List[str] = []
+        self.attach = _EDITOR.attach if _EDITOR else Attachments()  # chips stay valid across the editor and the spinner
+        self.notice = ""
+        self._pasting: Optional[str] = None  # text of a bracketed paste still arriving
         self._lock = OUTPUT_LOCK
         self._stop = threading.Event()
         self._paused = False
@@ -733,7 +788,7 @@ class Spinner:
 
     def begin(self):
         if TTY:
-            write("\033[?25l")  # hide the real cursor; the box draws its own
+            write("\033[?25l\033[?2004h")  # hide the real cursor (the box draws its own); bracketed paste on
             self._thread.start()
             if self.footer:
                 SCROLL.push(self)
@@ -761,8 +816,10 @@ class Spinner:
         if not self.footer:
             return [status]
         shown = self.typed.replace("\n", "⏎")[-(w - 4):]
-        if self.queued:
-            left = f"queued ({len(self.queued)}): " + " · ".join(q[:30] for q in self.queued)
+        if self.notice:
+            left = self.notice
+        elif self.queued:
+            left = f"queued ({len(self.queued)}): " + " · ".join(getattr(q, "shown", q)[:30] for q in self.queued)
         else:
             left = "type your next message; it's sent when this finishes"
         return [status, "", c("─" * w, ACCENT_DEEP), c(">", BOLD, ACCENT) + " " + shown + "\033[7m \033[0m",
@@ -792,28 +849,63 @@ class Spinner:
             time.sleep(0.12)
 
     def key(self, data: str) -> None:
-        """Type-ahead editing: printable text, Backspace, Enter (queue), Ctrl+U (clear)."""
+        """Type-ahead editing: printable text, Backspace, Enter (queue), Ctrl+U (clear), pasted text and images."""
         with self._lock:
-            for ch in split_keys(data)[0]:
-                amount = scroll_amount(ch)
-                if amount is not None:
-                    SCROLL.scroll(amount)
+            self.notice = ""
+            while data:
+                if self._pasting is not None:
+                    end = data.find("\x1b[201~")
+                    if end == -1:
+                        self._pasting, data = self._pasting + data, ""
+                        break
+                    text, self._pasting, data = self._pasting + data[:end], None, data[end + 6:]
+                    self._paste(text)
                     continue
-                SCROLL.bottom()
-                if ch in ("\r", "\n"):
-                    if self.typed.strip():
-                        self.queued.append(self.typed.strip())
-                    self.typed = ""
-                elif ch in ("\x7f", "\x08"):
-                    self.typed = self.typed[:-1]
-                elif ch == "\x15":
-                    self.typed = ""
-                elif ch >= " " and not ch.startswith("\x1b"):
-                    self.typed += ch
+                start = data.find("\x1b[200~")
+                chunk, data = (data, "") if start == -1 else (data[:start], data[start + 6:])
+                if start != -1:
+                    self._pasting = ""
+                self._type(chunk)
             if SCROLL.flush():
                 return
             if not self._paused and TTY:
                 self._draw()
+
+    def _type(self, data: str) -> None:
+        for ch in split_keys(data)[0]:
+            amount = scroll_amount(ch)
+            if amount is not None:
+                SCROLL.scroll(amount)
+                continue
+            SCROLL.bottom()
+            if ch in ("\r", "\n"):
+                if self.typed.strip():
+                    self.queued.append(self._compose(self.typed.strip()))
+                self.typed = ""
+            elif ch in ("\x7f", "\x08"):
+                chip = next((m for m in self.attach.known(self.typed) if m.end() == len(self.typed)), None)
+                self.typed = self.typed[:chip.start() if chip else -1]
+            elif ch == "\x15":
+                self.typed = ""
+            elif ch >= " " and not ch.startswith("\x1b"):
+                self.typed += ch
+
+    def _paste(self, text: str) -> None:
+        images = dropped_images(text)
+        if images:
+            self.typed += " ".join(self.attach.image(p) for p in images) + " "
+        else:
+            insert, self.notice = self.attach.paste(text, self.typed)
+            self.typed += insert
+
+    def _compose(self, text: str) -> "Typed":
+        typed = Typed(self.attach.expand(text))
+        typed.shown = text
+        return typed
+
+    def pending(self) -> List[str]:
+        """Messages typed while working: the queued ones plus whatever was left in the input."""
+        return self.queued + ([self._compose(self.typed.strip())] if self.typed.strip() else [])
 
     def set(self, verb: str, who: Optional[str] = None):
         self.verb = verb
@@ -862,4 +954,4 @@ class Spinner:
         with self._lock:
             if TTY:
                 self._clear()
-                write("\033[?25h")
+                write("\033[?25h\033[?2004l")

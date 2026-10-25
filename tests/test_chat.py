@@ -31,6 +31,22 @@ class ChatTest(unittest.TestCase):
         return plan([("orders-api", "modify"), ("admin-ui", "modify")],
                     [step("api", "orders-api", text="add currency"), step("ui", "admin-ui", deps=["api"], text="show currency")])
 
+    def test_pasted_text_is_sent_in_full_but_shown_and_saved_as_a_chip(self):
+        from unittest import mock
+        seen = []
+        self.s.plan = lambda req: (seen.append(req.prompt) or plan([], [], intent="answer", answer="ok"))
+        pasted = "\n".join(f"spec line {i}" for i in range(300))
+        echoed = []
+        with mock.patch("orchestrator.ui.out", side_effect=echoed.append):
+            self.chat._exchange(f"build this: {pasted}", "build this: [Pasted text #1 +300 lines]")
+        self.assertIn("spec line 299", seen[0], "the planner receives the whole paste")
+        self.assertTrue(any("[Pasted text #1 +300 lines]" in e for e in echoed))
+        self.assertFalse(any("spec line 150" in e for e in echoed), "the transcript shows only the chip")
+        entry = self.chat.history.data["entries"][-1]
+        self.assertEqual(entry["shown"], "build this: [Pasted text #1 +300 lines]")
+        self.assertIn("spec line 299", entry["user"])
+        self.assertLess(len(self.chat._conversation()), 3000, "later turns carry a shortened copy")
+
     def test_cross_project_change_waits_for_approval_then_runs_same_plan(self):
         self.s.plan, self.s.step = self._cross_project_plan, editing_worker()
         out = self.chat.respond("show the currency on orders, API and UI")

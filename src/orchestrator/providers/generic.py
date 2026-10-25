@@ -16,7 +16,7 @@ fresh. Foreman's own guards (file-change checks on read steps, the HEAD check) a
 
 from typing import List
 
-from orchestrator.providers.base import GIT_POLICY, Capabilities, Provider, RunRequest, RunResult
+from orchestrator.providers.base import GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt
 
 
 class GenericProvider(Provider):
@@ -30,6 +30,7 @@ class GenericProvider(Provider):
                                          web=bool(extra.get("web")))
 
     def build_command(self, req: RunRequest) -> List[str]:
+        req = fit_prompt(req)
         extra = self.settings.extra or {}
         args = extra.get("write_args" if req.mode == "write" else "read_args") or ["{prompt}"]
         prompt = req.prompt

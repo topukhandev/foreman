@@ -2,7 +2,9 @@
 
 import json
 import os
-from dataclasses import dataclass, field
+import tempfile
+import time
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from orchestrator.config import ProviderSettings
@@ -45,6 +47,30 @@ class RunRequest:
     title: str = ""                        # window title when visual
     on_activity: Optional[Callable[[str], None]] = field(default=None, repr=False)  # live "Read(x)" lines
     web: bool = False                      # read steps may search / fetch the web (R&D and planning modes)
+
+
+# A command-line argument can hold about 128 KB on Linux; a big paste in the request can exceed that.
+MAX_PROMPT_BYTES = 90_000
+
+
+def fit_prompt(req: RunRequest) -> RunRequest:
+    """A request whose prompt fits on a command line. Longer prompts are written to a file the CLI is told to read
+    first (its directory is added to the readable ones); the start and the end stay in the prompt itself."""
+    if len(req.prompt.encode("utf-8")) <= MAX_PROMPT_BYTES:
+        return req
+    folder = os.path.join(tempfile.gettempdir(), "foreman-prompts")
+    os.makedirs(folder, exist_ok=True)
+    for name in os.listdir(folder):  # tidy up what earlier runs left behind
+        old = os.path.join(folder, name)
+        if time.time() - os.path.getmtime(old) > 86400:
+            os.remove(old)
+    path = os.path.join(folder, f"prompt-{os.getpid()}-{int(time.time() * 1000)}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(req.prompt)
+    stub = (f"The full instructions are too long for the command line. They are in this file:\n{path}\n"
+            f"Read it completely before doing anything and follow it exactly.\n\nStart of the instructions:\n"
+            f"{req.prompt[:3000]}\n[...]\nEnd of the instructions:\n{req.prompt[-3000:]}")
+    return replace(req, prompt=stub, extra_dirs=[*req.extra_dirs, folder])
 
 
 @dataclass

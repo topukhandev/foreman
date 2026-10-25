@@ -40,6 +40,8 @@ Just type what you need, for example:
   • what's the current state of this project?
   • add a currency to orders in the API and show it in the admin panel
   • what's the status of my task? · continue the previous task · yes / no
+Long pastes show as [Pasted text #1 +545 lines] (up to 2000 lines per message) and are sent in full.
+Drag an image file into the window, or press Ctrl+V with an image on the clipboard: it shows as [Image #1].
 Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
   /mode  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
@@ -69,7 +71,8 @@ class Chat:
     # ------------------------------------------------------------------ loop
     def run(self, resume: Optional[str] = None) -> None:
         """resume: None (new chat), "last" (continue the latest chat here) or "pick" (choose from a list)."""
-        ui.set_editor(ui.LineEditor(COMMANDS, os.path.join(self.eng.cfg.home, "chat_history")))
+        ui.set_editor(ui.LineEditor(COMMANDS, os.path.join(self.eng.cfg.home, "chat_history"),
+                                    image_dir=os.path.join(self.eng.cfg.home, "images")))
         with ui.FullScreen(self.eng.cfg.alt_screen):
             if not self.eng.registry.projects:
                 with ui.Spinner("Indexing your projects", footer=False):
@@ -87,10 +90,12 @@ class Chat:
         while True:
             self._announce_background()
             if self.queue:  # typed while the previous task was running
-                self._exchange(self.queue.pop(0))
+                queued = self.queue.pop(0)
+                self._exchange(queued, getattr(queued, "shown", "").strip())
                 continue
             try:
-                line = ui.read_input(*self._hints()).strip()
+                typed = ui.read_input(*self._hints())
+                line, shown = typed.strip(), getattr(typed, "shown", typed).strip()
             except EOFError:
                 return
             except KeyboardInterrupt:
@@ -103,16 +108,18 @@ class Chat:
                 continue
             if line in ("exit", "quit", "/exit", "/quit"):
                 return
-            self._exchange(line)
+            self._exchange(line, shown)
 
-    def _exchange(self, line: str) -> None:
-        """One user message: echo it, respond, remember it in this project's chat history, offer pending choices."""
-        ui.out("\n" + ui.user_echo(line))
+    def _exchange(self, line: str, shown: str = "") -> None:
+        """One user message: echo it, respond, remember it in this project's chat history, offer pending choices.
+        shown: the compact form of a message with pasted text or images (chips), echoed instead of the full text."""
+        shown = shown if shown != line else ""
+        ui.out("\n" + ui.user_echo(shown or line))
         out = self.respond(line)
         if out:
             ui.out("\n" + out + "\n")
         if not line.startswith(("/resume", "/new")):
-            self.history.append(line, out or "", self.turns, self.focus)
+            self.history.append(line, out or "", self.turns, self.focus, shown=shown)
         self._offer_choices()
 
     def banner(self) -> str:
@@ -181,7 +188,7 @@ class Chat:
             ui.out(ui.c(f"  … {len(data['entries']) - len(shown)} earlier messages", ui.GREY))
         for e in shown:
             if e["user"]:
-                ui.out("\n" + ui.user_echo(e["user"]))
+                ui.out("\n" + ui.user_echo(e.get("shown") or e["user"]))
             if e["output"]:
                 ui.out("\n" + e["output"] + "\n")
         return ui.bullet(f"Resumed \"{short(data.get('title', ''), 60)}\". Carry on where you left off.", ui.ACCENT)
@@ -466,7 +473,7 @@ class Chat:
         finally:
             spin.end()
             keys.close()
-            self.queue += spin.queued + ([spin.typed.strip()] if spin.typed.strip() else [])
+            self.queue += spin.pending()
 
     def _drain(self, path: str, pos: int, spin: ui.Spinner, phase: "Phase") -> int:
         if not os.path.exists(path):
@@ -565,7 +572,7 @@ class Chat:
         return "\n".join(out)
 
     def _conversation(self) -> str:
-        return "\n".join(f"User: {u}\nForeman: {a}" for u, a in self.turns[-6:])
+        return "\n".join(f"User: {short(u, 1200)}\nForeman: {a}" for u, a in self.turns[-6:])
 
 PURPOSE = {"plan": ("Plan", "Planning"), "replan": ("Re-plan", "Re-planning"), "review": ("Review", "Reviewing"),
            "document": ("Write", "Writing")}
@@ -765,12 +772,12 @@ class ChatHistory:
         self.data: Dict[str, Any] = {"id": self.chat_id, "title": "", "entries": [],
                                      "turns": [], "focus": None, "started_at": time.time(), "updated_at": time.time()}
 
-    def append(self, user: str, output: str, turns, focus) -> None:
+    def append(self, user: str, output: str, turns, focus, shown: str = "") -> None:
         from orchestrator.util import write_json
         self.data["project"] = self.project
         if user and not self.data["title"] and not user.startswith("/"):
-            self.data["title"] = short(user, 80)
-        self.data["entries"].append({"user": user, "output": output, "at": time.time()})
+            self.data["title"] = short(shown or user, 80)
+        self.data["entries"].append({"user": user, "output": output, "at": time.time(), **({"shown": shown} if shown else {})})
         self.data["entries"] = self.data["entries"][-200:]
         self.data.update(turns=[list(t) for t in turns][-12:], focus=focus, updated_at=time.time())
         write_json(os.path.join(self.dir, self.chat_id + ".json"), self.data)

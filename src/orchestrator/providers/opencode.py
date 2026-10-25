@@ -3,7 +3,7 @@
 import json
 from typing import List
 
-from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, RunRequest, RunResult,
+from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt,
                                          SessionInfo, tool_line)
 from orchestrator.util import run_process
 
@@ -14,6 +14,7 @@ class OpenCodeProvider(Provider):
                                 session_discovery=True, enforced_read_only=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
+        req = fit_prompt(req)
         cmd = [self._binary or self.settings.command, "run", "--format", "json", "--dir", req.cwd]
         model = req.model or self.settings.model
         if model:
