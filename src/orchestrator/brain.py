@@ -38,7 +38,8 @@ PLAN_SCHEMA = {
             "required": ["name", "role", "why"]}},
         "steps": {"type": "array", "items": {"type": "object", "properties": {
             "id": _STR, "project": _STR, "kind": {"type": "string", "enum": ["investigate", "implement"]},
-            "instructions": _STR, "depends_on": _STRS, "read_projects": _STRS},
+            "instructions": _STR, "depends_on": _STRS, "read_projects": _STRS,
+            "expected_minutes": {"type": "integer"}},
             "required": ["id", "project", "kind", "instructions"]}},
         "checks": {"type": "array", "items": {"type": "object", "properties": {
             "project": _STR, "command": _STR, "why": _STR}, "required": ["project", "command"]}},
@@ -105,7 +106,9 @@ How to plan (be proportional - most requests are small):
 5. Steps: one implement step per project to change, with precise instructions including which interface must
    stay consistent with which project. Use depends_on only for real ordering (e.g. backend contract before the
    frontend that consumes it). Independent steps run in parallel. read_projects lists other projects the worker
-   may need to read.
+   may need to read. For a step that waits on long jobs (large downloads, builds, big scans) set expected_minutes
+   honestly (Foreman allows about 1.5x that; a step that still runs out of time is resumed in the same session),
+   and prefer splitting "start the job in the background" from "process its result".
 6. Checks: commands Foreman runs itself to validate (tests, type-check, build) in modified or test projects.
    Prefer the registry's test command; narrow it when the suite is large. Non-destructive only: no deploys, DB
    resets, network installs or git commands.

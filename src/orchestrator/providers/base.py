@@ -73,6 +73,19 @@ def fit_prompt(req: RunRequest) -> RunRequest:
     return replace(req, prompt=stub, extra_dirs=[*req.extra_dirs, folder])
 
 
+def stream_session_id(out: str) -> Optional[str]:
+    """The session id in a CLI's JSON-lines output (Claude Code prints it in its first `system`/`init` line), so a run
+    that was cut off can still be resumed."""
+    for line in out.splitlines()[:50]:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("session_id"):
+            return str(ev["session_id"])
+    return None
+
+
 @dataclass
 class RunResult:
     ok: bool

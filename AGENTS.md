@@ -32,7 +32,10 @@
 ## Limits (config.yaml → `limits`)
 
 - Concurrency `max_parallel` (default 4); one running step per project at a time.
-- Step timeout `step_timeout_sec`; validation command timeout `check_timeout_sec`.
+- Step timeout `step_timeout_sec` (default 1 h; a planner can ask for more per step with `expected_minutes`, about
+  1.5x). A step that runs out of time resumes the same session (same provider) up to `timeout_retries` times with
+  double the time each time, capped by `step_timeout_max_sec`; it never starts over in a fresh session for a
+  timeout. Validation command timeout `check_timeout_sec`.
 - `max_fix_rounds` (default 3) review/check bounces, then escalate as Remaining.
 - `max_replans` (default 2) plan expansions after discoveries.
 - Daily runs per provider: hard stop at 100%, user sign-off at `warn_at_percent` (80%).

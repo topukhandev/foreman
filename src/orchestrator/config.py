@@ -48,7 +48,9 @@ providers:
 
 limits:
   max_parallel: 4          # concurrent worker sessions
-  step_timeout_sec: 1200   # one worker step
+  step_timeout_sec: 3600   # one worker step (first attempt); planners can ask for more per step
+  step_timeout_max_sec: 14400   # ceiling for any single attempt
+  timeout_retries: 3       # after a timeout the same session is resumed, with double the time, this many times
   brain_timeout_sec: 600   # planning / review calls
   check_timeout_sec: 900   # one validation command
   max_fix_rounds: 3        # review/check bounces before escalating
@@ -81,7 +83,9 @@ class ProviderSettings:
 @dataclass
 class Limits:
     max_parallel: int = 4
-    step_timeout_sec: int = 1200
+    step_timeout_sec: int = 3600
+    step_timeout_max_sec: int = 14400
+    timeout_retries: int = 3
     brain_timeout_sec: int = 600
     check_timeout_sec: int = 900
     max_fix_rounds: int = 3

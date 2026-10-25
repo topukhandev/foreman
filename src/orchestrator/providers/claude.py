@@ -8,7 +8,7 @@ import re
 from typing import List
 
 from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt,
-                                         SessionInfo, tool_line)
+                                         SessionInfo, stream_session_id, tool_line)
 
 READ_TOOLS = ["Read", "Grep", "Glob", "LS",
               "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)", "Bash(git show *)",
@@ -66,8 +66,9 @@ class ClaudeProvider(Provider):
 
     def run(self, req: RunRequest) -> RunResult:
         code, out, err, dur, timed_out = self._exec(self.build_command(req), req)
-        if timed_out:
-            return RunResult(False, error=f"timed out after {req.timeout}s", duration=dur, raw=out)
+        if timed_out:  # verified: the first stream line carries session_id, and `--resume` keeps that id
+            return RunResult(False, error=f"timed out after {req.timeout}s", session_id=stream_session_id(out),
+                             duration=dur, raw=out)
         payload = {}
         for line in reversed(out.strip().splitlines()):
             try:

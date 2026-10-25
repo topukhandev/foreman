@@ -628,6 +628,7 @@ class Engine:
                 "depends_on": [ids[d] for d in s.get("depends_on", []) if d in ids],
                 "read_projects": [r.name for r in reads if r and r.name != proj.name],
                 "status": "pending", "attempts": 0, "provider": None, "session_id": None, "summary": "",
+                "expected_min": max(0, min(int(s.get("expected_minutes") or 0), 600)),
             })
         for c in plan.get("checks", []):
             proj = self.registry.find(c.get("project", ""))
@@ -742,14 +743,21 @@ class Engine:
             if warn:
                 self._notice(task, warn)
             step["attempts"] += 1
+            timeout = self._step_timeout(step)
+            attempt_prompt = prompt
+            if step.get("timeouts"):  # the previous attempt ran out of time: carry on, don't start over
+                resume = bool(session_id) and not fork
+                attempt_prompt = self._continue_prompt(step, timeout) if resume else \
+                    prompt + "\n\n" + self._continue_prompt(step, timeout, fresh=True)
+                why = "continuing the same session after a timeout" if resume else "retrying after a timeout"
             self._say(task, f"{step['kind']} {step['project']} via {provider.name}" + (f" ({why})" if why else ""))
             self.store.event(task["id"], "step_start", step=step["id"], provider=provider.name, project=step["project"],
                              step_kind=step["kind"], session=session_id, fork=fork, why=why)
             mode = self._mode(task)
             result = provider.run(RunRequest(
                 web=bool(mode and mode.web and step["kind"] == "investigate"),
-                prompt=prompt, cwd=proj.path, mode="write" if step["kind"] == "implement" else "read",
-                session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=self.cfg.limits.step_timeout_sec,
+                prompt=attempt_prompt, cwd=proj.path, mode="write" if step["kind"] == "implement" else "read",
+                session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=timeout,
                 extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
                 + image_dirs(task["request"]),
                 visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
@@ -767,15 +775,49 @@ class Engine:
                 break  # the user stopped the task: not a provider failure
             self._record_failure(provider.name, result.error or "")
             self.store.event(task["id"], "step_failed", step=step["id"], provider=provider.name, error=result.error)
+            if (result.error or "").startswith("timed out") and step.get("timeouts", 0) < self.cfg.limits.timeout_retries:
+                # Running out of time is not a stale session: resume the same one (same provider) with more time.
+                step["timeouts"] = step.get("timeouts", 0) + 1
+                sid = result.session_id or session_id
+                if sid:
+                    step["provider"], step["session_id"] = provider.name, sid
+                    step.pop("no_reuse", None)
+                tried.remove(provider.name)
+                more = self._step_timeout(step)
+                self.store.event(task["id"], "step_timeout", step=step["id"], provider=provider.name, session=sid,
+                                 next_timeout=more)
+                self._notice(task, f"{provider.name} ran out of time on {step['project']} ({step['id']}); continuing "
+                                   f"{'the same session' if sid else 'in a new session (none to resume)'} with up to "
+                                   f"{more // 60} min")
+                continue
             self._notice(task, f"{provider.name} failed on {step['project']}: {short(result.error or '', 160)}")
-            # A failed resume may be a stale session: retry the same provider fresh before moving on.
-            if session_id and provider.name not in step.setdefault("fresh_retry", []):
+            # A failed resume may be a stale session: retry the same provider fresh before moving on (a timeout is not
+            # that; once its retries are used up the step moves on to the next provider).
+            if session_id and provider.name not in step.setdefault("fresh_retry", []) \
+                    and not (result.error or "").startswith("timed out"):
                 step["fresh_retry"].append(provider.name)
                 tried.remove(provider.name)
                 step["session_id"] = None
                 step["no_reuse"] = True
         with self._lock:
             self._record_step(task, step, proj, result, before, head_before)
+
+    def _step_timeout(self, step: Dict[str, Any]) -> int:
+        """Seconds for the step's next attempt: the configured time, or about 1.5x what the planner expects for a long
+        step, doubled for every timeout so far, never above the configured ceiling."""
+        lim = self.cfg.limits
+        base = max(lim.step_timeout_sec, min(int(step.get("expected_min") or 0) * 90, lim.step_timeout_max_sec))
+        return int(min(base * 2 ** step.get("timeouts", 0), max(lim.step_timeout_max_sec, base)))
+
+    @staticmethod
+    def _continue_prompt(step: Dict[str, Any], timeout: int, fresh: bool = False) -> str:
+        earlier = ("A previous attempt at this step ran out of time before it reported. Check what already exists on disk "
+                   "and in background jobs; do not redo finished work or restart downloads. " if fresh else
+                   "Foreman's time limit cut your previous run of this step short before you reported a result. Continue "
+                   "the SAME step in this session: check what already exists on disk and in your background jobs, do not "
+                   "redo finished work or restart downloads, and finish what is left. ")
+        return (earlier + f"You now have about {timeout // 60} minutes. Keep long jobs in the background and poll them "
+                "briefly, and report the final result in the required format as soon as the step is done.")
 
     def _record_step(self, task, step, proj, result, before, head_before) -> None:
         if not result or not result.ok:
@@ -876,6 +918,10 @@ class Engine:
             if step["kind"] == "implement" else
             "- Read-only step: do not create, modify or delete files.\n"
             "- Answer precisely with file references; stop as soon as you have enough evidence.\n")
+        rules += (f"- Time: about {self._step_timeout(step) // 60} minutes for this step. Start anything long (downloads, big "
+                  "scans, builds) in the background (nohup/setsid, output to a log file) and poll it with short sleeps "
+                  "instead of one blocking command, and keep notes on disk of what is done. If time runs out, Foreman "
+                  "resumes this same session.\n")
         if mode and mode.writes == "tests" and step["kind"] == "implement":
             rules += "- QA: change TEST files only. Never change application code; report bugs as findings instead.\n"
         if step["kind"] == "investigate":
