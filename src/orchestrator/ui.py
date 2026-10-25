@@ -350,6 +350,10 @@ class Scrollback:
             self._anchor = None
         return True
 
+    def live_top(self) -> int:
+        """Screen row (0-based) of the live area's top rule: the rows above are the transcript."""
+        return len(self._visible())
+
     def toast(self, message: str) -> None:
         """A one-line notice in place of the live area's hint (it goes away with the next key)."""
         if self._live:
@@ -495,6 +499,9 @@ class LineEditor:
         self.image_dir = image_dir or os.path.join(os.path.expanduser("~"), ".foreman", "images")
         self.attach = Attachments()
         self.notice = ""                    # one-line message in place of the hint until the next key
+        self.span: Optional[tuple] = None   # (start, end) of the part of the input selected with the mouse; end exclusive
+        self._anchor: Optional[int] = None
+        self._dragged = False
         self.history_path = history_path
         self.history: List[str] = []
         if history_path and os.path.exists(history_path):
@@ -530,6 +537,7 @@ class LineEditor:
         new[6][termios.VMIN], new[6][termios.VTIME] = 1, 0
         dec = codecs.getincrementaldecoder("utf-8")("ignore")
         self.buf, self.cur, self.sel, self.row, self.notice = "", 0, 0, 0, ""
+        self.span = self._anchor = None
         self.hist_i = len(self.history)
         self.hints = (hint_left, hint_right)
         write(c("─" * width(), ACCENT_DEEP) + "\n\033[?2004h")
@@ -577,6 +585,8 @@ class LineEditor:
     # key handling: returns (remaining input, result-or-None); remaining None = incomplete escape sequence
     def _key(self, s: str):
         self.notice = ""
+        if not s.startswith("\x1b[<"):
+            self.span = None  # any key ends a mouse selection
         menu = self.matches(self.buf)
         if s.startswith("\x1b[200~"):
             end = s.find("\x1b[201~")
@@ -595,7 +605,7 @@ class LineEditor:
                     return "", None
                 return (None, None) if PARTIAL_RE.fullmatch(s) else (s[1:], None)
             seq, rest = m.group(1), s[len(m.group(0)):]
-            if SCROLL.mouse(m.group(0)):
+            if self._mouse(m.group(0)) or SCROLL.mouse(m.group(0)):
                 return rest, None
             amount = scroll_amount(m.group(0))
             if amount is not None:  # mouse wheel / PgUp / PgDn scroll the transcript; other clicks are ignored
@@ -676,6 +686,50 @@ class LineEditor:
     def _insert(self, text: str) -> None:
         self.buf = self.buf[:self.cur] + text + self.buf[self.cur:]
         self.cur += len(text)
+
+    def _index_at(self, row: int, x: int) -> int:
+        """Index in the input text of the character under screen column x on input row `row`."""
+        col, shown = row * width() + x - 2, self.buf.replace("\n", "⏎")  # 2 = the "> " prompt
+        used = 0
+        for i, ch in enumerate(shown):
+            used += char_width(ch)
+            if col < used:
+                return i
+        return len(shown)
+
+    def _mouse(self, key: str) -> bool:
+        """Select text typed in the input box: press, drag, release copies it (like the transcript)."""
+        m = MOUSE_FULL_RE.fullmatch(key)
+        if not (m and SCROLL.select_enabled and self.buf):
+            return False
+        button, x, y, kind = int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4)
+        if button >= 64 or button & 3:
+            return False
+        top = SCROLL.live_top() + 1
+        rows = max(1, -(-(2 + text_width(self.buf.replace("\n", "⏎"))) // width()))
+        if kind == "M" and not button & 32:  # press
+            if not top <= y < top + rows:
+                self._anchor = None
+                return False
+            self._anchor, self.span, self._dragged = self._index_at(y - top, x), None, False
+            return True
+        if self._anchor is None:
+            return False
+        here = self._index_at(max(0, min(y - top, rows - 1)), x)
+        first, last = min(self._anchor, here), min(len(self.buf), max(self._anchor, here) + 1)
+        for chip in self.attach.known(self.buf):  # a chip is selected whole
+            if chip.start() < last and chip.end() > first:
+                first, last = min(first, chip.start()), max(last, chip.end())
+        if kind == "M":  # drag
+            self.span, self._dragged = (first, last), True
+        else:  # release: a plain click selects nothing
+            if self._dragged and last > first:
+                self.span = (first, last)
+                self.notice = copy_message(self.attach.expand(self.buf[first:last]))
+            else:
+                self.span = None
+            self._anchor = None
+        return True
 
     def _chip_start(self, pos: int) -> Optional[int]:
         """Start of the chip that ends exactly at pos (Backspace and ← treat a chip as one character)."""
@@ -760,7 +814,13 @@ class LineEditor:
         text_rows = max(1, -(-total // cols))
         below = self._below()
         up = f"\033[{self.row}A" if self.row and not fresh else ""
-        styled = CHIP_RE.sub(lambda m: c(m.group(0), ACCENT) if m.group(0) in self.attach.items else m.group(0), shown)
+        def chips(text: str) -> str:
+            return CHIP_RE.sub(lambda m: c(m.group(0), ACCENT) if m.group(0) in self.attach.items else m.group(0), text)
+        if self.span:
+            a, b = self.span
+            styled = chips(shown[:a]) + "\033[7m" + shown[a:b] + "\033[27m" + chips(shown[b:])
+        else:
+            styled = chips(shown)
         out = [up, "\r", c(">", BOLD, ACCENT), " ", styled, "" if total % cols == 0 else "\033[K", "\r\n",
                c("─" * cols, ACCENT_DEEP), "\r\n", "\r\n".join(eol(b, cols) for b in below), "\033[J"]
         target = 2 + text_width(shown[: self.cur])

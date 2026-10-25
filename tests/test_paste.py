@@ -212,6 +212,46 @@ class EditorChipsTest(unittest.TestCase):
             self.assertEqual(e.buf, shots[0] + " ")
             self.assertFalse(os.path.exists(shots[1]))
 
+    def _select(self, e, start_x, end_x, y=5, copied=None):
+        """Drag over the input row; the live area's top rule is on screen row 3 (1-based 4), so the input is row 5."""
+        from unittest import mock
+        copied = [] if copied is None else copied
+        with mock.patch.object(ui.SCROLL, "live_top", return_value=3), mock.patch("orchestrator.ui.width", return_value=40), \
+                mock.patch("orchestrator.ui.copy_text", side_effect=lambda t: copied.append(t) or True), \
+                mock.patch.object(ui.SCROLL, "select_enabled", True), mock.patch.object(ui.SCROLL, "_live", [e]):
+            for key in (f"\x1b[<0;{start_x};{y}M", f"\x1b[<32;{end_x};{y}M", f"\x1b[<0;{end_x};{y}m"):
+                e._key(key)
+        return copied
+
+    def test_text_typed_in_the_input_can_be_selected_and_copied(self):
+        e = self.editor()
+        e._insert("hello big world")
+        copied = self._select(e, 3 + 6, 3 + 8)  # columns of "big" (after the "> " prompt)
+        self.assertEqual(copied, ["big"])
+        self.assertEqual(e.span, (6, 9))
+        self.assertEqual(e.notice, "3 characters copied to clipboard")
+        self.assertIn("\033[7mbig\033[27m", e._frame())
+        e._key("x")
+        self.assertIsNone(e.span, "the next key ends the selection")
+
+    def test_selecting_a_chip_copies_the_text_behind_it(self):
+        e = self.editor()
+        e._paste(lines(30))
+        copied = self._select(e, 3, 3 + 8)
+        self.assertEqual(copied, [lines(30)])
+
+    def test_a_click_in_the_input_copies_nothing(self):
+        e = self.editor()
+        e._insert("hello")
+        self.assertEqual(self._select(e, 5, 5)[:0], [])
+        copied = []
+        from unittest import mock
+        with mock.patch.object(ui.SCROLL, "live_top", return_value=3), mock.patch.object(ui.SCROLL, "select_enabled", True), \
+                mock.patch("orchestrator.ui.copy_text", side_effect=lambda t: copied.append(t)):
+            e._key("\x1b[<0;5;5M")
+            e._key("\x1b[<0;5;5m")
+        self.assertEqual((copied, e.span), ([], None))
+
     def test_overlong_paste_sets_a_notice_that_clears_on_the_next_key(self):
         e = self.editor()
         e._paste(lines(2500))

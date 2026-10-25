@@ -59,6 +59,8 @@ This opens a chat like `claude` or `agy`. You type in plain language:
 - "what's the status of my task?"
 - "continue"
 
+Press Esc twice to stop a running task (Ctrl+C offers stop or keep running in the background).
+
 While a task runs you see who is working (`◜ Working on orders-api with claude… (27s)`) and what it is doing
 live: `◆ Implement(orders-api) · claude` with `╰ Read(server.js)`, `╰ Edit(server.js)` underneath, then checks
 and review. Typing `/` opens a command menu (↑/↓, Tab or Enter). Providers that fail to log in (for example
@@ -83,7 +85,7 @@ with ↑/↓ and restores the transcript and its context; `foreman -c` continues
 its own screen like vim, so your terminal is restored as it was when you exit. The mouse wheel or PgUp/PgDn
 scroll the whole conversation (back to the welcome box) while the input box stays at the bottom; typing or Esc
 returns to the latest output, and ↑/↓ stay for your earlier messages. Select text with the mouse (press, drag,
-release) and it is copied to the clipboard, with a "N characters copied to clipboard" note (needs `xclip`,
+release), in the conversation or in what you are typing, and it is copied to the clipboard, with a "N characters copied to clipboard" note (needs `xclip`,
 `wl-clipboard` or `pbcopy`, or `python3-gi`; over SSH it uses the terminal's own clipboard escape). Turn this off with
 `foreman config copy-on-select off` (`ui.copy_on_select`), then hold Shift to select with the terminal itself.
 `ui.alt_screen: false` in `~/.foreman/config.yaml` uses the terminal's normal scrollback instead.

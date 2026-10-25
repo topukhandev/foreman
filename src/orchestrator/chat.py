@@ -47,7 +47,7 @@ Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
   /mode  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
-Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it (it says how many characters);
+Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters). Esc twice stops a running task;
 `foreman config copy-on-select off` gives selection back to the terminal (then hold Shift).
 While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
 ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2}  # not "one": "the second one"
