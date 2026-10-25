@@ -1,52 +1,32 @@
-# AGENTS.md — Manager & Worker Operational Rules
+# AGENTS.md: rules for agents working on and inside Foreman
 
-This document specifies the operational rules for the Front-Desk Manager and Worker agents within the Foreman / Quorum Orchestrator.
+## Working on this codebase
 
----
+- Python ≥ 3.9, one dependency (`pyyaml`). Tests: `python3 -m unittest discover tests` (must stay green and fast;
+  use `tests/helpers.py` workspaces and the scripted `MockProvider`, never real CLIs, in unit tests).
+- Keep the split described in `README_ARCHITECTURE.md`: deterministic state/safety in `registry.py`,
+  `store.py`, `engine.py`; AI prompts and schemas only in `brain.py`; CLI specifics only in `providers/`.
+- Interfaces (`cli.py`, `mcp_server.py`) stay thin. New behaviour goes into the engine so every front end
+  gets it.
+- Don't add UI layers (visual dashboards, voice, custom line editors) unless the user asks. Visible
+  terminal windows are supported only through `terminal.py`.
+- Verify provider behaviour against the installed CLI before changing an adapter, and record what was verified
+  in the adapter's docstring.
 
-## 1. Front-Desk Manager Rules
+## Rules Foreman gives worker sessions (enforced by the engine)
 
-### Principle 1: One Front Desk
-- The user interacts **only** with the Manager agent.
-- AI CLI workers never communicate with the user directly.
-- The manager aggregates results and delivers **concise, high-signal final reports**.
+1. Edit only inside the step's project; related projects are read-only context.
+2. Never commit, push, reset, stash, clean or switch branches. HEAD movement is reported as a violation.
+3. Investigate steps are read-only; any file change is reported.
+4. Don't invent business rules: return a `business` question instead.
+5. Report discovered cross-project dependencies with evidence; they become `learned` relations.
+6. Fix small related problems in place; only major, out-of-scope items become suggestions to the user.
 
-### Principle 2: Memory & Context Economy
-- The manager reads **only `hub/state.md`** by default.
-- Never load all files or raw logs into the manager context.
-- Open individual `hub/tasks/<id>.md` files only when investigating a specific task or blocker.
-- Maintain `hub/state.md` at **one single page** maximum.
+## Limits (config.yaml → `limits`)
 
-### Principle 3: Structured Workflow Loop
-When the user specifies a goal:
-1. **Plan**: Formulate a complete task checklist via a planner worker (covering scope, risks, data sources, legal/financial costs).
-2. **Critique**: Submit the plan to an adversarial critic session to expose blind spots and missing assumptions.
-3. **Execute**: Dispatch tasks to worker sessions (`agy -p`, `claude -p`, etc.).
-4. **Independent Review**: Every output must be reviewed and approved by a different model/provider, or an isolated clean session.
-5. **Report**: Give the user a short, readable executive summary. Never overwhelm the user with raw output.
-
-### Principle 4: User Interruption Threshold
-Interrupt the user **only** when:
-- A blocker requires user manual intervention (e.g. `claude login`, API key configuration, paid tier approval).
-- A genuine strategic decision or trade-off requires human choice.
-- Budget Guard issues an 80% daily quota warning requiring user sign-off to proceed.
-
----
-
-## 2. Worker Agent Rules
-
-1. **Scoped Execution**: Workers operate strictly inside the target project directory.
-2. **Standard Message Protocol**:
-   - `assign`: Received from manager with prompt, context, and role.
-   - `result`: Emitted to manager upon task execution.
-   - `review`: Evaluated by independent reviewer against acceptance criteria.
-   - `revise`: Re-routed back to worker if reviewer rejects output (subject to loop limit).
-3. **No Direct User Prompts**: Workers must never ask the user questions in stdin; they return structured outputs or flags to the hub.
-
----
-
-## 3. Budget Guard Enforcements (Deterministic Python)
-- **Daily Runs**: Tracked per provider; hard cutoff at 100% with warning at 80%.
-- **Concurrency**: Up to 10-15 concurrent workers globally (default: 10), dynamically governed by deterministic System Resource Guard (RAM & CPU checks).
-- **Task Timeout**: 300 seconds default.
-- **Loop Threshold**: Maximum 3 review bounces before halting execution and escalating to manager as a blocker.
+- Concurrency `max_parallel` (default 4); one running step per project at a time.
+- Step timeout `step_timeout_sec`; validation command timeout `check_timeout_sec`.
+- `max_fix_rounds` (default 3) review/check bounces, then escalate as Remaining.
+- `max_replans` (default 2) plan expansions after discoveries.
+- Daily runs per provider: hard stop at 100%, user sign-off at `warn_at_percent` (80%).
+- The user is notified once per task run, when it finishes.

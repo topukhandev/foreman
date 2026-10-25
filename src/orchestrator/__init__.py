@@ -1,7 +1,3 @@
-"""
-Orchestrator (Foreman / Quorum)
-A local, cross-platform AI orchestrator coordinating AI CLI workers
-via a file-based hub and deterministic Python guardrails.
-"""
+"""Foreman: a provider-agnostic orchestrator for AI coding sessions across related projects."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

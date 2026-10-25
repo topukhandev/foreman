@@ -1,229 +1,175 @@
-"""Configuration loader, validator, and setup detection for Orchestrator."""
+"""Global configuration (~/.foreman/config.yaml). One config per machine, shared by every project."""
 
-from dataclasses import dataclass, field
 import os
-import platform
-import shutil
-import socket
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
 import yaml
 
+DEFAULT_CONFIG = """\
+# Foreman configuration (machine-local; never commit).
+# Directories whose child folders are treated as projects.
+roots:
+  - ~/Desktop
+  - ~/projects
+  - /var/www/projects
 
-@dataclass
-class ProviderConfig:
-    name: str
-    enabled: bool = True
-    tier: str = "paid"
-    command: str = ""
-    roles: List[str] = field(default_factory=list)
-    limits: Dict[str, Any] = field(default_factory=dict)
-    verified: bool = False
-    verification_error: Optional[str] = None
+# Provider used for the orchestrator's own reasoning (triage, planning, review).
+brain: claude
 
-
-@dataclass
-class BudgetConfig:
-    max_parallel: int = 10
-    max_time_per_task_sec: int = 600
-    max_retries: int = 3
-    warn_at_percent: int = 80
-    loop_detect_threshold: int = 3
-    max_files_per_project: int = 1000
-    max_project_size_mb: int = 500
-
-
-@dataclass
-class RoutingConfig:
-    reviewer_must_differ_from_builder: bool = True
-    fallback: str = "any_enabled"
-
-
-@dataclass
-class OrchestratorConfig:
-    machine: str = ""
-    os: str = "auto"
-    providers: Dict[str, ProviderConfig] = field(default_factory=dict)
-    routing: RoutingConfig = field(default_factory=RoutingConfig)
-    budget: BudgetConfig = field(default_factory=BudgetConfig)
-    default_provider: str = ""
-    visual_terminal: bool = True
-    effort: str = "medium"
-
-
-DEFAULT_PROVIDERS_TEMPLATE = """# Orchestrator Local Providers Configuration
-# Machine-specific settings - do not sync across different machines.
-machine: "{hostname}"
-os: auto
-
+# Worker preference order. The first available provider is used unless a step needs another.
 providers:
-  antigravity_cli:
+  claude:
     enabled: true
-    tier: paid
-    command: "agy -p"
-    roles: [planner, critic, coder, researcher, reviewer]
-    limits:
-      max_runs_per_day: 50
-      max_parallel: 10
-
-  claude_code:
-    enabled: false
-    tier: paid
-    command: "claude -p"
-    roles: [planner, critic, coder, reviewer]
-    limits:
-      max_runs_per_day: 50
-      max_parallel: 10
-
+    command: claude
+    model: null          # worker model (null = CLI default)
+    brain_model: null    # model for planning/review (null = CLI default)
+    max_runs_per_day: 300
   opencode:
-    enabled: false
-    tier: free
-    command: "opencode run"
-    roles: [bulk, researcher]
-    limits:
-      max_runs_per_day: 100
-      max_parallel: 10
+    enabled: true
+    command: opencode
+    model: null
+    max_runs_per_day: 300
+  antigravity:
+    enabled: true
+    command: agy
+    model: null
+    max_runs_per_day: 300
 
-  mock:
-    enabled: false
-    tier: free
-    command: "mock"
-    roles: [planner, critic, coder, researcher, reviewer]
-    limits:
-      max_runs_per_day: 1000
-      max_parallel: 10
+limits:
+  max_parallel: 4          # concurrent worker sessions
+  step_timeout_sec: 1200   # one worker step
+  brain_timeout_sec: 600   # planning / review calls
+  check_timeout_sec: 900   # one validation command
+  max_fix_rounds: 3        # review/check bounces before escalating
+  max_replans: 2           # plan expansions after new dependencies are found
+  warn_at_percent: 80      # daily-run warning threshold (needs sign-off)
 
-routing:
-  reviewer_must_differ_from_builder: true
-  fallback: any_enabled
+ui:
+  display: terminal        # terminal = show workers in visible terminal windows; headless = under the hood
+  notify: true             # one desktop notification when a task run finishes (never mid-run)
+  alt_screen: true         # chat uses its own screen; your terminal is restored as it was on exit
 
-budget:
-  max_parallel: 10
-  max_time_per_task_sec: 600
-  max_retries: 3
-  warn_at_percent: 80
-  loop_detect_threshold: 3
-  max_files_per_project: 1000
-  max_project_size_mb: 500
+sessions:
+  reuse: fork              # fork | off  - continue context from your recent sessions
+  reuse_max_age_hours: 48
 """
 
 
-def detect_os() -> str:
-    """Return normalized OS string: linux, darwin, or windows."""
-    sys_name = platform.system().lower()
-    if "darwin" in sys_name or "mac" in sys_name:
-        return "darwin"
-    if "windows" in sys_name:
-        return "windows"
-    return "linux"
+@dataclass
+class ProviderSettings:
+    name: str
+    enabled: bool = True
+    command: str = ""
+    model: Optional[str] = None
+    brain_model: Optional[str] = None
+    max_runs_per_day: int = 300
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
-from orchestrator.finder import find_tool_executable
+@dataclass
+class Limits:
+    max_parallel: int = 4
+    step_timeout_sec: int = 1200
+    brain_timeout_sec: int = 600
+    check_timeout_sec: int = 900
+    max_fix_rounds: int = 3
+    max_replans: int = 2
+    warn_at_percent: int = 80
 
 
-def resolve_command_binary(command_str: str) -> Optional[str]:
-    """Extract binary name from command string and check if it exists in PATH, NVM, or user dirs."""
-    parts = command_str.strip().split()
-    if not parts:
-        return None
-    bin_name = parts[0]
-    if bin_name.lower() == "mock":
-        return "mock"
-    return find_tool_executable(bin_name)
+@dataclass
+class Config:
+    home: str
+    roots: List[str]
+    brain: str
+    providers: Dict[str, ProviderSettings]
+    limits: Limits
+    reuse_sessions: str = "fork"
+    reuse_max_age_hours: int = 48
+    display: str = "terminal"
+    notify: bool = True
+    alt_screen: bool = True
+
+    @property
+    def provider_order(self) -> List[str]:
+        return [n for n, p in self.providers.items() if p.enabled]
 
 
-def init_default_config_file(target_path: str) -> None:
-    """Create default providers.yaml if not present."""
-    if os.path.exists(target_path):
-        return
-    hostname = socket.gethostname() or "local-pc"
-    content = DEFAULT_PROVIDERS_TEMPLATE.format(hostname=hostname)
-    with open(target_path, "w", encoding="utf-8") as f:
-        f.write(content)
+def foreman_home() -> str:
+    return os.path.abspath(os.path.expanduser(os.environ.get("FOREMAN_HOME", "~/.foreman")))
 
 
-def load_config(config_path: str) -> OrchestratorConfig:
-    """Load and validate providers.yaml, resolving binary paths and OS."""
-    if not os.path.exists(config_path):
-        init_default_config_file(config_path)
-
-    with open(config_path, "r", encoding="utf-8") as f:
+def load_config(home: Optional[str] = None) -> Config:
+    home = home or foreman_home()
+    os.makedirs(home, exist_ok=True)
+    path = os.path.join(home, "config.yaml")
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(DEFAULT_CONFIG)
+    with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
-    current_os = detect_os() if data.get("os", "auto") == "auto" else data.get("os", "auto")
-    machine = data.get("machine") or socket.gethostname() or "local-pc"
-
-    # Routing
-    r_data = data.get("routing", {})
-    routing = RoutingConfig(
-        reviewer_must_differ_from_builder=r_data.get("reviewer_must_differ_from_builder", True),
-        fallback=r_data.get("fallback", "any_enabled")
-    )
-
-    # Budget
-    b_data = data.get("budget", {})
-    budget = BudgetConfig(
-        max_parallel=b_data.get("max_parallel", 10),
-        max_time_per_task_sec=b_data.get("max_time_per_task_sec", 300),
-        max_retries=b_data.get("max_retries", 3),
-        warn_at_percent=b_data.get("warn_at_percent", 80),
-        loop_detect_threshold=b_data.get("loop_detect_threshold", 3),
-        max_files_per_project=b_data.get("max_files_per_project", 1000),
-        max_project_size_mb=b_data.get("max_project_size_mb", 500)
-    )
-
-    # Providers
-    providers: Dict[str, ProviderConfig] = {}
-    p_data = data.get("providers", {})
-
-    for p_name, p_info in p_data.items():
-        enabled = bool(p_info.get("enabled", False))
-        cmd = p_info.get("command", "").strip()
-        roles = p_info.get("roles", [])
-        tier = p_info.get("tier", "free")
-        limits = p_info.get("limits", {})
-
-        verified = False
-        verr = None
-
-        if enabled:
-            if not cmd:
-                enabled = False
-                verr = "No command specified"
-            else:
-                bin_path = resolve_command_binary(cmd)
-                if bin_path:
-                    verified = True
-                else:
-                    enabled = False
-                    parts = cmd.split()
-                    bin_name = parts[0] if parts else cmd
-                    verr = f"Command '{bin_name}' not found in PATH"
-
-        providers[p_name] = ProviderConfig(
-            name=p_name,
-            enabled=enabled,
-            tier=tier,
-            command=cmd,
-            roles=roles,
-            limits=limits,
-            verified=verified,
-            verification_error=verr
+    providers: Dict[str, ProviderSettings] = {}
+    if not data.get("providers"):  # a hand-written config without the section keeps the default providers
+        data["providers"] = yaml.safe_load(DEFAULT_CONFIG)["providers"]
+    for name, p in data["providers"].items():
+        p = p or {}
+        known = {"enabled", "command", "model", "brain_model", "max_runs_per_day"}
+        providers[name] = ProviderSettings(
+            name=name,
+            enabled=bool(p.get("enabled", True)),
+            command=str(p.get("command") or name),
+            model=p.get("model"),
+            brain_model=p.get("brain_model"),
+            max_runs_per_day=int(p.get("max_runs_per_day", 300)),
+            extra={k: v for k, v in p.items() if k not in known},
         )
 
-    default_p = str(data.get("default_provider", "")).strip()
-    runtime_data = data.get("runtime", {})
-    vis_term = bool(runtime_data.get("visual_terminal", data.get("visual_terminal", True)))
-    effort_val = str(runtime_data.get("effort", data.get("effort", "medium"))).lower().strip()
-    if effort_val not in ("low", "medium", "high"):
-        effort_val = "medium"
-
-    return OrchestratorConfig(
-        machine=machine,
-        os=current_os,
+    lim = data.get("limits") or {}
+    limits = Limits(**{k: int(v) for k, v in lim.items() if k in Limits.__dataclass_fields__})
+    sess = data.get("sessions") or {}
+    ui = data.get("ui") or {}
+    roots = [os.path.abspath(os.path.expanduser(r)) for r in (data.get("roots") or [])]
+    return Config(
+        home=home,
+        roots=roots,
+        brain=str(data.get("brain") or "claude"),
         providers=providers,
-        routing=routing,
-        budget=budget,
-        default_provider=default_p,
-        visual_terminal=vis_term,
-        effort=effort_val
+        limits=limits,
+        reuse_sessions=str(sess.get("reuse", "fork")),
+        reuse_max_age_hours=int(sess.get("reuse_max_age_hours", 48)),
+        display="headless" if str(ui.get("display", "terminal")).lower() == "headless" else "terminal",
+        notify=bool(ui.get("notify", True)),
+        alt_screen=bool(ui.get("alt_screen", True)),
     )
+
+
+def set_first_provider(home: str, name: str) -> None:
+    """Move a provider to the front of the worker preference order."""
+    path = os.path.join(home, "config.yaml")
+    load_config(home)
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    provs = data.get("providers") or {}
+    if name in provs:
+        data["providers"] = {name: provs[name], **{k: v for k, v in provs.items() if k != name}}
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# Foreman configuration (machine-local; never commit).\n")
+            yaml.safe_dump(data, f, sort_keys=False)
+
+
+def set_option(home: str, dotted_key: str, value) -> None:
+    """Update one config value in place (e.g. `ui.display`), preserving the rest of the file."""
+    path = os.path.join(home, "config.yaml")
+    load_config(home)
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    node = data
+    keys = dotted_key.split(".")
+    for k in keys[:-1]:
+        node = node.setdefault(k, {})
+    node[keys[-1]] = value
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# Foreman configuration (machine-local; never commit).\n")
+        yaml.safe_dump(data, f, sort_keys=False)

@@ -1,219 +1,72 @@
-# Orchestrator — Architecture & Commands Reference
-
-> **Project Codename:** Foreman / Quorum  
-> **Install:** `pip install -e .` (from repo root)  
-> **Entry Point:** `orchestrator` (or `python -m orchestrator.cli`)
-
----
-
-## High-Level Architecture
+# Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        User / Manager Agent                     │
-│  (Interactive Shell  •  MCP Client  •  Direct API)              │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    OrchestratorEngine (src/engine.py)           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
-│  │   Router    │  │  Budget     │  │    Hub      │              │
-│  │ (role→prov) │  │  Guard      │  │ (FS memory) │              │
-│  └─────────────┘  └─────────────┘  └─────────────┘              │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              ▼               ▼               ▼
-       ┌────────────┐  ┌────────────┐  ┌────────────┐
-       │ Adapter:   │  │ Adapter:   │  │ Adapter:   │
-       │ Antigravity│  │  Claude    │  │  OpenCode  │
-       └────────────┘  └────────────┘  └────────────┘
-              │               │               │
-              ▼               ▼               ▼
-       ┌─────────────────────────────────────────┐
-       │         Your Local AI CLIs              │
-       │  (Subprocess calls, isolated sessions)  │
-       └─────────────────────────────────────────┘
+ Front ends (thin)        CLI (cli.py)        MCP server (mcp_server.py) ◄── Claude Code / Antigravity / Codex …
+                               │                         │  (long tasks run detached: app.spawn_task)
+                               └──────────┬──────────────┘
+                                          ▼
+ Core (engine.py)   request ─► fast path: status / resume (no AI)
+                            └► plan (brain.py) ─► questions? ─► needs_input
+                                   │
+                                   ▼
+                       steps DAG ─ parallel across projects, one session per step
+                                   │   new dependency reported ─► learn relation, re-plan (bounded)
+                                   ▼
+                       validate: checks run by Foreman + diffs + independent review
+                                   │   problems ─► fix rounds in the same sessions (bounded)
+                                   ▼
+                       finalize: state, relations verified, suggestions, report, one notification
+                                          │
+ State (~/.foreman)   registry.py  projects.yaml      projects + relations (declared/discovered/learned)
+                      store.py     tasks/<id>/        task.json, events.jsonl, logs/, report.md
+                      budget.py    budget.json        daily runs per provider
+                                          │
+ Providers            providers/claude.py · antigravity.py · opencode.py   (mock.py for tests)
+                      Capabilities: resume, fork, structured output, session discovery, enforced read-only
 ```
 
----
+## Responsibilities
 
-## Key Modules (src/orchestrator/)
+| Module | Deterministic or AI | Responsibility |
+|---|---|---|
+| `registry.py` | deterministic | Find projects under `roots`; detect stack and test command; discover relations from paths, module/package names and distinctive name mentions; record evidence plus the git HEADs at verification; select a compact context (focus projects, one-hop neighbours, names only for the rest). |
+| `store.py` | deterministic | Task records, append-only event log, raw logs, task lookup (`#7`, words, or most recent in context), suggestions with dedup and dismissal. |
+| `brain.py` | AI | Prompts and JSON schemas for planning, re-planning and review. Read-only, schema-validated, with fallback across providers. |
+| `engine.py` | both | Orchestration loop: scheduling, provider/session choice, budget, check-command allow-list, git guards (HEAD moved = violation; read-only steps that edit are flagged), change detection, fix loop, finalize. |
+| `providers/*` | adapter | One small module per CLI. Builds commands, parses output, discovers sessions. Nothing provider-specific leaks out. |
+| `terminal.py` | adapter | Optional visible terminal windows. Same capture and exit semantics as headless runs. |
+| `report.py` | deterministic | Short reports and status built from the task record, plus the single desktop notification. |
 
-| Module | Responsibility |
-|--------|----------------|
-| `cli.py` | Command dispatch, arg parsing, subcommands |
-| `config.py` | `providers.yaml` load/validate, defaults |
-| `router.py` | Role → provider mapping, fallback, reviewer≠builder |
-| `budget.py` | Daily limits, concurrency, timeouts, 80% warnings |
-| `hub.py` | File-based message bus: inbox/, tasks/, status/, logs/, archive/ |
-| `engine.py` | Orchestrates packs, runs workflow loop (Plan→Critique→Exec→Review) |
-| `adapters/` | Per-CLI wrapper: `base.py`, `opencode.py`, `claude.py`, `antigravity.py`, `mock.py` |
-| `packs/` | Role definitions: `developer.py`, `business_idea.py`, `qa.py` |
-| `wizard.py` | Interactive first-run setup (detects CLIs, writes config) |
-| `doctor.py` | Diagnoses installed tools, reports missing/broken |
-| `repl.py` | Interactive front-desk shell (`orchestrator shell`) |
-| `mcp_server.py` | MCP stdio server for GUI apps (Antigravity desktop) |
-| `progress.py` | Live dashboard rendering for visible workers |
+## Key decisions
 
----
+- **Global state, not per-folder.** Cross-project work needs one place for projects, relations and tasks.
+- **Progressive context.** The planner sees one-line cards for focus projects and their neighbours, only
+  names for unrelated projects, and may open code read-only to settle scope. Workers report new dependencies;
+  the engine records them as `learned` relations and re-plans at most `max_replans` times.
+- **Trust, but verify history.** Relations and task results record git HEADs and file snapshots. Status flags
+  projects that changed since the last run; resume passes those changes to the planner for re-verification.
+- **Session reuse.** Continuity first (same session for fixes), then forking your most recent session in that
+  project (≤ `reuse_max_age_hours`, providers that can fork). Then a new session. Foreman's own planning and
+  review sessions are never mistaken for yours. Providers without fork (agy) only resume sessions Foreman created.
+- **Independent review.** The reviewer is a different provider than the implementer when one is available,
+  otherwise a fresh session.
+- **Validation is Foreman's.** Test commands run as subprocesses with a timeout. Only recognised test/build
+  commands run; destructive patterns are refused and reported.
+- **Git policy.** Workers never commit, push, reset or switch branches (tool-level deny for Claude, prompt
+  policy for all). Any HEAD movement is reported. Changes are measured against a snapshot, so your own
+  uncommitted work isn't attributed to the task.
+- **Asking.** Only business/product questions and the 80% budget sign-off pause a task. Technical choices
+  are recorded as decisions.
 
-## Hub Directory Layout
+## Provider notes (verified)
 
-```
-<project>/
-├── providers.yaml          # Machine-local provider registry (never synced)
-├── hub/
-│   ├── state.md            # Single-page: goal, phase, active tasks, blockers
-│   ├── inbox/              # JSON messages: assign/result/review/revise/question
-│   ├── tasks/<id>.md       # One file per task (checklist, context, results)
-│   ├── status/<id>.json    # {task, worker, state, one_line_summary}
-│   ├── logs/<id>.log       # Full raw worker output (debug only)
-│   └── archive/            # Finished tasks → 1-2 line summaries
-```
+| Provider | Headless | Session reuse | Read-only | Structured output |
+|---|---|---|---|---|
+| Claude Code 2.1 | `claude -p --output-format json` | `--resume` + `--fork-session`; sessions found in `~/.claude/projects/<cwd>` | tool allow/deny lists | `--json-schema` |
+| Antigravity `agy` 1.4 | `agy --output-format json -p=…` | `--conversation=<id>` (no fork); index `~/.gemini/antigravity/conversation_summaries.db` | `--mode plan` + no terminal | `--json-schema` |
+| OpenCode | `opencode run --format json` | `-s` + `--fork`; `opencode session list` | `--agent plan` | prompt + JSON extraction |
 
----
+## Adding a provider
 
-## Commands Quick Reference
-
-```bash
-# ── Setup & Diagnostics ──────────────────────────────────────
-orchestrator init [path]              # Initialize hub + default providers.yaml
-orchestrator setup [path] [--preset]  # Interactive wizard (presets: 1-6, auto, antigravity_only, claude_only, dual_model, free_only, mock)
-orchestrator doctor [path]            # Diagnose CLIs, show enabled/disabled, suggest fixes
-orchestrator status [path]            # Print hub/state.md (current goal, tasks, blockers)
-
-# ── Run Workflows ────────────────────────────────────────────
-orchestrator run "your goal here"     # Run developer pack (default)
-orchestrator run "goal" --pack business_idea
-orchestrator run "goal" --pack qa
-orchestrator run "goal" --mock        # Simulated workers (no real CLIs needed)
-orchestrator run "goal" --visual      # Force visible terminal windows
-orchestrator run "goal" --headless    # Force headless (default if --visual not set)
-
-# ── Interactive & Integration ────────────────────────────────
-orchestrator shell [path]             # Launch front-desk REPL (default if no args)
-orchestrator mcp [--project path]     # Start MCP stdio server for GUI apps
-```
-
----
-
-## Provider Registry (`providers.yaml`)
-
-```yaml
-machine: my-laptop
-os: auto
-providers:
-  antigravity_cli:
-    enabled: true
-    tier: paid
-    command: "antigravity run --non-interactive"
-    roles: [planner, coder, researcher, reviewer]
-    limits: {max_runs_per_day: 50, max_parallel: 2}
-  claude_code:
-    enabled: true
-    tier: paid
-    command: "claude -p"
-    roles: [planner, coder, reviewer]
-  opencode:
-    enabled: true
-    tier: free
-    command: "opencode run"
-    roles: [bulk, researcher]
-routing:
-  reviewer_must_differ_from_builder: true
-  fallback: any_enabled
-```
-
-- **Auto-detected** on first `orchestrator setup`
-- **Per-machine** (never committed)
-- **Role-based routing** — each task role maps to a provider
-- **Reviewer ≠ Builder** enforced by router
-
----
-
-## Role Packs (Workflows)
-
-| Pack | Roles | Use Case |
-|------|-------|----------|
-| `developer` | planner, critic, coder, researcher, reviewer | Feature implementation, refactoring, debugging |
-| `business_idea` | planner, critic, researcher, reviewer | Market research, MVP specs, go-to-market |
-| `qa` | planner, coder, reviewer | Test generation, bug repro, regression suites |
-
-Each pack defines a sequence of tasks with role assignments. The engine dispatches each task to the routed provider.
-
----
-
-## Budget Guard (Hard Limits)
-
-| Limit | Default | Configured In |
-|-------|---------|---------------|
-| Max parallel workers | 10 (dynamically 10–15) | System Resource Guard / `providers.yaml` |
-| Max runs/day per provider | 50 (paid), 20 (free) | `providers.yaml` |
-| Max task runtime | 300s | `budget.py` constant |
-| Max review bounces | 3 | `budget.py` constant |
-| Warn threshold | 80% of any limit | `budget.py` |
-
-At 80%: Manager pauses and asks user: *"Provider X at 80% daily limit. Continue or wait?"*
-
----
-
-## Message Protocol (Hub Inbox)
-
-Each message is a JSON file in `hub/inbox/`:
-
-```json
-{
-  "from": "manager",
-  "to": "worker:opencode:1",
-  "task_id": "task-123",
-  "type": "assign",
-  "body": { "role": "coder", "prompt": "Implement X...", "context": "..." }
-}
-```
-
-Types: `assign`, `result`, `review`, `revise`, `question`
-
----
-
-## Adding a New Provider Adapter
-
-1. Create `src/orchestrator/adapters/your_cli.py` extending `BaseAdapter`
-2. Implement: `run(prompt: str, role: str) -> str`
-3. Register in `src/orchestrator/adapters/__init__.py`
-4. Add to `providers.yaml` with roles & limits
-
----
-
-## Development
-
-```bash
-# Install in dev mode
-pip install -e .
-
-# Run tests
-pytest tests/
-
-# Type check (if configured)
-mypy src/orchestrator
-
-# Lint
-ruff check src/orchestrator
-```
-
----
-
-## Security Notes
-
-- Workers run **inside project directory** (or container if configured)
-- Command allow-list — destructive ops require approval
-- API keys **never** passed to workers (CLI handles auth)
-- Web content / cloned repos treated as **untrusted** (prompt injection risk)
-- All actions logged to `hub/logs/`
-
----
-
-## License
-
-Open source (license TBD). See `orchestrator_blueprint.md` for full spec.
+Write `providers/<name>.py` with a `Provider` subclass (`build_command`, `run`, optional `discover_sessions`,
+honest `capabilities`), register it in `providers/__init__.py`, and add it to `config.yaml`.

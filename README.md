@@ -1,171 +1,108 @@
 # Foreman Orchestrator
 
-> **Local Multi-Agent AI Conductor & Front-Desk Bridge**  
-> Coordinate and automate local AI developer CLIs (**Claude Code**, **Antigravity CLI**, **OpenCode**) with deterministic safety guards, isolated sessions, and 4-agent autonomous workflows.
+One entry point for AI-assisted development across **related projects**. You describe what you want; Foreman
+works out which projects and sessions are involved, runs the work through your AI CLIs (Claude Code,
+Antigravity `agy`, OpenCode), validates the result itself, and gives you a short report.
 
----
+- **Knows your projects.** Discovers projects under your folders and how they relate (UI → API → integration
+  tests, shared modules). Relations carry evidence and are re-verified when code changes.
+- **Scales effort to the request.** "What's the state of my task?" is answered instantly from its records, with no
+  AI call. A question gets one planning call. A cross-project change gets a full plan, parallel workers,
+  checks and review.
+- **Remembers tasks.** Every task records its request, projects, decisions, evidence, sessions and what remains,
+  so "continue the previous task" just works, after re-checking what changed since.
+- **Works with what you already use.** Any MCP-capable tool (Claude Code, the Antigravity app/CLI, Codex, …)
+  can be the front end. Recent sessions are forked so workers inherit your context.
+- **Autonomous where safe, asks where it matters.** Routine technical decisions are made automatically;
+  business rules are asked; workers never commit; validation commands are allow-listed.
 
-## 🌟 Overview
+## Install
 
-Developers today frequently use multiple AI CLI tools on their local machines. However, using them together is fragmented: each tool operates in isolation, manual context-switching slows development, and there is no unified review loop or budget protection.
-
-**Foreman Orchestrator** solves this by providing a unified, local-first conductor:
-- **One Front Desk**: You interact with a single intelligent manager. AI CLI workers execute tasks in the background or in dedicated visual terminal windows.
-- **Autonomous Multi-Agent Sprints**: Every complex feature goes through a rigorous **Plan → Critique → Build → Review** cycle with model diversity (Reviewer ≠ Builder).
-- **System Resource Guard**: Dynamically governs **10–15 concurrent workers** based on real-time RAM, CPU, and Disk metrics to prevent system lockups.
-- **Deterministic Budget Guard**: Enforces daily run quotas, per-task timeouts (300s), and a 3-bounce loop threshold.
-- **Zero Config To Start**: Auto-detects installed CLI binaries (across system paths, NVM, FNM, Volta) and creates a machine-local `providers.yaml`.
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      User / Front-Desk Manager                  │
-│       (Interactive REPL  •  Natural Language  •  MCP Client)   │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              Foreman Engine (src/orchestrator/)                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌────────┐  │
-│  │   Router    │  │System Guard │  │Budget Guard │  │  Hub   │  │
-│  │(role→prov)  │  │ (RAM & CPU) │  │(Limits/Loop)│  │(Memory)│  │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                               │
-               ┌───────────────┼───────────────┐
-               ▼               ▼               ▼
-        ┌────────────┐  ┌────────────┐  ┌────────────┐
-        │  Adapter:  │  │  Adapter:  │  │  Adapter:  │
-        │Antigravity │  │Claude Code │  │  OpenCode  │
-        └────────────┘  └────────────┘  └────────────┘
-               │               │               │
-               ▼               ▼               ▼
-        ┌────────────────────────────────────────────┐
-        │       Local CLI Tools & Desktop Windows    │
-        │   (agy -p  •  claude -p  •  opencode run)  │
-        └────────────────────────────────────────────┘
-```
-
----
-
-## 🚀 Installation & Quick Start
-
-### 1. Requirements
-- Linux or macOS (Python 3.9+)
-- At least one supported AI CLI installed:
-  - **Antigravity CLI (`agy`)**
-  - **Claude Code (`claude`)**
-  - **OpenCode (`opencode` / `opencode-cli`)**
-
-### 2. Install
 ```bash
-git clone https://github.com/your-username/Orcastrator.git
-cd Orcastrator
-pip install -e .
+pip install -e .                 # or run ./orchestrator from the checkout
+orchestrator doctor              # providers, display mode, projects found, MCP registration
+orchestrator mcp install         # register with Claude Code / Antigravity / Codex (whichever are installed)
 ```
 
-### 3. Launch Interactive Shell
+Configuration lives in `~/.foreman/config.yaml` (created on first run): project roots, provider
+preference order, limits, display mode and session reuse.
+
+## Use
+
+### Chat (recommended)
+
 ```bash
+cd ~/Desktop/my-project
 orchestrator
 ```
-*(Running `orchestrator` with no arguments automatically initializes the project hub and launches the interactive REPL).*
 
----
+This opens a chat like `claude` or `agy`. You type in plain language:
 
-## 💬 Interactive REPL & Slash Commands
+- "what's the current state of this project?"
+- "show the currency on the orders page; the API should return it"
+- "what's the status of my task?"
+- "continue"
 
-Inside the Foreman REPL, you can chat in natural language with your active AI worker or trigger specialized commands using `/`:
+While a task runs you see who is working (`◜ Working on orders-api with claude… (27s)`) and what it is doing
+live: `◆ Implement(orders-api) · claude` with `╰ Read(server.js)`, `╰ Edit(server.js)` underneath, then checks
+and review. Typing `/` opens a command menu (↑/↓, Tab or Enter). Providers that fail to log in (for example
+an expired API key) are skipped for a few hours and shown in the welcome box. Ctrl+C lets you
+stop the task or keep it running in the background. Decisions such as approving a cross-project plan or
+answering a business question appear as an arrow-key menu. Press Esc to decide later by typing. Shortcuts
+(`/status`, `/tasks`, `/show`, `/new`, `/display`, `/help`) are optional. `/providers` opens an ↑/↓ menu to
+choose the planner (and optionally the first worker); `orchestrator config planner agy` does the same from a shell.
 
-| Command | Description |
-| :--- | :--- |
-| `/run <goal>` | Launch a full 4-agent autonomous sprint on a goal |
-| `/provider` | Switch active default AI worker (Antigravity, Claude, OpenCode, Dual-Model) |
-| `/visual` | Toggle visible desktop terminal windows (on/off) |
-| `/status` | View the single-page project state dashboard (`hub/state.md`) |
-| `/system` | Inspect real-time System Resource Guard metrics (RAM, CPU, Disk headroom) |
-| `/tasks` | Inspect task specs, checklists, and reviewer verdicts |
-| `/new` | Start a fresh conversation session with the active AI worker |
-| `/link <path>` | Connect an external repository, directory, or microservice |
-| `/doctor` | Run setup diagnostics on installed AI CLIs |
-| `/clear` | Clear the terminal screen |
-| `/help` | Display interactive command guide |
-| `/exit` | Exit the orchestrator session |
+Conversations are saved per project. `/resume` (or `orchestrator -r`) lists earlier chats in the current project
+with ↑/↓ and restores the transcript and its context; `orchestrator -c` continues the latest one. The chat runs in
+its own screen like vim, so your terminal is restored as it was when you exit. The mouse wheel or PgUp/PgDn
+scroll the whole conversation (back to the welcome box) while the input box stays at the bottom; typing or Esc
+returns to the latest output, and ↑/↓ stay for your earlier messages. Because the chat captures the mouse, hold
+Shift to select text. `ui.alt_screen: false` in `~/.foreman/config.yaml` uses the terminal's normal scrollback instead.
 
----
-
-## ⚡ 4-Agent Autonomous Sprints
-
-When you run `/run <goal>` (or `orchestrator run "<goal>"`), Foreman executes a structured workflow loop:
-
-1. **Plan (Planner)**: Decomposes the goal into an actionable task checklist with scope, risks, and criteria.
-2. **Critique (Critic)**: An adversarial review session that challenges assumptions and finds missing edge cases.
-3. **Execute (Builder)**: Dispatches implementation tasks to worker sessions inside the target project directory.
-4. **Independent Review (Reviewer)**: Verified and audited by a clean session or different model/provider (**Reviewer ≠ Builder** strictly enforced).
-5. **Report**: Aggregates the results into a concise executive summary written to `hub/state.md`.
-
----
-
-## 🖥️ CLI Commands Reference
-
-You can also use Foreman directly from your system shell without entering the REPL:
+### One-shot commands
 
 ```bash
-# Setup & Health Check
-orchestrator setup              # Interactive provider setup wizard
-orchestrator doctor             # Diagnose installed CLI binaries & paths
-orchestrator status             # Print current hub state & active tasks
-
-# Run Workflows
-orchestrator run "Build auth"   # Run developer workflow pack
-orchestrator run "Market MVP"   # Run business idea analysis pack
-orchestrator run "Unit tests"   # Run QA & test generation pack
-orchestrator run "Goal" --mock  # Simulation mode (zero tokens consumed)
-orchestrator run "Goal" --visual # Force visible desktop terminal windows
-
-# Model Context Protocol (MCP)
-orchestrator mcp                # Start stdio MCP server for IDEs / Antigravity Desktop
+orchestrator "Show the currency on the orders page; the API should return it"   # do something
+orchestrator status                      # state of your current task (instant, no AI)
+orchestrator resume                      # continue the most recent unfinished task here
+orchestrator answer 3 "10% off above $500"   # answer a business question a task is waiting on
+orchestrator accept s2 | dismiss s2      # act on, or silence, a suggestion
+orchestrator tasks | show 3 [--events]   # history, full record, audit log
+orchestrator projects [scan|show X|link A B tests "note"|test X "cmd"]
+orchestrator sessions admin-ui           # existing Claude/OpenCode/Antigravity sessions for a project
+orchestrator config display terminal|headless   # watch workers in terminal windows, or run under the hood
+orchestrator config notify on|off        # one desktop notification when a task finishes
 ```
 
----
+`--visual` / `--headless` override the display mode for a single run.
 
-## 🛡️ Budget & System Resource Guard
+From Claude Code or Antigravity (after `orchestrator mcp install`), just ask normally. The tool's AI calls
+Foreman's `orchestrate`, `task_status`, `resume_task`, `answer_question` and `suggestion` tools.
 
-- **Dynamic Concurrency**: Up to 10–15 concurrent workers globally (default: 10), actively monitored by the System Resource Guard (RAM & CPU checks).
-- **Daily Quotas**: Tracked per provider in `providers.yaml`; warns at 80% and halts at 100%.
-- **Task Timeout**: 300 seconds default.
-- **Anti-Loop Threshold**: Maximum 3 review bounces before halting execution and escalating to the manager as a blocker.
+## Reports
 
----
+Reports are short, with separate sections. Only non-empty sections are shown:
 
-## 📂 File Hub Layout
+```
+✔ #2 Add currency code to orders API and show it on the Orders page — achieved
 
-Foreman uses a lightweight, transparent file-based hub inside your project:
+  Projects  orders-api (changed 3 files) · admin-ui (changed 2 files) · e2e-tests (changed 1 file)
+  Checks    ✔ orders-api: npm test  ✔ admin-ui: npm test  ✔ e2e-tests: npm test
+  Review    approve by antigravity (different provider): …
+  Sessions  claude ×3 (1 forked from your existing sessions)
 
-```text
-my-project/
-├── providers.yaml          # Local provider registry & limits (never committed)
-└── hub/
-    ├── state.md            # Single-page executive summary & active tasks
-    ├── tasks/              # Individual task markdown checklists & specs
-    ├── inbox/              # JSON message protocol (assign, result, review)
-    └── logs/               # Raw execution logs for debugging
+What changed / Needs your decision / Remaining / Notes / Worth considering (your call)
+
+Details: orchestrator show 2
 ```
 
----
+"Worth considering" lists at most three *major* items you probably forgot, such as a consumer that will break or
+a missing migration. Minor issues are fixed by the workers instead. Dismissed items are never shown again.
 
-## 🧪 Running Tests
-
-To run the complete test suite:
+## Tests
 
 ```bash
 python3 -m unittest discover tests
 ```
 
----
-
-## 📄 License
-
-Open source under the MIT License.
+See [README_ARCHITECTURE.md](README_ARCHITECTURE.md) for the design.
