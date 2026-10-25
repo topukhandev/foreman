@@ -2,6 +2,7 @@
 dragged-in or pasted image files become `[Image #1]`. The chips are what the input box shows; `expand` turns a message
 back into the full text (with image paths) for the AI. Pure functions and a small state class, no terminal here."""
 
+import filecmp
 import os
 import re
 import shlex
@@ -18,6 +19,7 @@ COLLAPSE_CHARS = 400
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".svg")
 CHIP_RE = re.compile(r"\[(?:Pasted text|Image) #\d+[^\]\n]*\]")
 IMAGE_REF_RE = re.compile(r"\[Image #\d+: ([^\]\n]+)\]")  # how an image appears in the text the AI receives
+IMAGE_PATH_RE = re.compile(r"(?<![\w/.])(/[^\s\[\]'\"]+\.(?:" + "|".join(e[1:] for e in IMAGE_EXTS) + r"))\b", re.I)  # a bare path
 
 
 def dropped_images(text: str) -> List[str]:
@@ -42,8 +44,10 @@ def dropped_images(text: str) -> List[str]:
 
 
 def image_dirs(text: str) -> List[str]:
-    """Directories of the image files referenced as `[Image #n: path]` in a request (the AI is given read access)."""
-    return list(dict.fromkeys(os.path.dirname(p) for p in IMAGE_REF_RE.findall(text) if os.path.isfile(p)))
+    """Directories of the image files named in a request, as `[Image #n: path]` or as a bare path (the AI is given
+    read access to them)."""
+    paths = IMAGE_REF_RE.findall(text) + IMAGE_PATH_RE.findall(text)
+    return list(dict.fromkeys(os.path.dirname(p) for p in paths if os.path.isfile(p)))
 
 
 class Attachments:
@@ -59,12 +63,31 @@ class Attachments:
     def pasted_lines(self, buf: str) -> int:
         return sum(self.items[m.group(0)][1].count("\n") + 1 for m in self.known(buf) if self.items[m.group(0)][0] == "text")
 
+    @staticmethod
+    def normalize(text: str) -> str:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return text[:-1] if text.endswith("\n") and text.count("\n") > 1 else text
+
+    def last_chip(self, before: str, kind: str):
+        """The chip of this kind that ends the text before the cursor (spaces after it allowed): pasting the same
+        thing again right after it expands it instead of adding a second chip."""
+        return next((m for m in self.known(before) if self.items[m.group(0)][0] == kind and not before[m.end():].strip(" ")), None)
+
+    def repeats(self, chip: str, text: str) -> bool:
+        """Whether pasting text again is the paste this chip stands for (a paste that was cut at the limit counts)."""
+        kept, text = self.items[chip][1], self.normalize(text)
+        return text == kept or (text.startswith(kept + "\n") and kept.count("\n") + 1 >= MAX_PASTE_LINES - self.pasted_lines(""))
+
+    def same_image(self, known_path: str, new_path: str) -> bool:
+        try:
+            return known_path == new_path or filecmp.cmp(known_path, new_path, shallow=False)
+        except OSError:
+            return False
+
     def paste(self, text: str, buf: str = "") -> Tuple[str, str]:
         """What to insert for pasted text and a notice ("" if none). Short pastes stay as they are; long ones become
         a chip; the whole message never holds more than MAX_PASTE_LINES pasted lines."""
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        if text.endswith("\n") and text.count("\n") > 1:
-            text = text[:-1]
+        text = self.normalize(text)
         lines = text.count("\n") + 1
         room = MAX_PASTE_LINES - self.pasted_lines(buf)
         note = ""
@@ -99,13 +122,22 @@ class Attachments:
 # ---------------------------------------------------------------------- clipboard images
 
 _GTK_SCRIPT = """
+IMAGE_EXTS = %r
 import sys, gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk
-img = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_image()
-if img is None:
-    sys.exit(3)
-img.savev(sys.argv[1], "png", [], [])
+board = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+img = board.wait_for_image()
+if img is not None:
+    img.savev(sys.argv[1], "png", [], [])
+    sys.exit(0)
+from gi.repository import Gio
+for uri in board.wait_for_uris() or []:  # an image file copied in the file manager
+    path = Gio.File.new_for_uri(uri).get_path()
+    if path and path.lower().endswith(IMAGE_EXTS):
+        print(path)
+        sys.exit(0)
+sys.exit(3)
 """
 
 
@@ -139,7 +171,11 @@ def clipboard_image(dest_dir: str) -> Tuple[Optional[str], str]:
         ok = _capture(["pngpaste", "-"], dest)
     elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
         try:
-            ok = subprocess.run([sys.executable, "-c", _GTK_SCRIPT, dest], capture_output=True, timeout=10).returncode == 0
+            res = subprocess.run([sys.executable, "-c", _GTK_SCRIPT % (IMAGE_EXTS,), dest], capture_output=True, text=True,
+                                 timeout=10)
+            ok = res.returncode == 0
+            if ok and res.stdout.strip() and not os.path.exists(dest):  # a copied file: use it where it is
+                return res.stdout.strip().splitlines()[0], ""
         except (OSError, subprocess.TimeoutExpired):
             ok = False
     else:

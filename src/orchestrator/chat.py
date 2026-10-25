@@ -42,6 +42,7 @@ Just type what you need, for example:
   • what's the status of my task? · continue the previous task · yes / no
 Long pastes show as [Pasted text #1 +545 lines] (up to 2000 lines per message) and are sent in full.
 Drag an image file into the window, or press Ctrl+V with an image on the clipboard: it shows as [Image #1].
+Paste the same thing again right after a chip to expand it: the full text, or the image's path.
 Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
   /mode  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit

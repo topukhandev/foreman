@@ -71,7 +71,8 @@ menu offers the recommended next one. `/providers` opens an ↑/↓ menu to
 choose the planner (and optionally the first worker); `foreman config planner agy` does the same from a shell.
 
 Pasting: long text (4+ lines or 400+ characters) appears as `[Pasted text #1 +545 lines]` instead of flooding the
-screen, and is sent in full; Backspace removes the whole chip. Up to 2000 pasted lines per message (the rest is
+screen, and is sent in full; Backspace removes the whole chip. Pasting the same thing again right after its chip
+expands it into the full text (for an image, its file path), like Claude Code. Up to 2000 pasted lines per message (the rest is
 cut, with a notice). Drag an image file into the window, or press Ctrl+V with an image on the clipboard, to
 attach it as `[Image #1]`; the file path goes to the AI, which can open it. Clipboard images use `wl-paste`,
 `xclip` or `pngpaste` if installed, otherwise GTK through `python3-gi`. Requests too long for a command line

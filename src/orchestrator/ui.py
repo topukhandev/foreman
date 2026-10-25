@@ -12,7 +12,7 @@ import threading
 import time
 from typing import List, Optional
 
-from orchestrator.clipboard import CHIP_RE, Attachments, clipboard_image, dropped_images
+from orchestrator.clipboard import CHIP_RE, MAX_PASTE_LINES, Attachments, clipboard_image, dropped_images
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 TTY = sys.stdout.isatty()
@@ -563,21 +563,50 @@ class LineEditor:
         self.buf = self.buf[:self.cur] + self.buf[end:]
 
     def _paste(self, text: str) -> None:
-        """Bracketed paste: dragged-in image files and long text become chips, short text goes in as typed."""
+        """Bracketed paste: dragged-in image files and long text become chips, short text goes in as typed. Pasting
+        the same thing again right after its chip expands it: the full text, or the image's path."""
         if not text.strip():  # terminals send an empty paste when the clipboard holds only an image
             self._paste_clipboard_image()
             return
         images = dropped_images(text)
         if images:
-            self._insert(" ".join(self.attach.image(p) for p in images) + " ")
+            for path in images:
+                self._add_image(path)
+            return
+        before = self.buf[:self.cur]
+        again = self.attach.last_chip(before, "text")
+        if again and self.attach.repeats(again.group(0), text):
+            end = len(before)  # the chip (and any spaces after it) gives way to the text itself
+            room = MAX_PASTE_LINES - self.attach.pasted_lines(self.buf[:again.start()] + self.buf[end:])
+            full = "\n".join(self.attach.normalize(text).split("\n")[:max(room, 0)])
+            self.buf = self.buf[:again.start()] + full + self.buf[self.cur:]
+            self.cur = again.start() + len(full)
             return
         insert, self.notice = self.attach.paste(text, self.buf)
         self._insert(insert)
+        if insert in self.attach.items and not self.notice:
+            self.notice = "Paste it again to show the full text"
+
+    def _add_image(self, path: str, temporary: bool = False) -> None:
+        before = self.buf[:self.cur]
+        again = self.attach.last_chip(before, "image")
+        if again and self.attach.same_image(self.attach.items[again.group(0)][1], path):
+            shown = self.attach.items[again.group(0)][1]
+            if temporary and path != shown:
+                try:
+                    os.remove(path)  # the clipboard image was the same picture again
+                except OSError:
+                    pass
+            self.buf = self.buf[:again.start()] + shown + " " + self.buf[self.cur:]
+            self.cur = again.start() + len(shown) + 1
+            return
+        self._insert(self.attach.image(path) + " ")
+        self.notice = "Paste it again to show the file path"
 
     def _paste_clipboard_image(self) -> None:
         path, why = clipboard_image(self.image_dir)
         if path:
-            self._insert(self.attach.image(path) + " ")
+            self._add_image(path, temporary=path.startswith(self.image_dir))
         else:
             self.notice = why
 

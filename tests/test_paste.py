@@ -106,6 +106,7 @@ class DroppedImagesTest(unittest.TestCase):
     def test_image_dirs_from_a_request(self):
         request = f"look at [Image #1: {self.img}] and [Image #2: {self.img2}] and [Image #3: /nope/x.png]"
         self.assertEqual(image_dirs(request), [self.tmp])
+        self.assertEqual(image_dirs(f"what is wrong in {self.img2}, please"), [self.tmp], "a bare path counts too")
 
 
 class EditorChipsTest(unittest.TestCase):
@@ -153,6 +154,63 @@ class EditorChipsTest(unittest.TestCase):
                 f.write(PNG)
             e._paste(f"'{path}'")
         self.assertEqual(e.buf, "[Image #1] ")
+
+    def test_pasting_the_same_text_twice_shows_the_text_and_a_third_time_a_chip_again(self):
+        e = self.editor()
+        e._insert("see ")
+        e._paste(lines(30))
+        self.assertEqual(e.buf, "see [Pasted text #1 +30 lines]")
+        self.assertIn("again", e.notice)
+        e._paste(lines(30))
+        self.assertEqual(e.buf, "see " + lines(30))
+        self.assertEqual(e.cur, len(e.buf))
+        e._paste(lines(30))
+        self.assertEqual(e.buf, "see " + lines(30) + "[Pasted text #2 +30 lines]")
+
+    def test_a_different_paste_or_typing_in_between_does_not_expand(self):
+        e = self.editor()
+        e._paste(lines(30))
+        e._paste(lines(31))
+        self.assertEqual(e.buf, "[Pasted text #1 +30 lines][Pasted text #2 +31 lines]")
+        e = self.editor()
+        e._paste(lines(30))
+        e._key("x")
+        e._paste(lines(30))
+        self.assertTrue(e.buf.endswith("x[Pasted text #2 +30 lines]"))
+
+    def test_the_expanded_text_still_respects_the_line_limit(self):
+        e = self.editor()
+        e._paste(lines(2500))
+        e._paste(lines(2500))
+        self.assertEqual(e.buf.count("\n") + 1, MAX_PASTE_LINES)
+
+    def test_pasting_the_same_image_twice_shows_its_path(self):
+        e = self.editor()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.png")
+            with open(path, "wb") as f:
+                f.write(PNG)
+            e._paste(f"'{path}'")
+            self.assertEqual(e.buf, "[Image #1] ")
+            e._paste(f"'{path}'")
+            self.assertEqual(e.buf, path + " ")
+
+    def test_clipboard_image_pasted_twice_shows_the_path_and_drops_the_duplicate_file(self):
+        from unittest import mock
+        e = self.editor()
+        with tempfile.TemporaryDirectory() as tmp:
+            e.image_dir = tmp
+            shots = []
+            for name in ("one.png", "two.png"):
+                shots.append(os.path.join(tmp, name))
+                with open(shots[-1], "wb") as f:
+                    f.write(PNG)
+            with mock.patch("orchestrator.ui.clipboard_image", side_effect=[(shots[0], ""), (shots[1], "")]):
+                e._key("\x16")
+                self.assertEqual(e.buf, "[Image #1] ")
+                e._key("\x16")
+            self.assertEqual(e.buf, shots[0] + " ")
+            self.assertFalse(os.path.exists(shots[1]))
 
     def test_overlong_paste_sets_a_notice_that_clears_on_the_next_key(self):
         e = self.editor()
