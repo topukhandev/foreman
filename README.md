@@ -81,6 +81,7 @@ Shift to select text. `ui.alt_screen: false` in `~/.foreman/config.yaml` uses th
 
 ```bash
 foreman "Show the currency on the orders page; the API should return it"   # do something
+foreman --dry-run "VIP discounts"          # plan only: what would be done; nothing runs. `foreman resume` then runs that plan
 foreman --mode planning "VIP discounts"   # in a chosen mode (research, planning, development, qa, deployment)
 foreman lifecycle | next              # where features stand | start the recommended next step
 foreman status                      # state of your current task (instant, no AI)
@@ -95,6 +96,18 @@ foreman config notify on|off        # one desktop notification when a task finis
 ```
 
 `--visual` / `--headless` override the display mode for a single run.
+
+`--json` prints machine-readable output for scripts and CI on `ask`, `status`, `tasks`, `show`, `lifecycle`,
+`next`, `resume`, `answer` and `doctor`. Task results carry `status`, `projects`, `steps`, `checks`, open
+`questions` and the human `report`:
+
+```bash
+foreman --dry-run "add currency to orders" --json | jq '.task.steps[] | {project, kind}'
+foreman tasks --json | jq '.[] | select(.status=="needs_input")'
+```
+
+`foreman doctor --fix` registers Foreman with Claude Code / Antigravity / Codex where it is missing and rescans
+projects when none are known; it only does safe, reversible things and prints what it did.
 
 From Claude Code or Antigravity (after `foreman mcp install`), just ask normally. The tool's AI calls
 Foreman's `orchestrate`, `task_status`, `resume_task`, `answer_question` and `suggestion` tools.

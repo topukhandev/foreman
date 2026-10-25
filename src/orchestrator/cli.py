@@ -11,6 +11,7 @@ from orchestrator import completion
 from orchestrator.app import build_engine
 from orchestrator.completion import SHELLS
 from orchestrator.config import load_config, set_option
+from orchestrator.report import task_summary
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
                "accept", "dismiss", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "completion", "version"}
@@ -37,9 +38,16 @@ def _stop_task(signum, frame) -> None:
     raise Interrupted()
 
 
-def _print_result(eng, result) -> None:
-    print(result["report"])
+def _dump(data) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _print_result(eng, result, as_json: bool = False) -> None:
     task = result.get("task")
+    if as_json:
+        _dump({"task": task_summary(task) if task else None, "report": result["report"]})
+        return
+    print(result["report"])
     if task and task.get("suggestions") and sys.stdin.isatty() and sys.stdout.isatty():
         try:
             choice = input("\nAct on a suggestion now? [id / Enter to skip] ").strip()
@@ -88,13 +96,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="foreman", description="Foreman: orchestrate AI sessions across projects")
     sub = ap.add_subparsers(dest="cmd")
 
-    def add(name, help_):
+    def add(name, help_, json_=True):
         p = sub.add_parser(name, help=help_)
         p.add_argument("--visual", action="store_true", help="show workers in terminal windows for this run")
         p.add_argument("--headless", action="store_true", help="run workers under the hood for this run")
+        if json_:
+            p.add_argument("--json", action="store_true", help="print the result as JSON")
         return p
 
-    p = add("chat", "interactive chat (default when run without arguments)")
+    p = add("chat", "interactive chat (default when run without arguments)", json_=False)
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("-c", "--continue", dest="cont", action="store_true", help="continue the latest chat here")
     p.add_argument("-r", "--resume", action="store_true", help="pick an earlier chat in this project")
@@ -102,10 +112,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("request", nargs="+")
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--mode", help="lifecycle mode: research, planning, development, qa, deployment (default: recommended)")
+    p.add_argument("--dry-run", action="store_true", help="plan only: show what would be done, change nothing")
     p = add("next", "start the recommended next lifecycle step for the latest work here")
     p.add_argument("--cwd", default=os.getcwd())
     p = sub.add_parser("lifecycle", help="where this project's features stand and what's next (no AI)")
     p.add_argument("--cwd", default=os.getcwd())
+    p.add_argument("--json", action="store_true")
     sub.add_parser("modes", help="list lifecycle modes and where their templates come from")
     p = add("status", "state of a task (no AI)")
     p.add_argument("task", nargs="*")
@@ -119,6 +131,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("text", nargs="+")
     p = sub.add_parser("tasks", help="list tasks")
     p.add_argument("-n", type=int, default=15)
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("show", help="task details")
     p.add_argument("task")
     p.add_argument("--json", action="store_true")
@@ -136,14 +149,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("config", help="show or change settings")
     p.add_argument("key", nargs="?", choices=["display", "notify", "reuse", "planner", "first-worker"])
     p.add_argument("value", nargs="?")
-    sub.add_parser("doctor", help="check providers, terminal, MCP registration")
+    p = sub.add_parser("doctor", help="check providers, terminal, MCP registration")
+    p.add_argument("--json", action="store_true", help="print the findings as JSON")
+    p.add_argument("--fix", action="store_true", help="register the MCP server where it is missing and rescan projects")
     sub.add_parser("version", help="print the version")
     p = sub.add_parser("completion", help="print a shell completion script (bash or zsh)")
     p.add_argument("shell", choices=SHELLS)
     p = sub.add_parser("mcp", help="run the MCP server (stdio), or `mcp install [claude|antigravity|codex|all]`")
     p.add_argument("action", nargs="?", default="serve", choices=["serve", "install", "status"])
     p.add_argument("targets", nargs="*")
-    p = add("run-task", argparse.SUPPRESS)
+    p = add("run-task", argparse.SUPPRESS, json_=False)
     p.add_argument("task")
     sub.add_parser("help")
 
@@ -203,7 +218,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if cmd == "doctor":
-        return doctor()
+        return doctor(as_json=args.json, fix=args.fix)
 
     eng = _engine(args)
 
@@ -217,17 +232,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.mode and not resolve(args.mode, eng.modes(args.cwd)):
             print(f"unknown mode '{args.mode}'. Modes: " + ", ".join(eng.modes(args.cwd)), file=sys.stderr)
             return 1
-        _print_result(eng, eng.handle(" ".join(args.request), args.cwd, mode=args.mode))
+        _print_result(eng, eng.handle(" ".join(args.request), args.cwd, mode=args.mode, dry_run=args.dry_run), args.json)
         return 0
     if cmd == "next":
         task, msg = eng.prepare_next(args.cwd)
-        if not task:
-            print(msg)
-            return 0
-        _print_result(eng, eng.execute(task))
+        _print_result(eng, eng.execute(task) if task else {"task": None, "report": msg}, args.json)
         return 0
     if cmd == "lifecycle":
-        print(eng.lifecycle_text(args.cwd))
+        if args.json:
+            _dump(eng.lifecycle_data(args.cwd))
+        else:
+            print(eng.lifecycle_text(args.cwd))
         return 0
     if cmd == "modes":
         for name, m in eng.modes(os.getcwd()).items():
@@ -235,13 +250,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\nOverride a template by copying it to ~/.foreman/modes/<name>.md or <project>/.foreman/modes/<name>.md")
         return 0
     if cmd == "status":
-        print(eng.status(" ".join(args.task) or None, args.cwd)["report"])
+        res = eng.status(" ".join(args.task) or None, args.cwd)
+        if args.json:
+            _print_result(eng, res, as_json=True)
+        else:
+            print(res["report"])
         return 0
     if cmd == "resume":
-        _print_result(eng, eng.resume(args.task, " ".join(args.note), args.cwd))
+        _print_result(eng, eng.resume(args.task, " ".join(args.note), args.cwd), args.json)
         return 0
     if cmd == "answer":
-        _print_result(eng, eng.answer(args.task, " ".join(args.text)))
+        _print_result(eng, eng.answer(args.task, " ".join(args.text)), args.json)
         return 0
     if cmd == "run-task":
         task = eng.store.load(args.task)
@@ -253,6 +272,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         eng.execute(task)
         return 0
     if cmd == "tasks":
+        if args.json:
+            _dump([task_summary(t) for t in eng.store.all()[: args.n]])
+            return 0
         for t in eng.store.all()[: args.n]:
             print(f"#{t['id']:<4} {t['status']:<12} {t['title']}  ({t['updated_at'][:16]})")
         return 0
@@ -295,7 +317,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("not found")
             return 1
         proj = eng.registry.projects.get(s["project"])
-        _print_result(eng, eng.execute(eng.prepare_new(s["text"], proj.path if proj else os.getcwd())))
+        _print_result(eng, eng.execute(eng.prepare_new(s["text"], proj.path if proj else os.getcwd())), args.json)
         return 0
     if cmd == "dismiss":
         print("dismissed" if eng.store.set_suggestion(args.id, "dismissed") else "not found")
@@ -373,30 +395,73 @@ def projects_cmd(eng, action: str, rest: List[str]) -> int:
     return 1
 
 
-def doctor() -> int:
-    from orchestrator.app import build_engine as be
+def doctor_data(eng) -> dict:
+    """What `doctor` reports, as data: providers, planner, display, projects, MCP registration."""
     from orchestrator.integrations import status as mcp_status
     from orchestrator.terminal import terminal_available
-    eng = be(out=lambda _m: None)
     cfg = eng.cfg
-    print(f"Foreman home: {cfg.home}")
-    print("Providers (preference order):")
+    providers = {}
     for name, prov in eng.providers.items():
         ok, info = prov.available()
-        caps = [k for k, v in vars(prov.capabilities).items() if v]
-        print(f"  {'✔' if ok else '✘'} {name:<12} {info}" + (f"   [{', '.join(caps)}]" if ok else ""))
-        if ok:
-            print(f"      runs today: {eng.budget.used(name)}/{cfg.providers[name].max_runs_per_day}")
-    print(f"Planner (brain): {cfg.brain}")
-    term = terminal_available()
-    print(f"Display: {cfg.display}" + (f" (terminal: {term})" if cfg.display == "terminal" and term else
-                                       " (no GUI terminal found - falls back to headless)" if cfg.display == "terminal" else ""))
-    print(f"Notifications: {'on' if cfg.notify else 'off'} (one per finished task)")
+        providers[name] = {"available": ok, "info": info,
+                           "capabilities": [k for k, v in vars(prov.capabilities).items() if v] if ok else [],
+                           "runs_today": eng.budget.used(name) if ok else 0,
+                           "max_runs_per_day": cfg.providers[name].max_runs_per_day}
     eng.registry.ensure_scanned()
-    print(f"Projects: {len(eng.registry.projects)} under {', '.join(cfg.roots)}; relations: {len(eng.registry.relations)}")
+    return {"version": version_string(), "home": cfg.home, "providers": providers, "planner": cfg.brain,
+            "display": cfg.display, "terminal": terminal_available(), "notifications": cfg.notify,
+            "roots": cfg.roots, "projects": len(eng.registry.projects), "relations": len(eng.registry.relations),
+            "mcp": mcp_status()}
+
+
+def doctor_fix(eng, data: dict) -> list:
+    """Repairs that are safe and reversible: MCP registration where the tool is installed but Foreman is not
+    registered, and a project rescan when none is known. Returns what was done."""
+    from orchestrator.integrations import install
+    actions = []
+    missing = [t for t, st in data["mcp"].items() if st == "not registered"]
+    if missing:
+        for target, res in install(missing).items():
+            actions.append(f"mcp install {target}: {res}")
+    if not data["projects"]:
+        names = eng.registry.scan()
+        actions.append(f"scanned {', '.join(eng.cfg.roots)}: {len(names)} project(s) found")
+    if not any(p["available"] for p in data["providers"].values()):
+        actions.append("no AI CLI found: install claude, agy or opencode (or add a command under providers: in config.yaml)")
+    return actions
+
+
+def doctor(as_json: bool = False, fix: bool = False) -> int:
+    from orchestrator.app import build_engine as be
+    eng = be(out=lambda _m: None)
+    data = doctor_data(eng)
+    actions = doctor_fix(eng, data) if fix else []
+    if actions:
+        data = {**doctor_data(eng), "fixed": actions}
+    if as_json:
+        _dump(data)
+        return 0
+    print(f"Foreman home: {data['home']}")
+    print("Providers (preference order):")
+    for name, p in data["providers"].items():
+        print(f"  {'✔' if p['available'] else '✘'} {name:<12} {p['info']}"
+              + (f"   [{', '.join(p['capabilities'])}]" if p["available"] else ""))
+        if p["available"]:
+            print(f"      runs today: {p['runs_today']}/{p['max_runs_per_day']}")
+    print(f"Planner (brain): {data['planner']}")
+    term = data["terminal"]
+    print(f"Display: {data['display']}" + (f" (terminal: {term})" if data["display"] == "terminal" and term else
+                                          " (no GUI terminal found - falls back to headless)" if data["display"] == "terminal" else ""))
+    print(f"Notifications: {'on' if data['notifications'] else 'off'} (one per finished task)")
+    print(f"Projects: {data['projects']} under {', '.join(data['roots'])}; relations: {data['relations']}")
     print("MCP registration:")
-    for tool, st in mcp_status().items():
+    for tool, st in data["mcp"].items():
         print(f"  {tool:<12} {st}")
+    if actions:
+        print("Fixed:")
+        print("\n".join(f"  - {a}" for a in actions))
+    elif not fix and any(st == "not registered" for st in data["mcp"].values()):
+        print("Tip: `foreman doctor --fix` registers Foreman with the tools above.")
     return 0
 
 
@@ -407,6 +472,7 @@ Foreman
   foreman -c | -r                  continue the latest chat here | pick an earlier one
   foreman "<request>"              do something (plans, picks projects/sessions, executes, validates, reports)
   foreman --mode qa "<request>"    same, in a chosen mode (research, planning, development, qa, deployment)
+  foreman --dry-run "<request>"    plan only: what would be done, nothing runs; `foreman resume` then runs that plan
   foreman lifecycle | next         where this project's features stand | start the recommended next step
   foreman modes                    the mode templates and where each comes from
   foreman status [task]            state of a task (instant, no AI)
@@ -417,7 +483,8 @@ Foreman
   foreman projects [list|scan|show|add|link|unlink|test]
   foreman sessions [project]       existing Claude/OpenCode/Antigravity sessions for a project
   foreman config [display terminal|headless | notify on|off | reuse fork|off]
-  foreman doctor                   providers, display, MCP registration
+  foreman doctor [--fix]           providers, display, MCP registration (--fix registers MCP where missing)
+  --json                           machine-readable output on ask, status, tasks, show, lifecycle, next, resume, answer, doctor
   foreman completion bash|zsh      shell completion script (eval "$(foreman completion bash)")
   foreman --version                version (with the commit when run from a checkout)
   foreman mcp [install [claude|antigravity|codex]]   MCP server for Claude Code, Antigravity, Codex…

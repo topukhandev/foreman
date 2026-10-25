@@ -18,7 +18,7 @@ ARGUMENTS: Dict[str, List[str]] = {
     "completion": ["bash", "zsh"],
 }
 MODES = ["research", "planning", "development", "qa", "deployment"]
-FLAGS = ["--visual", "--headless", "--mode", "--cwd", "--json", "--events", "-c", "-r", "--version", "-h", "--help"]
+FLAGS = ["--visual", "--headless", "--mode", "--dry-run", "--fix", "--cwd", "--json", "--events", "-c", "-r", "--version", "-h", "--help"]
 SHELLS = tuple(ARGUMENTS["completion"])
 
 

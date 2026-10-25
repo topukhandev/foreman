@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from orchestrator.util import now_iso, read_json, short, write_json
 
-ACTIVE = {"planning", "running", "needs_input", "blocked", "partial", "queued", "interrupted"}
+ACTIVE = {"planning", "planned", "running", "needs_input", "blocked", "partial", "queued", "interrupted"}
 FINAL = {"done", "failed", "answered", "cancelled"}
 
 

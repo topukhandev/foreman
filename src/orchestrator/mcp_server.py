@@ -35,6 +35,8 @@ _WAIT = {"type": "integer", "description": "Seconds to wait for completion befor
 _TASK = {"type": "string", "description": "Task number (e.g. '7') or words from its title. Omit for the most recent task here."}
 _MODE = {"type": "string", "enum": ["research", "planning", "development", "qa", "deployment"],
          "description": "Only when the user asks for a specific mode; otherwise Foreman recommends one."}
+_DRY = {"type": "boolean", "description": "Plan only: return what Foreman would do, run nothing. Use when the user asks "
+                                          "for a preview or plan; `resume_task` then runs that plan."}
 _DISPLAY = {"type": "string", "enum": ["terminal", "headless"],
             "description": "Show workers in visible terminal windows or run under the hood (default: user config)."}
 
@@ -43,7 +45,8 @@ TOOLS = [
      "description": "Submit a request (task, change, investigation or question). Foreman selects the lifecycle mode, "
                     "projects, sessions and providers, executes, validates and reports.",
      "inputSchema": {"type": "object", "properties": {"request": {"type": "string"}, "cwd": _CWD, "wait_seconds": _WAIT,
-                                                      "display": _DISPLAY, "mode": _MODE}, "required": ["request", "cwd"]}},
+                                                      "display": _DISPLAY, "mode": _MODE,
+                                                      "dry_run": _DRY}, "required": ["request", "cwd"]}},
     {"name": "project_state", "description": "Lifecycle of the project: features, the stage each reached, the "
                                              "recommended next step, confirmed decisions (instant, no AI).",
      "inputSchema": {"type": "object", "properties": {"cwd": _CWD}, "required": ["cwd"]}},
@@ -91,6 +94,8 @@ class MCPServer:
 
         if name == "orchestrate":
             task, msg = eng.route(args["request"], cwd, mode=args.get("mode"))
+            if task and args.get("dry_run"):
+                return eng.plan_only(task)["report"]
             return self._launch(eng, task, msg, wait, visual)
         if name == "project_state":
             return eng.lifecycle_text(cwd)

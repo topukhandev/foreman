@@ -32,7 +32,7 @@ from orchestrator.knowledge import ProjectKnowledge, slug
 from orchestrator.modes import Mode, catalog, load_modes, resolve as resolve_mode
 from orchestrator.providers.base import OWN_PROMPT_PREFIXES, Provider, RunRequest, RunResult
 from orchestrator.registry import Registry
-from orchestrator.report import notify, render_report, render_status
+from orchestrator.report import notify, render_plan, render_report, render_status
 from orchestrator.store import FINAL, Store
 from orchestrator.util import (STOPPING, changed_since, diff_text, git_head, now_iso, run_process, short,
                                snapshot)
@@ -132,10 +132,13 @@ class Engine:
 
     # ================================================================== entry points
     def handle(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
-               mode: Optional[str] = None) -> Dict[str, Any]:
-        """Single entry for free-form requests from any interface. Returns {"task": ..., "report": str}."""
+               mode: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+        """Single entry for free-form requests from any interface. Returns {"task": ..., "report": str}.
+        dry_run: plan only (see plan_only)."""
         task, msg = self.route(request, cwd, conversation, confirm_plan, mode)
-        return self.execute(task) if task else {"task": None, "report": msg}
+        if not task:
+            return {"task": None, "report": msg}
+        return self.plan_only(task) if dry_run else self.execute(task)
 
     def route(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
               mode: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -216,7 +219,8 @@ class Engine:
         task = (unfinished or cands)[0]
         if note:
             task["decisions"].append({"text": f"User asked to continue: {note}", "by": "user", "at": now_iso()})
-        task["replan"] = True
+        task["replan"] = bool(note) or task["status"] != "planned"  # a dry-run plan is run as it stands
+        task["dry_run"] = False
         task["status"] = "queued"
         self.store.save(task)
         return task, ""
@@ -255,6 +259,7 @@ class Engine:
         task["decisions"].append({"text": f"User answered: {text}", "by": "user", "at": now_iso()})
         # Plain approvals continue the existing plan; anything else is feedback that needs a new plan.
         task["replan"] = not (yes and all(q.get("kind") in ("budget", "approval") for q in open_q))
+        task["dry_run"] = False
         task["status"] = "queued"
         self.store.save(task)
         self.store.event(task["id"], "answered", text=text)
@@ -322,6 +327,21 @@ class Engine:
             lines.append(f"{len(dec)} confirmed decision{'s' if len(dec) != 1 else ''} on record (.foreman/decisions.md).")
         return "\n".join(lines)
 
+    def lifecycle_data(self, cwd: str) -> Dict[str, Any]:
+        """The same facts as lifecycle_text, as data (instant, no AI)."""
+        self.registry.ensure_scanned()
+        proj = self.registry.project_for_path(cwd)
+        modes = self.modes(cwd)
+        if not proj:
+            return {"project": None, "modes": list(modes), "features": {}, "decisions": 0}
+        kn = ProjectKnowledge(proj.path)
+        feats = kn.lifecycle()
+        recent = sorted(feats.items(), key=lambda kv: str(kv[1].get("updated", "")), reverse=True)
+        return {"project": proj.name, "modes": list(modes), "features": dict(recent),
+                "recommended": ({"feature": recent[0][0], "mode": recent[0][1]["next"]}
+                                if recent and recent[0][1].get("next") in modes else None),
+                "decisions": len(kn.decisions(1000))}
+
     def prepare_next(self, cwd: str) -> Tuple[Optional[Dict[str, Any]], str]:
         """Start the recommended next mode for the most recent piece of work here."""
         self.registry.ensure_scanned()
@@ -366,6 +386,21 @@ class Engine:
         return {"mode": mode.next, "reason": NEXT_REASONS.get(mode.next, "")}
 
     # ================================================================== execution
+    def plan_only(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Dry run: plan the task (read-only planner, impact check included) and stop before any worker runs, any
+        check runs or anything is written to a project. `resume` on the task then runs exactly this plan."""
+        task["status"], task["dry_run"] = "planning", True
+        self.store.save(task)
+        try:
+            planned = self._plan(task)
+        except Interrupted:
+            task["status"], planned = "interrupted", False
+        if planned:
+            task["status"] = "needs_input" if self._open_questions(task) else "planned"
+        self.store.event(task["id"], "dry_run", status=task["status"])
+        self.store.save(task)
+        return {"task": task, "report": render_plan(task)}
+
     def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         lock = self.store.path(task["id"], "lock")
         if os.path.exists(lock) and _pid_alive(_read_int(lock)) and _read_int(lock) != os.getpid():
