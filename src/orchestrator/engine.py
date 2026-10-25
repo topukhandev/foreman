@@ -377,17 +377,20 @@ class Engine:
         for e in task["evidence"]:
             if e["kind"] in ("check", "review"):
                 latest[(e["kind"], e["project"], e.get("command"))] = e
-        problems = task["status"] in ("partial", "blocked") or bool(task["remaining"]) or \
-            any(not e["ok"] for e in latest.values())
+        stuck = task["status"] in ("partial", "blocked") or any(s["status"] in ("failed", "blocked") for s in task["steps"]) \
+            or any(not e["ok"] for e in latest.values())
+        problems = stuck or bool(task["remaining"])
         if problems and mode.writes == "code":
             return {"mode": mode.name, "reason": "finish the remaining items"}
         if problems and mode.name == "qa":
             return {"mode": "development", "reason": "fix what QA found"}
-        if problems:
+        if stuck:  # the mode itself did not get done
             return {"mode": mode.name, "reason": "resolve what is blocking it"}
         if not mode.next:
             return None
-        return {"mode": mode.next, "reason": NEXT_REASONS.get(mode.next, "")}
+        # A finished research / planning / deployment step moves on; open items it found are for the user to settle first.
+        reason, left = NEXT_REASONS.get(mode.next, ""), len(task["remaining"])
+        return {"mode": mode.next, "reason": reason + (f" (settle the {left} open item{'s' if left != 1 else ''} first)" if left else "")}
 
     # ================================================================== execution
     def plan_only(self, task: Dict[str, Any]) -> Dict[str, Any]:

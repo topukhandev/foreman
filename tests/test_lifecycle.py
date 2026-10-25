@@ -127,6 +127,23 @@ class LifecycleTest(unittest.TestCase):
                          ("qa", "user", task["id"], "vip-badge"))
         self.assertEqual(self.eng.store.load(task["id"])["next_started"], nxt["id"])
 
+    def test_a_finished_planning_step_moves_on_even_with_open_items_but_a_failed_one_repeats(self):
+        def planner(req):
+            return with_mode(plan([("orders-api", "inspect")], [step("1", "orders-api", kind="investigate")]), "planning",
+                             feature="vip discount")
+        self.s.plan = planner
+        self.s.step = lambda req: {"status": "done", "summary": "planned", "findings": [],
+                                   "questions": [], "dependencies": []}
+        self.s.document = lambda req: {"title": "Plan", "document": "# Plan", "summary": "Done."}
+        done = self.eng.handle("plan vip discount", self.ws.api, mode="planning")["task"]
+        done["remaining"] = ["Target project is not a git repo", "No contact address"]
+        nxt = self.eng._next_step(done, load_modes()["planning"])
+        self.assertEqual(nxt["mode"], "development")
+        self.assertIn("settle the 2 open items first", nxt["reason"])
+        done["steps"][0]["status"] = "failed"
+        self.assertEqual(self.eng._next_step(done, load_modes()["planning"]),
+                         {"mode": "planning", "reason": "resolve what is blocking it"})
+
     def test_go_for_plan_after_research_starts_the_planning_step(self):
         from orchestrator.engine import NEXT_DO_RE
         self.s.plan = lambda req: with_mode(plan([("orders-api", "inspect")], [step("1", "orders-api", kind="investigate")]),
