@@ -175,6 +175,21 @@ class SelectionTest(unittest.TestCase):
         self.assertIsNone(self.scroll.sel)
 
 
+class DoubleEscTest(unittest.TestCase):
+    def test_two_lone_escapes_within_the_window(self):
+        esc = ui.DoubleEsc(window=1.0)
+        self.assertEqual(esc.feed("\x1b", now=10.0), "first")
+        self.assertEqual(esc.feed("\x1b", now=10.5), "second")
+        self.assertEqual(esc.feed("\x1b", now=10.6), "first", "a third press starts over")
+
+    def test_too_slow_or_other_keys_do_not_count(self):
+        esc = ui.DoubleEsc(window=1.0)
+        esc.feed("\x1b", now=10.0)
+        self.assertEqual(esc.feed("\x1b", now=12.0), "first")
+        self.assertEqual(esc.feed("\x1b[A", now=12.1), "")
+        self.assertEqual(esc.feed("a", now=12.2), "")
+
+
 class ClipTest(unittest.TestCase):
     def test_long_line_becomes_one_row_with_ellipsis(self):
         line = ui.c("› " + "word " * 40, ui.BOLD)

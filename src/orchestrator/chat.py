@@ -441,7 +441,7 @@ class Chat:
                                                  f"{'terminal' if self._visual() else 'headless'}")
         keys = _KeyReader()
         spin.begin()
-        stopping = False
+        stopping, esc = False, ui.DoubleEsc()
         try:
             while True:
                 try:
@@ -452,6 +452,16 @@ class Chat:
                     data = keys.read(0.25)
                     if data:
                         spin.key(data)
+                        pressed = esc.feed(data)
+                        if pressed == "first" and not stopping:
+                            spin.notice = "Press Esc again to stop this task (you can continue it later)"
+                        elif pressed == "second" and not stopping:
+                            stopping = True
+                            try:
+                                os.kill(proc.pid, signal.SIGTERM)
+                            except OSError:
+                                pass
+                            spin.resume("Stopping")
                 except KeyboardInterrupt:
                     if stopping:
                         continue

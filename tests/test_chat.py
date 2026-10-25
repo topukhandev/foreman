@@ -31,6 +31,44 @@ class ChatTest(unittest.TestCase):
         return plan([("orders-api", "modify"), ("admin-ui", "modify")],
                     [step("api", "orders-api", text="add currency"), step("ui", "admin-ui", deps=["api"], text="show currency")])
 
+    def _watch_with_keys(self, presses):
+        """Run Chat._watch against a long-running process while 'typing' the given keys; returns the process."""
+        import subprocess
+        from unittest import mock
+        from orchestrator import chat as chat_module
+        task = self.eng.store.new_task("long job", self.ws.api)
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        keys = list(presses)
+
+        class Reader:
+            def read(self, timeout):
+                import time
+                time.sleep(0.02)
+                return keys.pop(0) if keys else ""
+
+            def close(self):
+                pass
+        deadline = __import__("time").time() + 3
+
+        class Watched:
+            pid = proc.pid
+
+            def poll(self):  # a single Esc must not stop it: give up waiting after a moment instead
+                return proc.poll() if __import__("time").time() < deadline else 0
+        with mock.patch.object(chat_module, "_KeyReader", Reader):
+            self.chat._watch(task["id"], Watched())
+        return proc
+
+    def test_double_escape_stops_a_running_task(self):
+        proc = self._watch_with_keys(["", "\x1b", "\x1b"])
+        proc.wait(timeout=5)
+        self.assertEqual(proc.returncode, -15, "the task process got SIGTERM")
+
+    def test_single_escape_or_arrow_keys_do_not_stop_it(self):
+        proc = self._watch_with_keys(["\x1b", "", "\x1b[A", "\x1b[B"])
+        self.assertIsNone(proc.poll())
+
     def test_only_a_bare_yes_or_no_gets_the_nothing_is_waiting_answer(self):
         self.assertIn("Nothing is waiting", self.chat.respond("yes"))
         self.assertIn("Nothing is waiting", self.chat.respond("Go ahead!"))

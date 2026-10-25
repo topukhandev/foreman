@@ -917,6 +917,24 @@ class FullScreen:
         return False
 
 
+class DoubleEsc:
+    """Esc pressed twice within `window` seconds. Only a lone Esc counts (arrow keys and the like also start with it)."""
+
+    def __init__(self, window: float = 1.0):
+        self.window, self._last = window, 0.0
+
+    def feed(self, data: str, now: Optional[float] = None) -> str:
+        """"" for other input, "first" for the first Esc, "second" for the confirming one."""
+        if data != "\x1b":
+            return ""
+        now = time.time() if now is None else now
+        if now - self._last <= self.window:
+            self._last = 0.0
+            return "second"
+        self._last = now
+        return "first"
+
+
 class Spinner:
     """Animated status line with a shimmer, a blank line, and the input box kept visible underneath
     (type-ahead: Enter queues a message that is sent when the current work finishes). Messages print above."""
@@ -967,7 +985,7 @@ class Spinner:
 
     def _lines(self) -> List[str]:
         secs, w = int(time.time() - self.start), width()
-        meta = (f"{self.who} · " if self.who else "") + f"{secs}s · ctrl+c to interrupt"
+        meta = (f"{self.who} · " if self.who else "") + f"{secs}s · esc esc to stop"
         if len(self.verb) + len(meta) + 6 > w:  # one row, always: a wrapped status line makes the box jump
             meta = (f"{self.who} · " if self.who else "") + f"{secs}s"
         verb = self.verb if len(self.verb) + len(meta) + 6 <= w else self.verb[: max(4, w - len(meta) - 8)] + "…"
