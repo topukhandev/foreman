@@ -6,7 +6,7 @@ a short text for the caller to show ("" / None when nothing changed). Needs a te
 instead when there isn't one."""
 
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from orchestrator import ui
 from orchestrator.config import set_first_provider, set_option
@@ -39,8 +39,9 @@ def models_summary(eng) -> str:
     return "\n".join(lines)
 
 
-def models_menu(eng) -> Optional[str]:
-    """Provider -> model -> effort (only the levels that model supports). Saved to the config; None if cancelled."""
+def models_menu(eng):
+    """Provider -> model -> effort (only the levels that model supports). Saved to the config. True when something was
+    saved, a sentence when it couldn't be, None when cancelled."""
     names = [n for n, p in eng.providers.items() if eng.cfg.providers[n].enabled]
     labels = []
     for n in names:
@@ -62,7 +63,7 @@ def models_menu(eng) -> Optional[str]:
     chosen_id, info = model
     if chosen_id == "default":
         _save(eng, name, "default", None, [])
-        return f"{name}: its CLI decides the model and effort (saved)."
+        return True
     levels = list(info.levels) if info else _levels_for_typed(models)
     effort = None
     if levels:
@@ -70,14 +71,7 @@ def models_menu(eng) -> Optional[str]:
         if effort is None:
             return None
     _save(eng, name, chosen_id, effort or None, levels)
-    p = eng.cfg.providers[name]
-    light = p.choice("light")
-    text = f"{name}: {current_text(eng, name)} (saved)."
-    if light != p.chosen():
-        text += f" Light steps and planning use effort {light.effort}, one level lower."
-    elif not levels:
-        text += " This model has a single fixed setting, so there is no effort to choose."
-    return text
+    return True
 
 
 def _pick_model(eng, name: str, models: List[ModelInfo]):
@@ -176,37 +170,50 @@ def _save(eng, name: str, model: str, effort: Optional[str], levels: List[str]) 
 
 
 # ---------------------------------------------------------------------------------------------- settings
+def snapshot(eng) -> Dict[str, str]:
+    """Every setting the menus change, as short values (to report only what ended up different)."""
+    cfg = eng.cfg
+    on = lambda v: "on" if v else "off"  # noqa: E731
+    out = {"terminal windows": on(cfg.display == "terminal"), "auto-switch at limits": on(cfg.auto_switch),
+           "notifications": on(cfg.notify), "session reuse": on(cfg.reuse_sessions == "fork"),
+           "copy on select": on(cfg.copy_on_select), "planner": cfg.brain, "first worker": next(iter(eng.providers), "?")}
+    for n, p in cfg.providers.items():
+        if p.enabled:
+            c = p.chosen()
+            out[f"{n} model"] = (c.model or "CLI default") + (f" ({c.effort})" if c.effort else "")
+    return out
+
+
+def changes(before: Dict[str, str], after: Dict[str, str]) -> List[str]:
+    """One short line per setting whose value differs from before ("Set auto-switch at limits to off")."""
+    return [f"Set {k} to {v}" for k, v in after.items() if before.get(k) != v]
+
+
 def models_loop(eng) -> Optional[str]:
-    """The models menu until Esc: several providers can be changed in one go. Returns what was changed."""
-    notes: List[str] = []
+    """The models menu until Esc: several providers can be changed in one go. Returns the lines to show."""
+    before, problems = snapshot(eng), []
     while True:
-        note = models_menu(eng)
-        if not note:
-            return "\n".join(notes) or None
-        notes.append(note)
+        res = models_menu(eng)
+        if res is None:
+            break
+        if isinstance(res, str):
+            problems.append(res)
+    return "\n".join(changes(before, snapshot(eng)) + problems) or None
 
 
-def _toggle(eng, key: str) -> str:
-    """Flip a yes/no setting right away (Enter on its row), save it, and say what it is now."""
+def _toggle(eng, key: str) -> None:
+    """Flip a true/false setting right away (Enter on its row) and save it."""
     cfg = eng.cfg
     if key == "display":
-        v = cfg.display != "terminal"
-        set_option(cfg.home, "ui.display", "terminal" if v else "headless")
-        return f"Workers {'open in terminal windows' if v else 'run headless'}."
-    if key == "switch":
-        v = not cfg.auto_switch
-        set_option(cfg.home, "auto_switch", v)
-        return "Providers switch automatically at a limit." if v else \
-            "Foreman waits for a provider's limit to reset instead of switching."
-    if key == "notify":
+        set_option(cfg.home, "ui.display", "headless" if cfg.display == "terminal" else "terminal")
+    elif key == "switch":
+        set_option(cfg.home, "auto_switch", not cfg.auto_switch)
+    elif key == "notify":
         set_option(cfg.home, "ui.notify", not cfg.notify)
-        return f"Notifications {'off' if cfg.notify else 'on'}."
-    if key == "reuse":
-        v = cfg.reuse_sessions != "fork"
-        set_option(cfg.home, "sessions.reuse", "fork" if v else "off")
-        return f"Session reuse {'on' if v else 'off'}."
-    set_option(cfg.home, "ui.copy_on_select", not cfg.copy_on_select)  # "copy"
-    return f"Copy on select {'off' if cfg.copy_on_select else 'on'} (applies the next time you open the chat)."
+    elif key == "reuse":
+        set_option(cfg.home, "sessions.reuse", "off" if cfg.reuse_sessions == "fork" else "fork")
+    else:  # "copy": applies the next time the chat opens
+        set_option(cfg.home, "ui.copy_on_select", not cfg.copy_on_select)
 
 
 TOGGLES = ("display", "switch", "notify", "reuse", "copy")
@@ -215,8 +222,7 @@ TOGGLES = ("display", "switch", "notify", "reuse", "copy")
 def config_menu(eng) -> Optional[str]:
     """A list of settings with their current values. Enter flips a yes/no setting on the spot and opens a panel for the
     others; Esc closes. Nothing is left in the chat while it is open. Returns what changed (one line each)."""
-    changed: List[str] = []
-    at = 0
+    before, at, problems = snapshot(eng), 0, []
     while True:
         cfg = eng.cfg
         first = next(iter(eng.providers), "?")
@@ -237,19 +243,23 @@ def config_menu(eng) -> Optional[str]:
                                    "~/.foreman/config.yaml.", "Esc closes this menu."], labels, allow_text=False,
                       start=at, color=ui.FRAME, esc="close", enter="change")
         if not pick:
-            return "\n".join(changed) if changed else None
+            return "\n".join(changes(before, snapshot(eng)) + problems) or None
         at = labels.index(pick)
         key = rows[at][0]
-        note = _toggle(eng, key) if key in TOGGLES else _change(eng, key)
-        if note:
-            changed.append(note)
+        if key in TOGGLES:
+            _toggle(eng, key)
+        else:
+            note = _change(eng, key)
+            if note and key != "models":  # a sentence that is not a settings change: a problem to show
+                problems.append(note)
         eng.reload_config()
 
 
 def _change(eng, key: str) -> Optional[str]:
     cfg, home = eng.cfg, eng.cfg.home
     if key == "models":
-        return models_loop(eng)
+        models_loop(eng)
+        return None
     if key in ("planner", "first"):
         names = [n for n in eng.providers if cfg.providers[n].enabled]
         labels = []
@@ -268,7 +278,7 @@ def _change(eng, key: str) -> Optional[str]:
             return f"{name} isn't installed; kept the previous choice."
         if key == "planner":
             set_option(home, "brain", name)
-            return f"Planner: {name} (saved)."
-        set_first_provider(home, name)
-        return f"First worker: {name} (saved)."
+        else:
+            set_first_provider(home, name)
+        return None
     return None

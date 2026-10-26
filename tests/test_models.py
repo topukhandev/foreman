@@ -247,9 +247,7 @@ class MenuTest(Base):
         return result
 
     def test_claude_provider_then_model_then_the_levels_it_has(self):
-        text = self.run_menu(menus.models_menu, ["claude", "opus", "xhigh"])
-        self.assertIn("claude: opus · effort xhigh (saved)", text)
-        self.assertIn("Light steps and planning use effort high", text)
+        self.assertIs(self.run_menu(menus.models_menu, ["claude", "opus", "xhigh"]), True)
         title, options, _ = self.asked[2]
         self.assertEqual(title, "claude: effort for opus")
         self.assertEqual([o.split()[0] for o in options], ["low", "medium", "high", "xhigh", "max"])
@@ -263,9 +261,8 @@ class MenuTest(Base):
         self.assertEqual(len(self.asked[2][1]), 3)
         self.assertEqual(self.eng.cfg.providers["antigravity"].chosen(), Choice("gemini-3.8-flash", "low"))
         self.asked.clear()
-        text = self.run_menu(menus.models_menu, ["antigravity", "claude-sonnet-4-6"])
+        self.run_menu(menus.models_menu, ["antigravity", "claude-sonnet-4-6"])
         self.assertEqual(len(self.asked), 2, "no effort question for a model with a single setting")
-        self.assertIn("single fixed setting", text)
         self.assertEqual(self.eng.cfg.providers["antigravity"].chosen(), Choice("claude-sonnet-4-6", None))
 
     def test_opencode_asks_for_the_backend_first_and_can_narrow_a_long_list(self):
@@ -273,12 +270,11 @@ class MenuTest(Base):
         self.assertEqual([t for t, _, _ in self.asked[1:3]], ["Find a model", "opencode: backend"])
         self.assertEqual(self.eng.cfg.providers["opencode"].chosen(), Choice("opencode/beam-free", "medium"))
         self.asked.clear()
-        text = self.run_menu(menus.models_menu, ["opencode", "openrouter m[3]$", "openrouter/m3", "high"])
+        self.run_menu(menus.models_menu, ["opencode", "openrouter m[3]$", "openrouter/m3", "high"])
         titles = [t for t, _, _ in self.asked]
         self.assertEqual(titles, ["Provider", "Find a model", "opencode: model", "opencode: effort for openrouter/m3"],
                          "a search comes first, across all backends: no need to know the backend")
         self.assertTrue(self.asked[2][1][1].startswith("openrouter/m3"), self.asked[2][1])
-        self.assertIn("opencode: openrouter/m3 · effort high", text)
         self.assertEqual(self.eng.cfg.providers["opencode"].effort_levels(), ["low", "high"])
 
     def test_the_model_search_is_a_regex(self):
@@ -296,8 +292,7 @@ class MenuTest(Base):
         self.assertIsNone(menus.search(ms, "(unclosed"), "an invalid regex is reported, not a crash")
 
     def test_cli_default_and_cancelling(self):
-        text = self.run_menu(menus.models_menu, ["claude", "CLI default"])
-        self.assertIn("its CLI decides", text)
+        self.assertIs(self.run_menu(menus.models_menu, ["claude", "CLI default"]), True)
         self.assertEqual(self.eng.cfg.providers["claude"].choice("light"), Choice())
         before = self.saved()
         self.assertIsNone(self.run_menu(menus.models_menu, ["claude", None]))
@@ -313,9 +308,7 @@ class MenuTest(Base):
         self.eng._fixed_visual = None  # as when started without --visual/--headless: the setting decides
         text = self.run_menu(menus.config_menu, ["Show workers", "Switch provider", "Desktop notification", None])
         self.assertEqual([t for t, _, _ in self.asked], ["Settings"] * 4, "no yes/no question: Enter flips the value")
-        self.assertIn("Workers open in terminal windows.", text)
-        self.assertIn("Foreman waits for a provider's limit", text)
-        self.assertIn("Notifications off.", text)
+        self.assertEqual(text, "Set terminal windows to on\nSet auto-switch at limits to off\nSet notifications to off")
         saved = self.saved()
         self.assertEqual((saved["ui"]["display"], saved["auto_switch"], saved["ui"]["notify"]),
                          ("terminal", False, False))
@@ -324,8 +317,14 @@ class MenuTest(Base):
         self.assertTrue(first[0].startswith("Show workers in terminal windows") and first[0].endswith("false"), first[0])
         self.assertTrue(last[0].endswith("true") and last[1].endswith("false") and last[5].endswith("false"), last)
         self.assertEqual([s for _, _, s in self.asked], [0, 0, 1, 5], "the selection stays on the row you changed")
-        again = self.run_menu(menus.config_menu, ["Show workers", None])
-        self.assertIn("run headless", again)
+        self.assertEqual(self.run_menu(menus.config_menu, ["Show workers", None]), "Set terminal windows to off")
+        self.assertIsNone(self.run_menu(menus.config_menu, ["Show workers", "Show workers", None]),
+                          "flipped back: nothing changed, nothing said")
+
+    def test_the_models_menu_says_one_short_line_per_provider_changed(self):
+        text = self.run_menu(menus.models_loop, ["claude", "opus", "xhigh", "claude", "sonnet", "high",
+                                                  "antigravity", "gemini", "low", None])
+        self.assertEqual(text, "Set claude model to sonnet (high)\nSet antigravity model to gemini-3.8-flash (low)")
 
     def test_the_settings_menu_reaches_models_and_the_first_worker(self):
         self.run_menu(menus.config_menu, ["Models", "claude", "sonnet", "max", None, "First worker", "antigravity", None])
