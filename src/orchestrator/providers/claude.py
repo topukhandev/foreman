@@ -10,8 +10,10 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from orchestrator.providers.base import (GIT_POLICY, LIMIT, OUTPUT, TRANSIENT, Capabilities, Provider, RunRequest,
-                                         RunResult, SessionInfo, fit_prompt, stream_session_id, tool_line)
+from orchestrator.providers.base import (GIT_POLICY, LIMIT, OUTPUT, TRANSIENT, Capabilities, ModelInfo, Provider,
+                                         RunRequest, RunResult, SessionInfo, fit_prompt, sort_levels,
+                                         stream_session_id, tool_line)
+from orchestrator.util import run_process
 
 READ_TOOLS = ["Read", "Grep", "Glob", "LS",
               "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)", "Bash(git show *)",
@@ -44,9 +46,8 @@ class ClaudeProvider(Provider):
         # stream-json gives live activity (and a readable visible terminal); its last line is the result object.
         streamed = req.visual or req.on_activity is not None or req.on_session is not None
         cmd += ["--output-format", "stream-json", "--verbose"] if streamed else ["--output-format", "json"]
-        model = req.model or self.settings.model
-        if model:
-            cmd += ["--model", str(model)]
+        if req.model:
+            cmd += ["--model", str(req.model)]
         if req.effort:  # verified 2026-10-26: `--model claude-sonnet-5-5 --effort high` runs that model (modelUsage)
             cmd += ["--effort", req.effort]
         if not req.persist and not req.session_id:
@@ -134,6 +135,18 @@ class ClaudeProvider(Provider):
             if part.get("type") == "text" and part.get("text", "").strip():
                 return "· " + " ".join(part["text"].split())[:140]
         return None
+
+    def list_models(self) -> List[ModelInfo]:
+        """Claude Code has no model list command: the aliases and the effort levels are read from `--help` (so a new
+        alias or level shows up without a Foreman release); any full model name can still be typed."""
+        res = run_process([self._binary or self.settings.command, "--help"], cwd=os.getcwd(), timeout=20)
+        text = res.out + res.err
+        m = re.search(r"--model <model>(.*?)(?=\n\s+-{1,2}[a-z])", text, re.S)
+        aliases = re.findall(r"'([a-z][a-z0-9-]*)'", m.group(1)) if m else []
+        m = re.search(r"--effort <level>[^(]*\(([^)]*)\)", text, re.S)
+        levels = sort_levels([x.strip() for x in re.split(r"[,\s]+", m.group(1)) if x.strip()]) if m else \
+            ["low", "medium", "high", "xhigh", "max"]
+        return [ModelInfo(a, f"{a} (the latest {a} model)", levels) for a in dict.fromkeys(aliases or ["sonnet", "opus"])]
 
     def discover_sessions(self, cwd: str) -> List[SessionInfo]:
         folder = os.path.join(claude_projects_dir(), encode_cwd(cwd))

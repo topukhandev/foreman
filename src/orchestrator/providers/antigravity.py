@@ -6,8 +6,9 @@
 - Headless mode cannot prompt, and any denied permission aborts the turn with no output, so both modes pass
   `--dangerously-skip-permissions`. Read steps add `--mode plan` + a read-only rule; Foreman flags any file the
   planner or a read step changes. Git safety: prompt policy plus the engine's HEAD check.
-- `--model=<id>` (ids from `agy models`, e.g. gemini-3.8-flash-high, which carry their effort) and `--effort=<level>`
-  are both accepted together (verified 2026-10-26).
+- `--model=<id>` takes the ids `agy models` lists. Some models come in effort variants that differ only by a suffix
+  (gemini-3.8-flash-low/-medium/-high): Foreman treats those as one model with levels and builds the id. Models with
+  a single id have no effort choice. (`--effort` also exists on agy but was not needed; verified 2026-10-26.)
 - `-p` must be attached (`-p=<prompt>`), otherwise agy parses the next flag as the prompt.
 - Web (verified 2026-10-25): plan mode has `search_web` (and `read_url_content`); agy cannot disable them per run,
   so the read-only rule tells it whether web research is allowed (prompt-level only).
@@ -17,10 +18,12 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import List
+import re
+from typing import Dict, List
 
-from orchestrator.providers.base import (GIT_POLICY, OUTPUT, Capabilities, Provider, RunRequest, RunResult,
-                                         SessionInfo, fit_prompt, stream_session_id, tool_line)
+from orchestrator.providers.base import (GIT_POLICY, OUTPUT, Capabilities, ModelInfo, Provider, RunRequest, RunResult,
+                                         SessionInfo, fit_prompt, sort_levels, stream_session_id, tool_line)
+from orchestrator.util import run_process
 
 
 # Plan mode denies terminal commands; if the agent tries one anyway, agy aborts with no output.
@@ -38,17 +41,17 @@ class AntigravityProvider(Provider):
     name = "antigravity"
     capabilities = Capabilities(resume=True, fork=False, structured_output=True,
                                 session_discovery=True, enforced_read_only=True, web=True,
-                                writes_extra_dirs=True)
+                                writes_extra_dirs=True, effort_in_model=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
         req = fit_prompt(req)
         streamed = req.visual or req.on_activity is not None or req.on_session is not None
         cmd = [self._binary or self.settings.command, "--output-format", "stream-json" if streamed else "json"]
-        model = req.model or self.settings.model
+        model = req.model
+        if model and req.effort:  # the effort is a variant of the model: gemini-3.8-flash + high = gemini-3.8-flash-high
+            model = f"{model}-{req.effort}"
         if model:
             cmd.append(f"--model={model}")
-        if req.effort:  # verified 2026-10-26 together with --model=gemini-3.8-flash-high (`agy models` lists the ids)
-            cmd.append(f"--effort={req.effort}")
         if req.session_id:
             cmd.append(f"--conversation={req.session_id}")
         for d in req.extra_dirs:
@@ -119,6 +122,30 @@ class AntigravityProvider(Provider):
                     "view_file": "Read", "search_web": "WebSearch", "read_url_content": "WebFetch"}.get(info.get("name") or su.get("tool_name"), info.get("name") or "Tool")
             return tool_line(name, arg, cwd)
         return None
+
+    def list_models(self) -> List[ModelInfo]:
+        """From `agy models` (tab-separated id and name). Ids that differ only by a -low/-medium/-high suffix are one
+        model with those effort levels; every other id is a model with a single fixed setting."""
+        res = run_process([self._binary or self.settings.command, "models"], cwd=os.getcwd(), timeout=60)
+        rows = [line.split("\t", 1) for line in res.out.splitlines() if "\t" in line]
+        variants: Dict[str, Dict[str, str]] = {}
+        for mid, name in rows:
+            m = re.match(r"^(.*)-(minimal|low|medium|high|xhigh|max)$", mid.strip())
+            if m:
+                variants.setdefault(m.group(1), {})[m.group(2)] = re.sub(r"\s*\((?:minimal|low|medium|high|xhigh|max)\)\s*$",
+                                                                       "", name.strip(), flags=re.I)
+        out, seen = [], set()
+        for mid, name in rows:
+            mid = mid.strip()
+            m = re.match(r"^(.*)-(minimal|low|medium|high|xhigh|max)$", mid)
+            base = m.group(1) if m else None
+            if base and len(variants.get(base, {})) > 1:
+                if base not in seen:
+                    seen.add(base)
+                    out.append(ModelInfo(base, variants[base][m.group(2)], sort_levels(variants[base])))
+            else:
+                out.append(ModelInfo(mid, name.strip()))
+        return out
 
     def discover_sessions(self, cwd: str) -> List[SessionInfo]:
         db = antigravity_index()

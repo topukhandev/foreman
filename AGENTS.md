@@ -33,11 +33,14 @@
 
 ## Models and effort
 
-- Every run gets a model and effort from `providers.<name>.profiles` (light / standard / heavy for steps, plan /
-  review for Foreman's own calls; built-in defaults in `config.DEFAULT_PROFILES`). The planner only rates a step's
-  `weight`; the mapping is deterministic. Per-task `--effort` / `--model` (`/effort` in chat) sit on top.
-- Verify a CLI's model and effort options before passing them, and record that in the adapter's docstring; a CLI
-  without an effort option ignores `effort` (OpenCode).
+- One model + effort per provider, chosen with the interactive `foreman models` / `/models` (saved as
+  `providers.<name>.model/effort/levels`; built-in defaults in `config.DEFAULT_MODELS`). The planner only rates a
+  step's `weight` (light/standard); light steps and planning run one level below the choice (`ProviderSettings.choice`).
+  There are no per-task overrides: models and effort change only through the menu.
+- Models and effort levels come from the CLIs (`Provider.list_models`), never from a hard-coded list; verify what a
+  CLI accepts before passing it and record that in the adapter's docstring.
+- `auto_switch: false` makes a usage limit wait for the same provider (steps, planning, review) instead of handing over.
+  Settings the user may want to change belong in `menus.config_menu`.
 
 ## Limits (config.yaml → `limits`)
 

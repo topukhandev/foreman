@@ -34,7 +34,7 @@ class ClaudeTest(unittest.TestCase):
         self.p = ClaudeProvider(ProviderSettings("claude", command="claude", model="sonnet"))
 
     def test_read_mode_is_tool_restricted(self):
-        cmd = self.p.build_command(RunRequest("hi", "/x", mode="read", extra_dirs=["/y"], schema=SCHEMA))
+        cmd = self.p.build_command(RunRequest("hi", "/x", mode="read", extra_dirs=["/y"], schema=SCHEMA, model="sonnet"))
         self.assertEqual(cmd[-2:], ["--", "hi"])
         self.assertIn("--disallowedTools", cmd)
         self.assertIn("Edit", cmd[cmd.index("--disallowedTools"):])

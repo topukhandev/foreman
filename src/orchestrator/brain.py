@@ -40,7 +40,7 @@ PLAN_SCHEMA = {
             "id": _STR, "project": _STR, "kind": {"type": "string", "enum": ["investigate", "implement"]},
             "instructions": _STR, "depends_on": _STRS, "read_projects": _STRS,
             "expected_minutes": {"type": "integer"},
-            "weight": {"type": "string", "enum": ["light", "standard", "heavy"]}},
+            "weight": {"type": "string", "enum": ["light", "standard"]}},
             "required": ["id", "project", "kind", "instructions"]}},
         "checks": {"type": "array", "items": {"type": "object", "properties": {
             "project": _STR, "command": _STR, "why": _STR}, "required": ["project", "command"]}},
@@ -110,9 +110,8 @@ How to plan (be proportional - most requests are small):
    may need to read. For a step that waits on long jobs (large downloads, builds, big scans) set expected_minutes
    honestly (Foreman allows about 1.5x that; a step that still runs out of time is resumed in the same session),
    and prefer splitting "start the job in the background" from "process its result". Rate each step's "weight" so
-   Foreman can give it the right model and effort: light = reading, summarising, a lookup or a one-spot edit;
-   standard = an ordinary feature or fix in one project; heavy = a risky or intricate change (money, auth, data,
-   migrations, a shared interface, a hard bug) where a mistake is costly. Most steps are light or standard.
+   Foreman can spare effort: light = reading, summarising, a lookup or a one-spot edit; standard = anything
+   else (a feature or fix, anything risky: money, auth, data, migrations, a shared interface, a hard bug).
 6. Checks: commands Foreman runs itself to validate (tests, type-check, build) in modified or test projects.
    Prefer the registry's test command; narrow it when the suite is large. Non-destructive only: no deploys, DB
    resets, network installs or git commands.
@@ -157,7 +156,7 @@ class Brain:
                  choice_for: Optional[Callable[[str, str], Any]] = None,
                  on_call: Optional[Callable[[str], bool]] = None, on_start: Optional[Callable[[str, str], None]] = None,
                  on_activity: Optional[Callable[[str, str, str], None]] = None,
-                 on_fail: Optional[Callable[[str, RunResult], None]] = None):
+                 on_fail: Optional[Callable[[str, RunResult], None]] = None, stop_on_limit: bool = False):
         self.providers = providers  # preference order; first that succeeds wins
         self.timeout = timeout
         self.choice_for = choice_for or (lambda provider, purpose: None)  # -> Choice(model, effort) or None
@@ -165,6 +164,7 @@ class Brain:
         self.on_start = on_start or (lambda name, purpose: None)
         self.on_activity = on_activity
         self.on_fail = on_fail or (lambda name, result: None)
+        self.stop_on_limit = stop_on_limit  # automatic switching is off: a usage limit ends the call (the caller waits)
 
     def call(self, prompt: str, schema: Dict[str, Any], cwd: str, extra_dirs: Optional[List[str]] = None,
              exclude: Optional[List[str]] = None, purpose: str = "plan", web: bool = False) -> Dict[str, Any]:
@@ -175,6 +175,8 @@ class Brain:
             if not self.on_call(p.name):
                 errors.append(f"{p.name}: daily limit reached")
                 kinds.append("limit")
+                if self.stop_on_limit:
+                    break
                 continue
             self.on_start(p.name, purpose)
             act = (lambda text, _n=p.name: self.on_activity(_n, purpose, text)) if self.on_activity else None
@@ -189,6 +191,8 @@ class Brain:
             errors.append(f"{p.name}: {res.error or 'no structured output'}")
             kinds.append(res.kind)
             self.on_fail(p.name, res)
+            if self.stop_on_limit and res.kind == "limit":
+                break
         raise BrainError("; ".join(errors) or "no provider available for planning", kinds)
 
     # ------------------------------------------------------------------ prompts

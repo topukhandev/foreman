@@ -32,6 +32,7 @@ class Capabilities:
     enforced_read_only: bool = False  # tool-level (not just prompt-level) read-only mode
     web: bool = False                # can search / fetch the web in read-only steps
     writes_extra_dirs: bool = False  # write steps can also write in extra_dirs (Foreman's progress notes)
+    effort_in_model: bool = False    # the effort is part of the model id (agy: gemini-3.8-flash + high = ...-flash-high)
 
 
 @dataclass
@@ -189,6 +190,24 @@ def tool_line(name: str, arg: Any, cwd: str) -> str:
     return f"{name}({arg[:400]})"  # the engine shortens it after turning project paths into names
 
 
+# Effort levels from the lowest to the highest any provider offers; each model supports some of them.
+LEVEL_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def sort_levels(levels) -> List[str]:
+    known = [l for l in LEVEL_ORDER if l in levels]
+    return known + sorted(l for l in levels if l not in LEVEL_ORDER)
+
+
+@dataclass
+class ModelInfo:
+    """A model a provider offers. levels: the effort levels it supports, lowest first (empty: one fixed setting)."""
+    id: str
+    name: str = ""
+    levels: List[str] = field(default_factory=list)
+    group: str = ""  # a sub-division of a provider with many models (OpenCode's backends)
+
+
 @dataclass
 class SessionInfo:
     provider: str
@@ -218,6 +237,10 @@ class Provider:
         raise NotImplementedError
 
     def discover_sessions(self, cwd: str) -> List[SessionInfo]:
+        return []
+
+    def list_models(self) -> List[ModelInfo]:
+        """The models this CLI offers right now, asked of the CLI itself (empty when it can't say)."""
         return []
 
     # Shared helpers --------------------------------------------------------------

@@ -28,7 +28,7 @@ from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCH
                                 task_context)
 from orchestrator.budget import Budget
 from orchestrator.clipboard import image_dirs
-from orchestrator.config import WEIGHTS, Choice, Config
+from orchestrator.config import Choice, Config
 from orchestrator.knowledge import ProjectKnowledge, slug
 from orchestrator.modes import Mode, catalog, load_modes, resolve as resolve_mode
 from orchestrator.providers.base import (AUTH, CONTEXT, LIMIT, OUTPUT, OWN_PROMPT_PREFIXES, STOPPED, TIMEOUT,
@@ -138,6 +138,7 @@ class Engine:
         self.registry = registry
         self.store = store
         self.out = out
+        self._fixed_visual, self._notifier = visual, notifier
         self.visual = (cfg.display == "terminal") if visual is None else visual
         self.notifier = notifier if cfg.notify else (lambda *_: None)
         self.budget = Budget(cfg.home, {n: s.max_runs_per_day for n, s in cfg.providers.items()},
@@ -145,20 +146,28 @@ class Engine:
         self._lock = threading.RLock()
         self._last_activity: Dict[Any, Tuple[float, str]] = {}
 
+    def reload_config(self) -> None:
+        """Re-read config.yaml into this running engine, after a menu or another process changed it."""
+        from orchestrator.config import load_config
+        self.cfg = load_config(self.cfg.home)
+        if self._fixed_visual is None:
+            self.visual = self.cfg.display == "terminal"
+        self.notifier = self._notifier if self.cfg.notify else (lambda *_: None)
+        order = [n for n in self.cfg.providers if n in self.providers]
+        self.providers = {n: self.providers[n] for n in order} | {n: p for n, p in self.providers.items() if n not in order}
+
     # ================================================================== entry points
     def handle(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
-               mode: Optional[str] = None, dry_run: bool = False, effort: Optional[str] = None,
-               model: Optional[str] = None) -> Dict[str, Any]:
+               mode: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
         """Single entry for free-form requests from any interface. Returns {"task": ..., "report": str}.
         dry_run: plan only (see plan_only)."""
-        task, msg = self.route(request, cwd, conversation, confirm_plan, mode, effort, model)
+        task, msg = self.route(request, cwd, conversation, confirm_plan, mode)
         if not task:
             return {"task": None, "report": msg}
         return self.plan_only(task) if dry_run else self.execute(task)
 
     def route(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
-              mode: Optional[str] = None, effort: Optional[str] = None,
-              model: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+              mode: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
         """mode: a lifecycle mode the user chose (name or title), or None to let the planner recommend one."""
         """Decide what a request is without executing it: an instant answer (returned as text) or a task to run."""
         cwd = os.path.abspath(cwd)
@@ -178,7 +187,7 @@ class Engine:
                 return None, res["report"]  # otherwise nothing recorded matches: let the planner answer it
         if RESUME_RE.search(request):
             return self.prepare_resume(self._ref_from(request), note=request, cwd=cwd)
-        return self.prepare_new(request, cwd, conversation, confirm_plan, mode, effort=effort, model=model), ""
+        return self.prepare_new(request, cwd, conversation, confirm_plan, mode), ""
 
     def small_talk(self, text: str, cwd: str) -> str:
         """Instant, AI-free reply to greetings/thanks so a 'hey' never costs a model call."""
@@ -354,17 +363,8 @@ class Engine:
 
     def prepare_new(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
                     mode: Optional[str] = None, feature: Optional[str] = None,
-                    parent: Optional[str] = None, effort: Optional[str] = None,
-                    model: Optional[str] = None) -> Dict[str, Any]:
+                    parent: Optional[str] = None) -> Dict[str, Any]:
         task = self.store.new_task(request, os.path.abspath(cwd))
-        if effort:
-            task["effort"] = effort  # for every worker of this task, whichever provider runs it
-        if model:  # "claude:opus" names the provider; a bare model name is for the preferred (first usable) one
-            name, _, rest = model.partition(":")
-            name, rest = (name, rest) if rest and name in self.providers else \
-                (next((n for n in self.providers if self._usable(n)), ""), model)
-            if name:
-                task["model_for"] = {name: rest}
         task["status"] = "queued"
         task["conversation"] = conversation[-2500:]
         task["confirm_plan"] = confirm_plan
@@ -478,11 +478,7 @@ class Engine:
                    f"Previous step ({prev.get('mode')}, task #{prev['id']}): {short(prev.get('summary') or prev['title'], 400)}"
                    + (f"\nIts document: {doc['project']}/{doc['path']}" if doc else "")
                    + f"\nOriginal request: {prev['request']}")
-        task = self.prepare_new(request, prev["cwd"], mode=nxt["mode"], feature=prev.get("feature"), parent=prev["id"],
-                                effort=prev.get("effort"))
-        if prev.get("model_for"):
-            task["model_for"] = dict(prev["model_for"])
-            self.store.save(task)
+        task = self.prepare_new(request, prev["cwd"], mode=nxt["mode"], feature=prev.get("feature"), parent=prev["id"])
         prev["next_started"] = task["id"]
         self.store.save(prev)
         return task, ""
@@ -748,7 +744,7 @@ class Engine:
                 "read_projects": [r.name for r in reads if r and r.name != proj.name],
                 "status": "pending", "attempts": 0, "provider": None, "session_id": None, "summary": "",
                 "expected_min": max(0, min(int(s.get("expected_minutes") or 0), 600)),
-                "weight": s.get("weight") if s.get("weight") in WEIGHTS else "standard",
+                "weight": "light" if s.get("weight") == "light" else "standard",
             })
         for c in plan.get("checks", []):
             proj = self.registry.find(c.get("project", ""))
@@ -859,8 +855,15 @@ class Engine:
         tried: List[str] = []    # providers given up on for this step in this run
         limited: List[str] = []  # ... of those, the ones out of usage limits (worth waiting for)
         result: Optional[RunResult] = None
+        only: Optional[str] = None  # auto-switch off: after a usage limit this provider is the only one to use
         while not STOPPING.is_set():
-            choice = self._choose(task, step, proj.path, tried)
+            if not self.cfg.auto_switch and not only:
+                pref = self._preferred(step)
+                if pref and pref not in tried and self._rested_for_limit(pref):  # don't quietly use another one
+                    if self._wait_for_limits(task, step, [pref]):
+                        continue
+                    break
+            choice = self._choose(task, step, proj.path, tried + [n for n in self.providers if only and n != only])
             if not choice:
                 if limited and self._wait_for_limits(task, step, limited):
                     tried = [n for n in tried if n not in limited]
@@ -887,7 +890,7 @@ class Engine:
                                    "what is next). This file is outside the project and is Foreman's; if your run is cut "
                                    "off, the next worker continues from it.")
             self._say(task, f"{step['kind']} {step['project']} via {provider.name}" + (f" ({why})" if why else ""))
-            pick = self._pick(task, provider.name, step.get("weight") or "standard")
+            pick = self._pick(provider.name, "light" if step.get("weight") == "light" else "standard")
             self.store.event(task["id"], "step_start", step=step["id"], provider=provider.name, project=step["project"],
                              step_kind=step["kind"], session=session_id, fork=fork, why=why, model=pick.model,
                              effort=pick.effort, weight=step.get("weight"))
@@ -956,9 +959,12 @@ class Engine:
                 continue
             if kind == LIMIT:
                 limited.append(provider.name)
+                if not self.cfg.auto_switch:
+                    only = provider.name
                 until = f" (resets {clock(result.retry_at)})" if result.retry_at else ""
-                self._notice(task, f"{provider.name} reached its usage limit{until} during {step['project']}; another "
-                                   "provider takes over from where it stopped")
+                self._notice(task, f"{provider.name} reached its usage limit{until} during {step['project']}; "
+                                   + ("another provider takes over from where it stopped" if self.cfg.auto_switch else
+                                      "waiting for it (automatic switching is off)"))
             elif kind == AUTH:
                 self._notice(task, f"{provider.name} can't log in ({short(result.error or '', 120)}); renew its key. "
                                    "Another provider takes over.")
@@ -1118,7 +1124,7 @@ class Engine:
             while time.time() < until and not STOPPING.is_set():
                 if STOPPING.wait(min(30.0, max(0.05, until - time.time()))):
                     break
-                if any(self._usable(n) for n in self.providers if n not in limited):
+                if self.cfg.auto_switch and any(self._usable(n) for n in self.providers if n not in limited):
                     break
             with self._lock:
                 task.pop("waiting", None)
@@ -1209,16 +1215,26 @@ class Engine:
                     f"{proj.name} {dep.get('type', 'relates to')} {other.name}: {dep.get('evidence', '')}")
         task.setdefault("suggestion_buffer", []).extend(data.get("suggestions", []) or [])
 
-    def _pick(self, task: Optional[Dict[str, Any]], provider: str, role: str) -> Choice:
-        """Model and effort for one run: the provider's profile for the role (light / standard / heavy for a step, plan or
-        review for Foreman's own calls), then the user's choices for this task on top: `--effort` for every provider,
-        `--model` for the one it was given for. Providers without a profile use their CLI default."""
+    def _rested_for_limit(self, name: str) -> bool:
+        h = self._health().get(name) or {}
+        return h.get("kind") == LIMIT and h.get("until", 0) > time.time()
+
+    def _preferred(self, step: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """The provider Foreman would use first for a step: the one holding its session, else the first one in the
+        preference order that is installed and can log in (one resting for a usage limit still counts)."""
+        if step and step.get("session_id") and step.get("provider") in self.providers:
+            return step["provider"]
+        for name, p in self.providers.items():
+            if p.available()[0] and (name not in self.unhealthy() or self._rested_for_limit(name)):
+                return name
+        return None
+
+    def _pick(self, provider: str, role: str) -> Choice:
+        """Model and effort for one run: what the user chose for that provider (`foreman models`, or the built-in
+        default). Light steps and planning (role "light" / "plan") run one effort level lower; "standard" and "review"
+        use it as chosen. Providers without a choice use their CLI default."""
         settings = self.cfg.providers.get(provider)
-        base = settings.choice(role) if settings else Choice()
-        mine = ((task or {}).get("model_for") or {}).get(provider)
-        effort = (task or {}).get("effort")
-        return Choice(mine if mine and role in WEIGHTS else base.model,
-                      effort if effort and role in WEIGHTS else base.effort)
+        return settings.choice(role) if settings else Choice()
 
     def _choose(self, task, step, cwd, tried) -> Optional[Tuple[Provider, Optional[str], bool, str]]:
         """Pick provider + session. Continuity first, then forking a recent user session, then a new session."""
@@ -1226,7 +1242,8 @@ class Engine:
         if not avail:
             return None
         # A provider near its usage limit keeps the sessions it has, but new work goes to the others first.
-        avail = [p for p in avail if not self._pressed(p.name)] + [p for p in avail if self._pressed(p.name)]
+        if self.cfg.auto_switch:
+            avail = [p for p in avail if not self._pressed(p.name)] + [p for p in avail if self._pressed(p.name)]
         mode = self._mode(task)
         if mode and mode.web and step["kind"] == "investigate":  # research steps go to providers that can browse
             avail = [p for p in avail if p.capabilities.web] + [p for p in avail if not p.capabilities.web]
@@ -1548,11 +1565,12 @@ class Engine:
             names.insert(0, self.cfg.brain)
         if prefer_not:
             names = [n for n in names if n not in prefer_not] + [n for n in names if n in prefer_not]
-        names = [n for n in names if not self._pressed(n)] + [n for n in names if self._pressed(n)]
+        if self.cfg.auto_switch:
+            names = [n for n in names if not self._pressed(n)] + [n for n in names if self._pressed(n)]
         provs = [self.providers[n] for n in names if self._usable(n)]
         tid = task["id"] if task else None
-        return Brain(provs, timeout=self.cfg.limits.brain_timeout_sec,
-                     choice_for=lambda name, purpose: self._pick(task, name, "review" if purpose == "review" else "plan"),
+        return Brain(provs, timeout=self.cfg.limits.brain_timeout_sec, stop_on_limit=not self.cfg.auto_switch,
+                     choice_for=lambda name, purpose: self._pick(name, "review" if purpose == "review" else "plan"),
                      on_call=lambda name: self.budget.acquire(name)[0],
                      on_start=lambda name, purpose: tid and self.store.event(tid, "thinking", provider=name, purpose=purpose),
                      on_activity=(lambda name, purpose, text: self._activity(tid, name, purpose, text)) if tid else None,
@@ -1613,6 +1631,14 @@ class Engine:
         """A brain call (plan, review, document) that waits like a step does when every provider is out of its usage
         limit, instead of failing. Other errors are raised as they are."""
         holder: Dict[str, Any] = {}
+        if not self.cfg.auto_switch:  # the planner's provider is resting for a limit: wait for it, don't switch
+            names = list(self.providers)
+            if self.cfg.brain in names:
+                names.remove(self.cfg.brain)
+                names.insert(0, self.cfg.brain)
+            pref = next((n for n in names if self.providers[n].available()[0]), None)
+            if pref and self._rested_for_limit(pref):
+                self._wait_for_limits(task, holder, [pref])
         while True:
             try:
                 return call()

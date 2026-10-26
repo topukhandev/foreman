@@ -17,16 +17,16 @@ roots:
 # Provider used for the orchestrator's own reasoning (triage, planning, review).
 brain: claude
 
+# When a provider reaches its usage limit: true = another provider takes over the step; false = wait for its reset.
+auto_switch: true
+
 # Worker preference order. The first available provider is used unless a step needs another.
 providers:
   claude:
     enabled: true
     command: claude
-    model: null          # set to force one worker model for every step (null = use `profiles`, see `foreman models`)
-    brain_model: null    # set to force one model for planning/review
+    model: null          # null = built-in default (Sonnet 5.5, high effort); choose with `foreman models`
     max_runs_per_day: 300
-    # profiles:          # built in; override any part. light / standard / heavy = how big the planner rated a step,
-    #   standard: {model: claude-sonnet-5-5, effort: high}   # plan / review = Foreman's own planning and review
   opencode:
     enabled: true
     command: opencode
@@ -77,13 +77,13 @@ sessions:
 
 
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-WEIGHTS = ("light", "standard", "heavy")  # how big the planner rates a step
-ROLES = WEIGHTS + ("plan", "review")      # plus Foreman's own planning and review calls
+DEFAULT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+LIGHT_ROLES = ("light", "plan")  # these run one effort level below the chosen one (when the model has a lower one)
 
 
 @dataclass
 class Choice:
-    """Model and reasoning effort for one kind of work; None = the CLI's own default."""
+    """Model and reasoning effort for a run; None = the CLI's own default."""
     model: Optional[str] = None
     effort: Optional[str] = None
 
@@ -91,18 +91,11 @@ class Choice:
         return " ".join(x for x in (self.model, f"effort {self.effort}" if self.effort else "") if x) or "CLI default"
 
 
-def _sonnet(effort: str) -> Choice:
-    return Choice("claude-sonnet-5-5", effort)
-
-
-# Built in, used when the config says nothing: the middle tier at high effort (never max); planning one step lower,
-# review at high. agy's Gemini model ids already carry their effort (gemini-3.8-flash-high). Other CLIs: their default.
-DEFAULT_PROFILES: Dict[str, Dict[str, Choice]] = {
-    "claude": {"light": _sonnet("medium"), "standard": _sonnet("high"), "heavy": _sonnet("high"),
-               "plan": _sonnet("medium"), "review": _sonnet("high")},
-    "antigravity": {"light": Choice("gemini-3.8-flash-medium"), "standard": Choice("gemini-3.8-flash-high"),
-                    "heavy": Choice("gemini-3.8-flash-high"), "plan": Choice("gemini-3.8-flash-medium"),
-                    "review": Choice("gemini-3.8-flash-high")},
+# What a provider uses until the user picks a model with `foreman models` / `/models`: the middle tier at high effort
+# (never max). Other CLIs: their own default.
+DEFAULT_MODELS: Dict[str, Dict[str, Any]] = {
+    "claude": {"model": "claude-sonnet-5-5", "effort": "high", "levels": list(DEFAULT_LEVELS)},
+    "antigravity": {"model": "gemini-3.8-flash", "effort": "high", "levels": ["low", "medium", "high"]},
 }
 
 
@@ -111,18 +104,31 @@ class ProviderSettings:
     name: str
     enabled: bool = True
     command: str = ""
-    model: Optional[str] = None
-    brain_model: Optional[str] = None
+    model: Optional[str] = None      # None = the built-in default; "default" = let the CLI decide
+    effort: Optional[str] = None
+    levels: List[str] = field(default_factory=list)  # effort levels of that model, lowest first (saved by the menu)
     max_runs_per_day: int = 300
     extra: Dict[str, Any] = field(default_factory=dict)
-    profiles: Dict[str, Choice] = field(default_factory=dict)
+
+    def chosen(self) -> Choice:
+        """The model and effort picked for this provider (or its built-in default)."""
+        if self.model is None:
+            d = DEFAULT_MODELS.get(self.name) or {}
+            return Choice(d.get("model"), d.get("effort"))
+        return Choice(None, None) if self.model == "default" else Choice(self.model, self.effort)
+
+    def effort_levels(self) -> List[str]:
+        return list(self.levels or (DEFAULT_MODELS.get(self.name, {}).get("levels") if self.model is None else None)
+                    or [])
 
     def choice(self, role: str) -> Choice:
-        """Model and effort for a role (light/standard/heavy/plan/review). An explicit `model` / `brain_model` in the
-        config still forces the model for workers / for planning and review."""
-        c = self.profiles.get(role) or Choice()
-        forced = self.brain_model if role in ("plan", "review") else self.model
-        return Choice(forced or c.model, c.effort)
+        """What to run for a kind of work: light steps and planning use one effort level below the chosen one (when
+        the model has a lower level); standard steps and review use exactly what was chosen."""
+        c = self.chosen()
+        levels = self.effort_levels()
+        if role in LIGHT_ROLES and c.effort in levels and levels.index(c.effort) > 0:
+            return Choice(c.model, levels[levels.index(c.effort) - 1])
+        return c
 
 
 @dataclass
@@ -156,6 +162,7 @@ class Config:
     notify: bool = True
     alt_screen: bool = True
     copy_on_select: bool = True
+    auto_switch: bool = True  # a provider that hits its usage limit hands its step to another one (off: wait for it)
 
     @property
     def provider_order(self) -> List[str]:
@@ -191,23 +198,17 @@ def load_config(home: Optional[str] = None) -> Config:
         data["providers"] = yaml.safe_load(DEFAULT_CONFIG)["providers"]
     for name, p in data["providers"].items():
         p = p or {}
-        known = {"enabled", "command", "model", "brain_model", "max_runs_per_day", "profiles"}
-        profiles = {role: Choice(c.model, c.effort) for role, c in DEFAULT_PROFILES.get(name, {}).items()}
-        for role, c in (p.get("profiles") or {}).items():
-            if role in ROLES and isinstance(c, dict):
-                base = profiles.get(role) or Choice()
-                effort = str(c["effort"]).lower() if "effort" in c and c["effort"] else (None if "effort" in c else base.effort)
-                profiles[role] = Choice(c["model"] if "model" in c else base.model,
-                                        effort if effort in EFFORTS or effort is None else base.effort)
+        known = {"enabled", "command", "model", "brain_model", "effort", "levels", "max_runs_per_day", "profiles"}
+        model = p.get("model")
         providers[name] = ProviderSettings(
             name=name,
             enabled=bool(p.get("enabled", True)),
             command=str(p.get("command") or name),
-            model=p.get("model"),
-            brain_model=p.get("brain_model"),
+            model=str(model) if model else None,
+            effort=str(p["effort"]).lower() if p.get("effort") else None,
+            levels=[str(x) for x in p.get("levels") or []],
             max_runs_per_day=int(p.get("max_runs_per_day", 300)),
             extra={k: v for k, v in p.items() if k not in known},
-            profiles=profiles,
         )
 
     lim = data.get("limits") or {}
@@ -227,6 +228,7 @@ def load_config(home: Optional[str] = None) -> Config:
         notify=bool(ui.get("notify", True)),
         alt_screen=bool(ui.get("alt_screen", True)),
         copy_on_select=bool(ui.get("copy_on_select", True)),
+        auto_switch=bool(data.get("auto_switch", True)),
     )
 
 

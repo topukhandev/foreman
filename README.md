@@ -109,6 +109,7 @@ foreman accept s2 | dismiss s2      # act on, or silence, a suggestion
 foreman tasks | show 3 [--events]   # history, full record, audit log
 foreman projects [scan|show X|link A B tests "note"|test X "cmd"]
 foreman sessions admin-ui           # existing Claude/OpenCode/Antigravity sessions for a project
+foreman config                      # interactive settings; `foreman models` for model and effort
 foreman config display terminal|headless   # watch workers in terminal windows, or run under the hood
 foreman config notify on|off        # one desktop notification when a task finishes
 ```
@@ -199,34 +200,39 @@ a missing migration. Minor issues are fixed by the workers instead. Dismissed it
 Workers never run git. The one exception is a "run `git init`" suggestion for a project without a repository: when you
 accept it (`do s6`), Foreman itself runs `git init` (no commit), so it can detect and review changes there.
 
-## Models and effort
+## Models, effort and settings
 
-Foreman chooses the model and reasoning effort for every run instead of leaving it to whatever the CLI last had
-(your `/model` setting in Claude Code no longer changes what Foreman's workers use). The planner rates each step
-**light** (reading, a lookup, a one-spot edit), **standard** (an ordinary change in one project) or **heavy** (risky
-or intricate: money, auth, data, shared interfaces, hard bugs), and Foreman maps that to the provider's profile.
-Planning and review have their own profiles (**plan**, **review**).
-
-Built-in profiles, used when your config says nothing (the middle tier at high effort, never max):
-
-| | light | standard | heavy | plan | review |
-|---|---|---|---|---|---|
-| Claude | Sonnet 5.5, medium | Sonnet 5.5, high | Sonnet 5.5, high | Sonnet 5.5, medium | Sonnet 5.5, high |
-| Antigravity | Gemini 3.8 Flash medium | Flash high | Flash high | Flash medium | Flash high |
-| OpenCode and others | the CLI's own default | | | | |
+Foreman chooses the model and reasoning effort for every run instead of leaving it to whatever the CLI last had (your
+`/model` in Claude Code no longer changes what Foreman's workers use). You choose once per provider:
 
 ```bash
-foreman models                                  # what every provider uses for each kind of work
-foreman models claude heavy claude-opus-5-5 high    # change one (heavy steps get Opus); `default` = the CLI's own
-foreman --effort max "…"                        # this task's workers, whichever provider runs them
-foreman --model opus "…"                        # this task, on the preferred provider; `claude:opus` names it
+foreman models      # interactive: pick the provider, then the model, then the effort for that model
+foreman config      # interactive settings list (below)
 ```
 
-In the chat, `/effort` sets the effort for your next tasks (`/effort auto` goes back to the profiles). A task keeps
-its choices for follow-ups ("next"). When a step moves to another provider, that provider's own profile applies.
-Reports show what ran ("Models  claude claude-sonnet-5-5 (high) ×3") and the step events record it. Antigravity's
-Gemini model ids carry their effort (`agy models` lists them). `model:` / `brain_model:` in a provider's config still
-force one model for workers / for planning and review.
+The same menus are `/models` and `/config` in the chat. The lists come from the CLIs themselves, so new models and
+levels appear without a Foreman release, and each model offers only the effort levels it supports: Claude's
+aliases and levels are read from `claude --help`; Antigravity's from `agy models` (Gemini Flash has low / medium /
+high, other models a single fixed setting); OpenCode's from `opencode models --verbose` (it has hundreds of models, so
+you pick its backend first and can type part of a name to narrow the list; levels differ per model). You can also
+type a model name that isn't listed.
+
+Until you choose, Claude uses Sonnet 5.5 and Antigravity Gemini 3.8 Flash, both at high effort (never max); OpenCode uses
+its own default. The planner rates each step light or standard; **light steps and planning run one effort level below
+your choice** (when the model has a lower level), everything else, review included, runs exactly as chosen. Reports
+show what ran ("Models  claude sonnet (xhigh) ×3").
+
+`foreman config` lists these settings with their current values; pick one to change it, Esc closes:
+
+| Setting | |
+|---|---|
+| Show workers in terminal windows | yes: each worker opens in a visible terminal; no: headless |
+| Switch provider automatically at a limit | yes: another provider takes over the step; no: Foreman waits for that provider's reset and continues in the same session |
+| Models and effort | the menu above |
+| Planner · first worker | which provider plans and reviews · which one works first |
+| Notification · recent sessions · copy on select | one desktop notification per task run · fork your recent sessions · copy selected text in the chat |
+
+The short forms still work (`foreman config display headless`, `foreman config auto-switch off`, ...).
 
 ## When a provider stops
 
@@ -238,7 +244,7 @@ CLI prints it, so closing the terminal or a crash loses nothing. What happens ne
 | Foreman's time limit | resumes the **same session** with double the time (up to `timeout_retries`) |
 | Network drop, API overload | resumes the **same session** after 30 s, 2 min, 5 min (`transient_retries`) |
 | Finished but no final report | asks the **same session** for the report only |
-| Usage limit (e.g. Claude "resets 7:10pm") | rests that provider until its reset; **another provider takes over** with a handoff: who worked on it and why it stopped, files changed since the step started, the worker's progress notes, its last actions |
+| Usage limit (e.g. Claude "resets 7:10pm") | rests that provider until its reset; **another provider takes over** (unless you turned automatic switching off: then Foreman waits for it) with a handoff: who worked on it and why it stopped, files changed since the step started, the worker's progress notes, its last actions |
 | Login problem / expired key | rests it for 6 h, tells you to renew the key, another provider takes over |
 | Context window full | a fresh session of the same provider, with the handoff |
 | Crash | one fresh retry with the handoff, then the next provider |

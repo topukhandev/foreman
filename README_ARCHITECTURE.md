@@ -42,6 +42,7 @@
 | `terminal.py` | adapter | Optional visible terminal windows. Same capture and exit semantics as headless runs. |
 | `report.py` | deterministic | Short reports and status built from the task record, plus the single desktop notification. |
 | `modes.py` + `modes/*.md` | data | Lifecycle mode templates: what workers may write (none / code / tests), web access, which checks run, where the result document goes, the usual next mode, and guidance for planner and workers. |
+| `menus.py` | interactive | `foreman config` / `foreman models` and the chat's `/config` / `/models`: ask, save to `config.yaml`, reload the engine. Models and levels come from `Provider.list_models`. |
 | `knowledge.py` | deterministic | The project's `.foreman/` folder: confirmed decisions, feature lifecycle, documents, team notes, check overrides. |
 
 ## Key decisions
@@ -65,9 +66,11 @@
 - **Asking.** Business questions, worker questions about technical choices that change what was asked (with the
   worker's options and recommendation), and the 80% budget sign-off pause a task. Routine technical choices are
   recorded as decisions. Answers to a worker go back into that worker's session; the plan is not redone.
-- **Models and effort are Foreman's call.** Per provider profiles (light / standard / heavy / plan / review) in
-  `config.py`; the planner rates each step's weight, the engine maps it (`Engine._pick`), the adapters pass
-  `--model` / `--effort` where the CLI has them. Per-task overrides live on the task record.
+- **Models and effort are Foreman's call.** One choice per provider in `config.py`, made through the interactive
+  menus in `menus.py` (which ask each CLI for its models and levels via `Provider.list_models`); the planner rates a
+  step light or standard, the engine maps it (`Engine._pick`: light and planning one level lower), the adapters pass
+  `--model` / `--effort` / `--variant` where the CLI has them. `auto_switch` decides whether a limit hands the step to
+  another provider or waits.
 - **Cut-offs are routine.** Providers translate their errors into failure kinds (`providers/base.py`: timeout,
   limit with reset time, transient, auth, context, output, crash) and report session ids while running. The
   engine journals every attempt per step and applies one policy per kind: resume the same session, hand over to
