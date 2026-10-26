@@ -163,10 +163,10 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
     if open_q and questions:
         lines += ["", "Needs your decision"]
         for i, q in enumerate(open_q, 1):
-            opts = f"  [{' / '.join(option_labels(q))}]" if q.get("options") else ""
             first, *rest = q["text"].splitlines()
-            lines.append(f"  {i}. {first}{opts}")
+            lines.append(f"  {i}. {first}")
             lines += [f"     {r.strip()}" if not r.startswith("  ") else f"   {r}" for r in rest]
+            lines += [f"     {chr(96 + k)}) {o}" for k, o in enumerate(option_labels(q), 1)] if q.get("options") else []
         lines.append("  → just type your answer" if chat else f"  → foreman answer {task['id']} \"<your answer>\"")
 
     if task["remaining"]:

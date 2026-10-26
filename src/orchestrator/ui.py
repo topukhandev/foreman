@@ -4,6 +4,7 @@ Plain ANSI + termios; no dependencies.
 """
 
 import base64
+import codecs
 import os
 import re
 import shutil
@@ -891,21 +892,55 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
     if not transient:
         out(box(body, title, color))
 
-    def visible() -> int:
-        """Items shown at once: all of them, or a window that fits the terminal (a menu taller than the screen
-        can't be redrawn in place, and a wrapped row would make every redraw drift)."""
-        return max(1, min(len(items), shutil.get_terminal_size((100, 24)).lines - 2 - len(head)))
+    typed = [""]  # the answer typed into the "Type something else…" row itself (no separate input box)
+
+    def is_text(i: int) -> bool:
+        return allow_text and i == len(items) - 1
+
+    def item_rows(i: int, cols: int) -> List[str]:
+        """One option, wrapped under its number so a long one is read in full (each row fits the width: a row the
+        terminal wraps itself would make every redraw drift)."""
+        num = f"{i + 1}. "
+        wrap = max(10, cols - 5 - len(num))
+        if is_text(i) and (typed[0] or i == sel):  # the text row is an input field while selected
+            parts = textwrap.wrap(typed[0], wrap, break_on_hyphens=False, drop_whitespace=False) or [""]
+            if i == sel:
+                parts[-1] += "\033[7m \033[27m"
+            if not typed[0]:
+                parts = [c(items[i], GREY) + " \033[7m \033[27m"]
+        else:
+            parts = textwrap.wrap(items[i], wrap, break_on_hyphens=False) or [""]
+        mark = c("›", ACCENT) if i == sel else " "
+        style = (lambda s: c(s, BOLD)) if i == sel and not is_text(i) else (lambda s: s)
+        return [clip(f" {mark if k == 0 else ' '} " + style((num if k == 0 else " " * len(num)) + p), cols)
+                for k, p in enumerate(parts)]
+
+    peak = [0]
+
+    def room() -> int:
+        """Rows for the options: all of them, or as many as fit the terminal (a menu taller than the screen can't
+        be redrawn in place). It only grows while the menu is open (typing a long answer), never shrinks."""
+        peak[0] = max(peak[0], sum(len(item_rows(i, width())) for i in range(len(items))))
+        return max(1, min(peak[0], shutil.get_terminal_size((100, 24)).lines - 2 - len(head)))
 
     def lines() -> List[str]:
-        n, cols = visible(), width()
-        top = max(0, min(sel - n // 2, len(items) - n))
-        rows = []
-        for i in range(top, top + n):
-            mark = c("›", ACCENT) if i == sel else " "
-            label = c(f"{i + 1}. {items[i]}", BOLD) if i == sel else f"{i + 1}. {items[i]}"
-            rows.append(clip(f" {mark} {label}", cols))
-        more = f"{sel + 1}/{len(items)} · " if n < len(items) else ""
-        return head + rows + [clip(c(f"   {more}↑/↓ or number, Enter to {enter} · Esc to {esc}", GREY), cols)]
+        cols, n = width(), room()
+        rows = {i: item_rows(i, cols) for i in range(len(items))}
+        top = bottom = sel  # grow a window around the selection until it is full
+        used = len(rows[sel])
+        while True:
+            grew = False
+            if bottom + 1 < len(items) and used + len(rows[bottom + 1]) <= n:
+                bottom, used, grew = bottom + 1, used + len(rows[bottom + 1]), True
+            if top > 0 and used + len(rows[top - 1]) <= n:
+                top, used, grew = top - 1, used + len(rows[top - 1]), True
+            if not grew:
+                break
+        shown = [r for i in range(top, bottom + 1) for r in rows[i]]
+        shown = (shown[-n:] if is_text(sel) else shown[:n]) + [""] * (n - len(shown))  # a long answer: its end
+        more = f"{sel + 1}/{len(items)} · " if top > 0 or bottom < len(items) - 1 else ""
+        keys = "type your answer, Enter to send" if is_text(sel) else f"↑/↓ or number, Enter to {enter}"
+        return head + shown + [clip(c(f"   {more}{keys} · Esc to {esc}", GREY), cols)]
 
     def body() -> str:
         return "".join("\r" + eol(l, width()) + "\n" for l in lines())
@@ -915,25 +950,26 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
     def draw(first=False):
         with OUTPUT_LOCK:
             up = "" if first else f"\033[{drawn[0]}A"
-            drawn[0] = len(head) + visible() + 1
+            drawn[0] = len(head) + room() + 1
             frame(up + body())
 
     closed = [False]
 
     class _Live:  # the menu stays at the bottom while the transcript above scrolls
-        live_height = staticmethod(lambda: 0 if closed[0] else len(head) + visible() + 1)
+        live_height = staticmethod(lambda: 0 if closed[0] else len(head) + room() + 1)
         frame = staticmethod(lambda: "" if closed[0] else body())
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     live, pending, cancelled = _Live(), "", False
+    decode = codecs.getincrementaldecoder("utf-8")("ignore").decode  # a character split across reads stays whole
     draw(first=True)
     SCROLL.push(live)
     try:
         _tty.setcbreak(fd)
         done = False
         while not done:
-            keys, pending = split_keys(pending + os.read(fd, 64).decode("utf-8", "ignore"))
+            keys, pending = split_keys(pending + decode(os.read(fd, 64)))
             for key in keys:
                 if SCROLL.mouse(key):
                     continue
@@ -945,6 +981,16 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
                     SCROLL.bottom()
                     if key == "\x1b":
                         continue
+                if is_text(sel) and key not in ("\r", "\n", "\x1b", "\x03") and not key.startswith("\x1b"):
+                    if key in ("\x7f", "\b"):
+                        typed[0] = typed[0][:-1]
+                    elif key == "\x15":  # Ctrl+U: clear
+                        typed[0] = ""
+                    elif key.isprintable():
+                        typed[0] += key
+                    continue
+                if is_text(sel) and key in ("\r", "\n") and not typed[0].strip():
+                    continue  # nothing typed yet
                 if key in ("\x1b[A", "\x1bOA", "k"):
                     sel = (sel - 1) % len(items)
                 elif key in ("\x1b[B", "\x1bOB", "j"):
@@ -971,12 +1017,7 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
             SCROLL.add("\n".join(lines()))
     if cancelled:
         return None
-    if allow_text and sel == len(items) - 1:
-        try:
-            return read_input("type your answer · Esc/Ctrl+C to cancel").strip()
-        except (KeyboardInterrupt, EOFError):
-            return None
-    return items[sel]
+    return typed[0].strip() if is_text(sel) else items[sel]
 
 
 # ---------------------------------------------------------------------- spinner

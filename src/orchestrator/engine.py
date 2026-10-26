@@ -24,8 +24,8 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA, Brain, BrainError,
-                                task_context)
+from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, QUESTION_RULE, REVIEW_SCHEMA, STEP_SCHEMA, Brain,
+                                BrainError, task_context)
 from orchestrator.budget import Budget
 from orchestrator.clipboard import image_dirs
 from orchestrator.config import Choice, Config
@@ -1303,6 +1303,7 @@ class Engine:
             if step["kind"] == "implement" else
             "- Read-only step: do not create, modify or delete files.\n"
             "- Answer precisely with file references; stop as soon as you have enough evidence.\n")
+        rules += "- " + QUESTION_RULE.replace("\n", " ") + "\n"
         rules += (f"- Time: about {self._step_timeout(step) // 60} minutes for this step. Start anything long (downloads, big "
                   "scans, builds) in the background (nohup/setsid, output to a log file) and poll it with short sleeps "
                   "instead of one blocking command, and keep notes on disk of what is done. If time runs out, Foreman "

@@ -90,6 +90,15 @@ REVIEW_SCHEMA = {
     "required": ["verdict", "summary", "issues"],
 }
 
+QUESTION_RULE = """\
+Questions are read by the user, who may not know the code. Write each one in plain, everyday English: one short
+sentence on what must be decided and why it matters to them. No abbreviations, internal names, file or field names,
+codes or counts they would have to look up (say the source's full name; "more products from the same source", not
+"candidates"). Give 2-4 options, each a short phrase (at most about 10 words) saying what the user gets, the
+recommended one first and its exact text as "default". Before asking, read the conversation and the answered
+questions: if the user already said what they want, even loosely or in other words, follow it and do not ask again.
+If they said they did not understand, ask again far more simply."""
+
 PLANNING_RULES = """\
 Speed matters. If the request is conversational or answerable from the context above, answer right away in
 "answer" without using any tools. Never read Foreman's own files (~/.foreman) or this prompt's sources.
@@ -136,7 +145,7 @@ the user's words, given where the project stands and what they were after (e.g. 
 "Review the 3 ABO gap records"). Leave it empty when nothing useful follows.
 You are read-only and nobody can approve tool permissions for you. Never ask the user to approve commands; if
 something must be run to answer, add an investigate step or say what you could not verify.
-""" + SUGGESTION_RULE
+""" + QUESTION_RULE + "\n" + SUGGESTION_RULE
 
 
 MODE_RULES = """\
