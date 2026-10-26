@@ -78,6 +78,31 @@ class EditingKeysTest(unittest.TestCase):
         self.assertEqual(e.live_height(), 2 + 2 + 1)
 
 
+class CommandMenuTest(unittest.TestCase):
+    def test_the_menu_scrolls_so_the_selection_is_always_shown(self):
+        e = ui.LineEditor([(f"/cmd{i:02}", f"command {i}") for i in range(20)])
+        e.buf, e.cur, e.sel, e.row, e.hist_i, e.hints = "/", 1, 0, 0, 0, ("", "")
+        rows = e._hint_rows()
+        self.assertEqual(len(rows), 8)
+        self.assertIn("/cmd00", rows[0])
+        self.assertTrue(rows[-1].lstrip("\x1b[0-9;m").startswith("↓") or "↓ /cmd07" in rows[-1])
+        for _ in range(10):
+            e._key("\x1b[B")
+        rows = e._hint_rows()
+        self.assertEqual(len(rows), 8)
+        self.assertIn("›", rows[-1])
+        self.assertIn("/cmd10", rows[-1], "the selected command is on screen")
+        self.assertIn("↑ /cmd03", rows[0])
+        e._key("\x1b[A")
+        self.assertIn("/cmd03", e._hint_rows()[0], "moving back inside the window doesn't scroll it")
+        e._key("\x1b[A")  # wraps around from the top: the last commands
+        for _ in range(8):
+            e._key("\x1b[A")
+        self.assertIn("/cmd00", e._hint_rows()[0])
+        e._key("\x1b[A")
+        self.assertIn("/cmd19", e._hint_rows()[-1], "↑ on the first wraps to the last, and it is shown")
+
+
 class SuggestionTest(unittest.TestCase):
     def test_grey_suggestion_is_taken_with_tab_and_dropped_when_typing(self):
         e = editor()

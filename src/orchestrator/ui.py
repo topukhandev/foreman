@@ -608,6 +608,7 @@ class LineEditor:
         self.killed = ""                    # text removed by Ctrl+K / Ctrl+U / Ctrl+W, back with Ctrl+Y
         self.suggestion = ""                # grey suggested message in the empty input (Tab or → takes it)
         self.status = ""                    # the status line under the hint ("" = off)
+        self._menu_top = 0                  # first row of the '/' or '@' menu on screen (it scrolls)
         self.notice = ""                    # one-line message in place of the hint until the next key
         self.span: Optional[tuple] = None   # (start, end) of the part of the input selected with the mouse; end exclusive
         self._anchor: Optional[int] = None
@@ -1031,12 +1032,21 @@ class LineEditor:
             return [c("  " + self.notice[: width() - 4], YELLOW)]
         menu = self._menu()
         if menu:
+            # A window of up to 8 rows that scrolls with the selection (only when it would leave the window), like
+            # Claude Code's; ↑ / ↓ in the margin say more commands are above / below.
+            n = max(1, min(len(menu), 8, shutil.get_terminal_size((100, 24)).lines - 8))
+            sel = self.sel % len(menu)
+            top = min(max(0, self._menu_top, sel - n + 1), sel, len(menu) - n)
+            self._menu_top = top
             w = max(len(cmd) for cmd, _ in menu) + 3
             rows = []
-            for i, (cmd, desc) in enumerate(menu[:8]):
-                line = f"  {cmd.ljust(w)}{desc}"[: width() - 1]
-                rows.append(c("›" + line[1:], BOLD, ACCENT) if i == self.sel % len(menu) else c(line, GREY))
+            for i in range(top, top + n):
+                cmd, desc = menu[i]
+                edge = "↑" if i == top and top > 0 else "↓" if i == top + n - 1 and top + n < len(menu) else " "
+                line = f"{edge} {cmd.ljust(w)}{desc}"[: width() - 1]
+                rows.append(c("›" + line[1:], BOLD, ACCENT) if i == sel else c(line, GREY))
             return rows
+        self._menu_top = 0
         if self.suggestion and not self.buf:
             return [hint_line("tab to use the suggestion · or type your own", self.hints[1])]
         return [hint_line(*self.hints)]
