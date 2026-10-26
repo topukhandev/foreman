@@ -269,15 +269,15 @@ class MenuTest(Base):
         self.assertEqual(self.eng.cfg.providers["antigravity"].chosen(), Choice("claude-sonnet-4-6", None))
 
     def test_opencode_asks_for_the_backend_first_and_can_narrow_a_long_list(self):
-        self.run_menu(menus.models_menu, ["opencode", "opencode  (1", "opencode/beam-free", "medium"])
-        self.assertEqual(self.asked[1][0], "opencode: backend")
+        self.run_menu(menus.models_menu, ["opencode", "Browse by backend", "opencode  (1", "opencode/beam-free", "medium"])
+        self.assertEqual([t for t, _, _ in self.asked[1:3]], ["Find a model", "opencode: backend"])
         self.assertEqual(self.eng.cfg.providers["opencode"].chosen(), Choice("opencode/beam-free", "medium"))
         self.asked.clear()
-        text = self.run_menu(menus.models_menu, ["opencode", "openrouter", "M[3]$", "openrouter/m3", "high"])
+        text = self.run_menu(menus.models_menu, ["opencode", "openrouter m[3]$", "openrouter/m3", "high"])
         titles = [t for t, _, _ in self.asked]
-        self.assertEqual(titles, ["Provider", "opencode: backend", "Find a model", "opencode: model",
-                                  "opencode: effort for openrouter/m3"])
-        self.assertTrue(self.asked[3][1][1].startswith("openrouter/m3"), self.asked[3][1])
+        self.assertEqual(titles, ["Provider", "Find a model", "opencode: model", "opencode: effort for openrouter/m3"],
+                         "a search comes first, across all backends: no need to know the backend")
+        self.assertTrue(self.asked[2][1][1].startswith("openrouter/m3"), self.asked[2][1])
         self.assertIn("opencode: openrouter/m3 · effort high", text)
         self.assertEqual(self.eng.cfg.providers["opencode"].effort_levels(), ["low", "high"])
 
@@ -287,6 +287,8 @@ class MenuTest(Base):
               ModelInfo("openrouter/meta/llama-4-free", "Llama 4 Free")]
         ids = lambda found: [m.id.split("/")[-1] for m in found]  # noqa: E731
         self.assertEqual(ids(menus.search(ms, "deepseek.*free")), ["deepseek-v4:free"])
+        self.assertEqual(ids(menus.search(ms, "deepseek free")), ["deepseek-v4:free"], "words are combined")
+        self.assertEqual(ids(menus.search(ms, "free  4")), ["deepseek-v4:free", "llama-4-free"])
         self.assertEqual(ids(menus.search(ms, "DEEPSEEK")), ["deepseek-v4:free", "deepseek-r2"], "not case sensitive")
         self.assertEqual(ids(menus.search(ms, "(llama|r2)")), ["deepseek-r2", "llama-4-free"])
         self.assertEqual(ids(menus.search(ms, "^openrouter/meta")), ["llama-4-free"])

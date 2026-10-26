@@ -87,31 +87,35 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
         return ("default", None) if typed.startswith("CLI default") or not typed else (typed, None)
     pool = models
     groups = sorted({m.group for m in models if m.group})
-    if len(models) > MANY and len(groups) > 1:
-        counts = {g: sum(1 for m in models if m.group == g) for g in groups}
-        mine = next((m.group for m in models if m.id == current), None)
-        glabels = [f"{g}  ({counts[g]} models)" for g in groups]
-        g = ui.choose(f"{name}: backend", [f"{name} offers {len(models)} models through {len(groups)} backends."],
-                      glabels, allow_text=False, start=groups.index(mine) if mine in groups else 0,
-                      color=ui.FRAME, esc="cancel")
-        if not g:
-            return None
-        pool = [m for m in models if m.group == groups[glabels.index(g)]]
-    while len(pool) > MANY:
-        term = ui.choose("Find a model", [f"{len(pool)} models. Type a regex to narrow the list, e.g. deepseek.*free "
-                                          "(not case sensitive; matches the id and the name)."],
-                         [f"Show all {len(pool)}"], color=ui.FRAME, esc="cancel")
+    browse = len(groups) > 1
+    while len(pool) > MANY:  # a long list: narrow it by typing words, or browse one backend at a time
+        options = (["Browse by backend"] if browse else []) + [f"Show all {len(pool)}"]
+        term = ui.choose("Find a model", [f"{len(pool)} models. Type words to narrow the list: each is a regex and all "
+                                          "must match, e.g. deepseek free, or qwen.*coder (not case sensitive; "
+                                          "matches the id, which starts with the backend, and the name)."],
+                         options, color=ui.FRAME, esc="cancel")
         if term is None:
             return None
-        if term.startswith("Show all") or not term:
+        if term == "Browse by backend":
+            counts = {g: sum(1 for m in pool if m.group == g) for g in groups}
+            mine = next((m.group for m in models if m.id == current), None)
+            glabels = [f"{g}  ({counts[g]} models)" for g in groups]
+            g = ui.choose(f"{name}: backend", [f"{name} offers {len(models)} models through {len(groups)} backends."],
+                          glabels, allow_text=False, start=groups.index(mine) if mine in groups else 0,
+                          color=ui.FRAME, esc="cancel")
+            if not g:
+                return None
+            pool, browse = [m for m in pool if m.group == groups[glabels.index(g)]], False
+        elif term.startswith("Show all") or not term:
             break
-        hits = search(pool, term)
-        if hits is None:
-            ui.out(ui.c(f"  '{term}' is not a valid regex.", ui.YELLOW))
-        elif hits:
-            pool = hits
         else:
-            ui.out(ui.c(f"  No model matches '{term}'.", ui.YELLOW))
+            hits = search(pool, term)
+            if hits is None:
+                ui.out(ui.c(f"  '{term}' is not a valid regex.", ui.YELLOW))
+            elif hits:
+                pool = hits
+            else:
+                ui.out(ui.c(f"  No model matches '{term}'. Try fewer words, or browse by backend.", ui.YELLOW))
     labels = [f"CLI default (let {name} decide)"]
     for m in pool:
         lv = f"  [{', '.join(m.levels)}]" if m.levels else ""
@@ -129,12 +133,13 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
 
 
 def search(models: List[ModelInfo], pattern: str) -> Optional[List[ModelInfo]]:
-    """Models whose id or name match a regex (not case sensitive); None when the pattern isn't a valid regex."""
+    """Models matching every word of a search: each word is a regex (not case sensitive) tried on the id and the name.
+    None when a word isn't a valid regex."""
     try:
-        rx = re.compile(pattern.strip(), re.I)
+        words = [re.compile(w, re.I) for w in pattern.split()]
     except re.error:
         return None
-    return [m for m in models if rx.search(m.id) or rx.search(m.name)]
+    return [m for m in models if all(w.search(m.id + " " + m.name) for w in words)]
 
 
 def _levels_for_typed(models: List[ModelInfo]) -> List[str]:
