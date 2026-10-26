@@ -1,6 +1,9 @@
 """Claude Code (`claude -p`). Supports resume/fork, JSON-schema output, tool-level permissions, session discovery.
 Web research (verified 2026-10-25): read steps with `web` add WebSearch/WebFetch to --allowedTools; without it
-they are not allowed, so web access is enforced at the tool level."""
+they are not allowed, so web access is enforced at the tool level.
+Cut-offs (verified 2026-10-26): with stream-json the session id arrives in the first line, within a second (so it
+is saved before the run can be cut off); a usage limit ends with is_error, api_error "usage_limit_reached" and
+status 429; rate_limit_event lines carry resetsAt and, near the limit, utilization."""
 
 import json
 import os
