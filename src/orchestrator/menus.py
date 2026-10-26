@@ -176,7 +176,7 @@ def snapshot(eng) -> Dict[str, str]:
     on = lambda v: "on" if v else "off"  # noqa: E731
     out = {"terminal windows": on(cfg.display == "terminal"), "auto-switch at limits": on(cfg.auto_switch),
            "notifications": on(cfg.notify), "session reuse": on(cfg.reuse_sessions == "fork"),
-           "copy on select": on(cfg.copy_on_select), "planner": cfg.brain, "first worker": next(iter(eng.providers), "?")}
+           "copy on select": on(cfg.copy_on_select), "prompt suggestions": on(cfg.prompt_suggestions), "planner": cfg.brain, "first worker": next(iter(eng.providers), "?")}
     for n, p in cfg.providers.items():
         if p.enabled:
             c = p.chosen()
@@ -212,11 +212,13 @@ def _toggle(eng, key: str) -> None:
         set_option(cfg.home, "ui.notify", not cfg.notify)
     elif key == "reuse":
         set_option(cfg.home, "sessions.reuse", "off" if cfg.reuse_sessions == "fork" else "fork")
+    elif key == "suggest":
+        set_option(cfg.home, "ui.prompt_suggestions", not cfg.prompt_suggestions)
     else:  # "copy": applies the next time the chat opens
         set_option(cfg.home, "ui.copy_on_select", not cfg.copy_on_select)
 
 
-TOGGLES = ("display", "switch", "notify", "reuse", "copy")
+TOGGLES = ("display", "switch", "notify", "reuse", "copy", "suggest")
 
 
 def config_menu(eng) -> Optional[str]:
@@ -237,6 +239,7 @@ def config_menu(eng) -> Optional[str]:
             ("notify", "Desktop notification when a task finishes", yes(cfg.notify)),
             ("reuse", "Start from your recent sessions", yes(cfg.reuse_sessions == "fork")),
             ("copy", "Copy selected text in the chat", yes(cfg.copy_on_select)),
+            ("suggest", "Suggest your next message (Tab takes it)", yes(cfg.prompt_suggestions)),
         ]
         labels = [ui.clip(f"{name:<42} {value}", ui.width() - 8) for _, name, value in rows]
         pick = _panel("Settings", ["Enter changes the selected setting (yes/no ones flip right away). Saved to "

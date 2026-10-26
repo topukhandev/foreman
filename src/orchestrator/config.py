@@ -69,6 +69,7 @@ ui:
   notify: true             # one desktop notification when a task run finishes (never mid-run)
   alt_screen: true         # chat uses its own screen; your terminal is restored as it was on exit
   copy_on_select: true     # selecting text with the mouse in the chat copies it to the clipboard
+  prompt_suggestions: true # a suggested next message waits in grey in the empty input (Tab takes it)
 
 sessions:
   reuse: fork              # fork | off  - continue context from your recent sessions
@@ -162,6 +163,7 @@ class Config:
     notify: bool = True
     alt_screen: bool = True
     copy_on_select: bool = True
+    prompt_suggestions: bool = True
     auto_switch: bool = True  # a provider that hits its usage limit hands its step to another one (off: wait for it)
 
     @property
@@ -228,6 +230,7 @@ def load_config(home: Optional[str] = None) -> Config:
         notify=bool(ui.get("notify", True)),
         alt_screen=bool(ui.get("alt_screen", True)),
         copy_on_select=bool(ui.get("copy_on_select", True)),
+        prompt_suggestions=bool(ui.get("prompt_suggestions", True)),
         auto_switch=bool(data.get("auto_switch", True)),
     )
 

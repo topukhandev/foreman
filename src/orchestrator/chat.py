@@ -43,8 +43,10 @@ Just type what you need, for example:
   • add a currency to orders in the API and show it in the admin panel
   • what's the status of my task? · continue the previous task · yes / no
 Long pastes show as [Pasted text #1 +545 lines] (up to 2000 lines per message) and are sent in full.
-Drag an image file into the window, or press Ctrl+V with an image on the clipboard: it shows as [Image #1].
-Paste the same thing again right after a chip to expand it: the full text, or the image's path.
+Drag a file into the window ([File #1 notes.csv], images [Image #1]), press Ctrl+V with an image on the clipboard,
+or type @ to pick a file of this project. Paste the same thing again right after a chip to expand it.
+Typing: \ then Enter starts a new line · Ctrl+A/E start/end of line · Ctrl+U/K delete to start/end of line ·
+Ctrl+W delete a word · Ctrl+Y paste back what was deleted · Tab takes the grey suggestion.
 Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
   /mode  /models  /config  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
@@ -72,12 +74,13 @@ class Chat:
         self.last_providers: Optional[str] = None
         self.mode: Optional[str] = None       # lifecycle mode fixed with /mode (None = recommended per request)
         self._offered_next: set = set()
+        self.suggestion = ""                  # suggested next message, grey in the empty input (from "Next for you")
 
     # ------------------------------------------------------------------ loop
     def run(self, resume: Optional[str] = None) -> None:
         """resume: None (new chat), "last" (continue the latest chat here) or "pick" (choose from a list)."""
         ui.set_editor(ui.LineEditor(COMMANDS, os.path.join(self.eng.cfg.home, "chat_history"),
-                                    image_dir=os.path.join(self.eng.cfg.home, "images")))
+                                    image_dir=os.path.join(self.eng.cfg.home, "images"), root=self.cwd))
         with ui.FullScreen(self.eng.cfg.alt_screen, self.eng.cfg.copy_on_select):
             if not self.eng.registry.projects:
                 with ui.Spinner("Indexing your projects", footer=False):
@@ -100,7 +103,7 @@ class Chat:
                 self._exchange(queued, getattr(queued, "shown", "").strip())
                 continue
             try:
-                typed = ui.read_input(*self._hints())
+                typed = ui.read_input(*self._hints(), suggestion=self.suggestion)
                 line, shown = typed.strip(), getattr(typed, "shown", typed).strip()
             except EOFError:
                 return
@@ -120,6 +123,7 @@ class Chat:
         """One user message: echo it, respond, remember it in this project's chat history, offer pending choices.
         shown: the compact form of a message with pasted text or images (chips), echoed instead of the full text."""
         shown = shown if shown != line else ""
+        self.suggestion = ""
         ui.out("\n" + ui.user_echo(shown or line))
         out = self.respond(line)
         if out:
@@ -427,6 +431,9 @@ class Chat:
         self.last_providers = self._used_providers(task["id"]) or self.last_providers
         self.turns.append((user_text, f"#{final['id']} {final['title']} — {final.get('outcome') or final['status']}: "
                                       f"{short(final.get('summary', ''), 200)}"))
+        if self.eng.cfg.prompt_suggestions and final.get("next_for_you") and \
+                not any(not q.get("answer") for q in final["questions"]):
+            self.suggestion = final["next_for_you"][0]
         if task["id"] in self.background:
             return ui.bullet(f"#{task['id']} keeps running in the background. I'll show the result here when it "
                              "finishes (you also get a desktop notification).", ui.GREY)

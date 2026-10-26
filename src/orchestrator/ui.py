@@ -14,7 +14,8 @@ import threading
 import time
 from typing import List, Optional
 
-from orchestrator.clipboard import CHIP_RE, MAX_PASTE_LINES, Attachments, clipboard_image, copy_text, dropped_images
+from orchestrator.clipboard import (CHIP_RE, MAX_PASTE_LINES, Attachments, clipboard_image, copy_text, dropped_files,
+                                    dropped_images)
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 TTY = sys.stdout.isatty()
@@ -519,14 +520,20 @@ class Typed(str):
 
 
 class LineEditor:
-    """Claude Code-style input: prompt between two rules, hint line below, live '/' command menu, history,
-    bracketed paste. Long pastes and images become chips (see clipboard.py): drag an image file in or press Ctrl+V
-    with an image on the clipboard. Raw terminal mode; small on purpose."""
+    """Claude Code-style input: prompt between two rules, hint line below, live '/' command menu and '@' file menu,
+    history, bracketed paste, several lines (`\\` then Enter starts a new one). Long pastes, images and other files
+    become chips (see clipboard.py): drag a file in, or press Ctrl+V with an image on the clipboard. A suggested next
+    message can wait in grey in the empty input (Tab or → takes it). Raw terminal mode; small on purpose."""
 
-    def __init__(self, commands: List[tuple], history_path: Optional[str] = None, image_dir: Optional[str] = None):
+    def __init__(self, commands: List[tuple], history_path: Optional[str] = None, image_dir: Optional[str] = None,
+                 root: Optional[str] = None):
         self.commands = commands            # [(command, description)]
         self.image_dir = image_dir or os.path.join(os.path.expanduser("~"), ".foreman", "images")
+        self.root = root or os.getcwd()     # where '@' looks for files
+        self._files: Optional[List[str]] = None
         self.attach = Attachments()
+        self.killed = ""                    # text removed by Ctrl+K / Ctrl+U / Ctrl+W, back with Ctrl+Y
+        self.suggestion = ""                # grey suggested message in the empty input (Tab or → takes it)
         self.notice = ""                    # one-line message in place of the hint until the next key
         self.span: Optional[tuple] = None   # (start, end) of the part of the input selected with the mouse; end exclusive
         self._anchor: Optional[int] = None
@@ -553,7 +560,77 @@ class LineEditor:
             return []
         return [cmd for cmd in self.commands if cmd[0].startswith(buf)]
 
-    def read(self, hint_left: str = "", hint_right: str = "") -> str:
+    MENTION_RE = re.compile(r"(?:^|(?<=\s))@([^\s@]*)$")
+
+    def mention(self) -> Optional[re.Match]:
+        """The `@partial/path` being typed at the cursor, if any."""
+        return self.MENTION_RE.search(self.buf[:self.cur])
+
+    def files(self) -> List[str]:
+        """Files and folders under root, relative (git's list when it is a repository: ignored files left out)."""
+        if self._files is None:
+            import subprocess
+            found: List[str] = []
+            try:
+                res = subprocess.run(["git", "-C", self.root, "ls-files", "--cached", "--others", "--exclude-standard"],
+                                     capture_output=True, text=True, timeout=3)
+                found = res.stdout.splitlines() if res.returncode == 0 else []
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if not found:
+                skip = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".foreman"}
+                for base, dirs, names in os.walk(self.root):
+                    dirs[:] = [d for d in dirs if d not in skip and not d.startswith(".")]
+                    rel = os.path.relpath(base, self.root)
+                    found += [n if rel == "." else os.path.join(rel, n) for n in names]
+                    if len(found) > 20000:
+                        break
+            folders = {os.path.dirname(f) for f in found} - {""}
+            self._files = sorted(found[:20000]) + sorted(d + "/" for d in folders)
+        return self._files
+
+    def file_matches(self) -> List[tuple]:
+        """'@' menu rows: names starting with what was typed first, then paths containing it."""
+        m = self.mention()
+        if not m:
+            return []
+        q = m.group(1).lower()
+        files = self.files()
+        first = [f for f in files if os.path.basename(f.rstrip("/")).lower().startswith(q)]
+        rest = [f for f in files if q in f.lower() and f not in first] if q else []
+        return [("@" + f, "") for f in sorted(first, key=len)[:8] + rest[:8 - min(8, len(first))]]
+
+    def _menu(self) -> List[tuple]:
+        return self.matches(self.buf) or self.file_matches()
+
+    def _line_start(self, pos: Optional[int] = None) -> int:
+        return self.buf.rfind("\n", 0, self.cur if pos is None else pos) + 1
+
+    def _line_end(self, pos: Optional[int] = None) -> int:
+        end = self.buf.find("\n", self.cur if pos is None else pos)
+        return len(self.buf) if end == -1 else end
+
+    def _cut(self, start: int, end: int) -> None:
+        """Remove buf[start:end], keep it for Ctrl+Y, cursor at start."""
+        if end > start:
+            self.killed = self.buf[start:end]
+            self.buf, self.cur = self.buf[:start] + self.buf[end:], start
+
+    def _vertical(self, step: int) -> bool:
+        """Up/Down inside a message of several lines (same column where possible); False on its first/last line."""
+        start = self._line_start()
+        if step < 0 and start == 0 or step > 0 and self._line_end() == len(self.buf):
+            return False
+        col = self.cur - start
+        if step < 0:
+            prev = self._line_start(start - 1)
+            self.cur = min(prev + col, start - 1)
+        else:
+            nxt = self._line_end() + 1
+            self.cur = min(nxt + col, self._line_end(nxt))
+        return True
+
+    def read(self, hint_left: str = "", hint_right: str = "", suggestion: str = "") -> str:
         if not (TTY and sys.stdin.isatty()):
             return input("> ")
         import codecs
@@ -569,6 +646,8 @@ class LineEditor:
         self.span = self._anchor = None
         self.hist_i = len(self.history)
         self.hints = (hint_left, hint_right)
+        self.suggestion = " ".join(suggestion.split())
+        self._files = None  # files may have changed since the last message
         write(c("─" * width(), ACCENT_DEEP) + "\n\033[?2004h")
         termios.tcsetattr(fd, termios.TCSADRAIN, new)
         pending = ""
@@ -603,9 +682,12 @@ class LineEditor:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
     # live area for Scrollback: top rule, input rows, bottom rule, hint/menu rows
+    def _counts(self, cols: int) -> List[int]:
+        """Screen rows taken by each line of the input (each starts after a 2-column prompt and wraps)."""
+        return [max(1, -(-(2 + text_width(line)) // cols)) for line in self.buf.split("\n")]
+
     def live_height(self) -> int:
-        total = 2 + text_width(self.buf.replace("\n", "⏎"))
-        return 2 + max(1, -(-total // width())) + len(self._below())
+        return 2 + sum(self._counts(width())) + len(self._below())
 
     def frame(self) -> str:
         self.row = 0
@@ -616,7 +698,8 @@ class LineEditor:
         self.notice = ""
         if not s.startswith("\x1b[<"):
             self.span = None  # any key ends a mouse selection
-        menu = self.matches(self.buf)
+        menu = self._menu()
+        files = bool(menu) and menu[0][0].startswith("@")
         if s.startswith("\x1b[200~"):
             end = s.find("\x1b[201~")
             if end == -1:
@@ -644,6 +727,8 @@ class LineEditor:
             if seq in ("[A", "OA"):
                 if menu:
                     self.sel = (self.sel - 1) % len(menu)
+                elif self._vertical(-1):
+                    pass
                 elif self.hist_i > 0:
                     self.hist_i -= 1
                     self.buf = self.history[self.hist_i]
@@ -651,11 +736,15 @@ class LineEditor:
             elif seq in ("[B", "OB"):
                 if menu:
                     self.sel = (self.sel + 1) % len(menu)
+                elif self._vertical(1):
+                    pass
                 elif self.hist_i < len(self.history):
                     self.hist_i += 1
                     self.buf = self.history[self.hist_i] if self.hist_i < len(self.history) else ""
                     self.cur = len(self.buf)
             elif seq in ("[C", "OC"):
+                if not self.buf and self.suggestion:
+                    self._take_suggestion()
                 self.cur = min(len(self.buf), self._chip_end(self.cur) or self.cur + 1)
             elif seq in ("[D", "OD"):
                 self.cur = max(0, self._chip_start(self.cur) if self._chip_start(self.cur) is not None else self.cur - 1)
@@ -669,13 +758,23 @@ class LineEditor:
         ch, rest = s[0], s[1:]
         SCROLL.bottom()
         if ch in ("\r", "\n"):
+            if files:  # Enter picks the file; the message is sent with the next Enter
+                self._complete(menu[self.sel % len(menu)][0])
+                return rest, None
+            if self.buf[:self.cur].endswith("\\"):  # backslash + Enter: a new line, like Claude Code
+                self.buf = self.buf[:self.cur - 1] + "\n" + self.buf[self.cur:]
+                return rest, None
             if menu and self.buf != menu[self.sel % len(menu)][0]:
                 self.buf = menu[self.sel % len(menu)][0]
             return rest, self.buf
         if ch == "\t":
-            if menu:
+            if files:
+                self._complete(menu[self.sel % len(menu)][0])
+            elif menu:
                 self.buf = menu[self.sel % len(menu)][0] + " "
                 self.cur = len(self.buf)
+            elif not self.buf and self.suggestion:
+                self._take_suggestion()
             return rest, None
         if ch == "\x03":
             if self.buf:
@@ -695,18 +794,21 @@ class LineEditor:
                 start = self.cur - 1 if start is None else start
                 self.buf = self.buf[:start] + self.buf[self.cur:]
                 self.cur = start
-        elif ch == "\x01":
-            self.cur = 0
+        elif ch == "\x01":  # Ctrl+A / Ctrl+E: start / end of the current line
+            self.cur = self._line_start()
         elif ch == "\x05":
-            self.cur = len(self.buf)
-        elif ch == "\x15":
-            self.buf, self.cur = self.buf[self.cur:], 0
-        elif ch == "\x0b":
-            self.buf = self.buf[:self.cur]
-        elif ch == "\x17":
+            self.cur = self._line_end()
+        elif ch == "\x15":  # Ctrl+U: delete to the start of the line (at its start: join it with the line above)
+            start = self._line_start()
+            self._cut(start if self.cur > start else max(0, self.cur - 1), self.cur)
+        elif ch == "\x0b":  # Ctrl+K: delete to the end of the line (at its end: join the next line)
+            end = self._line_end()
+            self._cut(self.cur, end if end > self.cur else min(len(self.buf), self.cur + 1))
+        elif ch == "\x17":  # Ctrl+W: delete the word before the cursor
             left = self.buf[:self.cur].rstrip()
-            cut = left.rfind(" ") + 1
-            self.buf, self.cur = self.buf[:cut] + self.buf[self.cur:], cut
+            self._cut(max(left.rfind(" "), left.rfind("\n")) + 1, self.cur)
+        elif ch == "\x19":  # Ctrl+Y: paste back what Ctrl+K / Ctrl+U / Ctrl+W removed
+            self._insert(self.killed)
         elif ch >= " ":
             self._insert(ch)
             self.sel = 0
@@ -715,16 +817,37 @@ class LineEditor:
     def _insert(self, text: str) -> None:
         self.buf = self.buf[:self.cur] + text + self.buf[self.cur:]
         self.cur += len(text)
+        if text:
+            self.suggestion = ""  # typing dismisses the suggestion
+
+    def _take_suggestion(self) -> None:
+        self.buf, self.suggestion = self.suggestion, ""
+        self.cur = len(self.buf)
+
+    def _complete(self, choice: str) -> None:
+        """Replace the `@partial` at the cursor with the chosen `@path` (and a space after a file)."""
+        m = self.mention()
+        if not m:
+            return
+        start = m.start() + (1 if self.buf[m.start()] != "@" else 0)
+        insert = choice + ("" if choice.endswith("/") else " ")
+        self.buf = self.buf[:start] + insert + self.buf[self.cur:]
+        self.cur, self.sel = start + len(insert), 0
 
     def _index_at(self, row: int, x: int) -> int:
         """Index in the input text of the character under screen column x on input row `row`."""
-        col, shown = row * width() + x - 2, self.buf.replace("\n", "⏎")  # 2 = the "> " prompt
-        used = 0
-        for i, ch in enumerate(shown):
-            used += char_width(ch)
-            if col < used:
-                return i
-        return len(shown)
+        cols, start, first = width(), 0, 0
+        lines, counts = self.buf.split("\n"), self._counts(width())
+        for line, n in zip(lines, counts):
+            if row < first + n or line is lines[-1]:
+                col, used = (row - first) * cols + x - 2, 0  # 2 = the "> " prompt (or its indent)
+                for i, ch in enumerate(line):
+                    used += char_width(ch)
+                    if col < used:
+                        return start + i
+                return start + len(line)
+            start, first = start + len(line) + 1, first + n
+        return len(self.buf)
 
     def _mouse(self, key: str) -> bool:
         """Select text typed in the input box: press, drag, release copies it (like the transcript)."""
@@ -735,7 +858,7 @@ class LineEditor:
         if button >= 64 or button & 3:
             return False
         top = SCROLL.live_top() + 1
-        rows = max(1, -(-(2 + text_width(self.buf.replace("\n", "⏎"))) // width()))
+        rows = sum(self._counts(width()))
         if kind == "M" and not button & 32:  # press
             if not top <= y < top + rows:
                 self._anchor = None
@@ -782,6 +905,10 @@ class LineEditor:
             for path in images:
                 self._add_image(path)
             return
+        dropped = dropped_files(text)
+        if dropped:
+            self._insert(" ".join(self.attach.file(p) for p in dropped) + " ")
+            return
         before = self.buf[:self.cur]
         again = self.attach.last_chip(before, "text")
         if again and self.attach.repeats(again.group(0), text):
@@ -822,7 +949,7 @@ class LineEditor:
     def _below(self) -> List[str]:
         if self.notice:
             return [c("  " + self.notice[: width() - 4], YELLOW)]
-        menu = self.matches(self.buf)
+        menu = self._menu()
         if menu:
             w = max(len(cmd) for cmd, _ in menu) + 3
             rows = []
@@ -830,31 +957,40 @@ class LineEditor:
                 line = f"  {cmd.ljust(w)}{desc}"[: width() - 1]
                 rows.append(c("›" + line[1:], BOLD, ACCENT) if i == self.sel % len(menu) else c(line, GREY))
             return rows
+        if self.suggestion and not self.buf:
+            return [hint_line("tab to use the suggestion · or type your own", self.hints[1])]
         return [hint_line(*self.hints)]
 
     def _draw(self) -> None:
         frame(self._frame())
 
     def _frame(self, fresh: bool = False) -> str:
-        """Input rows, bottom rule and hint/menu, overwritten in place; leaves the cursor in the input."""
+        """Input rows, bottom rule and hint/menu, overwritten in place; leaves the cursor in the input. Each line of
+        the message starts on its own row, under the "> " prompt."""
         cols = width()
-        shown = self.buf.replace("\n", "⏎")
-        total = 2 + text_width(shown)
-        text_rows = max(1, -(-total // cols))
+        lines, counts = self.buf.split("\n"), self._counts(cols)
         below = self._below()
         up = f"\033[{self.row}A" if self.row and not fresh else ""
+
         def chips(text: str) -> str:
             return CHIP_RE.sub(lambda m: c(m.group(0), ACCENT) if m.group(0) in self.attach.items else m.group(0), text)
         if self.span:
             a, b = self.span
-            styled = chips(shown[:a]) + "\033[7m" + shown[a:b] + "\033[27m" + chips(shown[b:])
+            styled = chips(self.buf[:a]) + "\033[7m" + self.buf[a:b] + "\033[27m" + chips(self.buf[b:])
         else:
-            styled = chips(shown)
-        out = [up, "\r", c(">", BOLD, ACCENT), " ", styled, "" if total % cols == 0 else "\033[K", "\r\n",
-               c("─" * cols, ACCENT_DEEP), "\r\n", "\r\n".join(eol(b, cols) for b in below), "\033[J"]
-        target = 2 + text_width(shown[: self.cur])
-        trow, tcol = target // cols, target % cols
-        out.append(f"\033[{text_rows + len(below) - trow}A\r" + (f"\033[{tcol}C" if tcol else ""))
+            styled = chips(self.buf)
+        if self.suggestion and not self.buf:
+            styled = c(self.suggestion[: cols - 4], GREY)
+        out = [up, "\r"]
+        for i, (line, shown) in enumerate(zip(lines, styled.split("\n"))):
+            out += [c(">", BOLD, ACCENT) + " " if i == 0 else "  ", shown,
+                    "" if (2 + text_width(line)) % cols == 0 else "\033[K", "\r\n"]
+        out += [c("─" * cols, ACCENT_DEEP), "\r\n", "\r\n".join(eol(b, cols) for b in below), "\033[J"]
+        li = self.buf.count("\n", 0, self.cur)
+        target = 2 + text_width(self.buf[self._line_start():self.cur])
+        trow = sum(counts[:li]) + min(target // cols, counts[li] - 1)
+        tcol = target % cols if target // cols < counts[li] else cols - 1
+        out.append(f"\033[{sum(counts) + len(below) - trow}A\r" + (f"\033[{tcol}C" if tcol else ""))
         self.row = trow
         return "".join(out)
 
@@ -870,10 +1006,10 @@ def set_editor(editor: LineEditor) -> None:
     _EDITOR = editor
 
 
-def read_input(hint_left: str = "", hint_right: str = "") -> str:
+def read_input(hint_left: str = "", hint_right: str = "", suggestion: str = "") -> str:
     """Read one message with the shared editor (plain input() when not interactive)."""
     editor = _EDITOR or LineEditor([])
-    return editor.read(hint_left, hint_right)
+    return editor.read(hint_left, hint_right, suggestion)
 
 
 def choose(title: str, body: List[str], options: List[str], allow_text: bool = True, start: int = 0,
@@ -1138,7 +1274,8 @@ class Spinner:
         if self.notice:
             left = self.notice
         elif self.queued:
-            left = f"queued ({len(self.queued)}): " + " · ".join(getattr(q, "shown", q)[:30] for q in self.queued)
+            left = f"queued ({len(self.queued)}): " + " · ".join(getattr(q, "shown", q)[:30] for q in self.queued) \
+                + (" · ↑ to edit" if not self.typed else "")
         else:
             left = "type your next message; it's sent when this finishes"
         return [status, "", c("─" * w, ACCENT_DEEP), c(">", BOLD, ACCENT) + " " + shown + "\033[7m \033[0m",
@@ -1199,22 +1336,30 @@ class Spinner:
                 SCROLL.scroll(amount)
                 continue
             SCROLL.bottom()
-            if ch in ("\r", "\n"):
+            if ch in ("\r", "\n") and self.typed.endswith("\\"):  # backslash + Enter: a new line
+                self.typed = self.typed[:-1] + "\n"
+            elif ch in ("\r", "\n"):
                 if self.typed.strip():
                     self.queued.append(self._compose(self.typed.strip()))
                 self.typed = ""
+            elif ch in ("\x1b[A", "\x1bOA") and not self.typed and self.queued:  # ↑ takes a queued message back
+                last = self.queued.pop()
+                self.typed = getattr(last, "shown", "") or str(last)
             elif ch in ("\x7f", "\x08"):
                 chip = next((m for m in self.attach.known(self.typed) if m.end() == len(self.typed)), None)
                 self.typed = self.typed[:chip.start() if chip else -1]
-            elif ch == "\x15":
-                self.typed = ""
+            elif ch == "\x15":  # Ctrl+U: the current line (an empty one: joins the line above)
+                cut = self.typed.rfind("\n") + 1
+                self.typed = self.typed[:cut] if cut < len(self.typed) else self.typed[:-1]
             elif ch >= " " and not ch.startswith("\x1b"):
                 self.typed += ch
 
     def _paste(self, text: str) -> None:
-        images = dropped_images(text)
+        images, dropped = dropped_images(text), dropped_files(text)
         if images:
             self.typed += " ".join(self.attach.image(p) for p in images) + " "
+        elif dropped:
+            self.typed += " ".join(self.attach.file(p) for p in dropped) + " "
         else:
             insert, self.notice = self.attach.paste(text, self.typed)
             self.typed += insert

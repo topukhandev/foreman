@@ -17,14 +17,14 @@ MAX_PASTE_LINES = 2000          # per message, over all pastes
 COLLAPSE_LINES = 4              # pastes with at least this many lines (or CHARS characters) become a chip
 COLLAPSE_CHARS = 400
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".svg")
-CHIP_RE = re.compile(r"\[(?:Pasted text|Image) #\d+[^\]\n]*\]")
-IMAGE_REF_RE = re.compile(r"\[Image #\d+: ([^\]\n]+)\]")  # how an image appears in the text the AI receives
+CHIP_RE = re.compile(r"\[(?:Pasted text|Image|File) #\d+[^\]\n]*\]")
+IMAGE_REF_RE = re.compile(r"\[(?:Image|File) #\d+: ([^\]\n]+)\]")  # how an attachment appears in the text the AI receives
 IMAGE_PATH_RE = re.compile(r"(?<![\w/.])(/[^\s\[\]'\"]+\.(?:" + "|".join(e[1:] for e in IMAGE_EXTS) + r"))\b", re.I)  # a bare path
 
 
-def dropped_images(text: str) -> List[str]:
-    """Image files named by a paste. Terminals paste the path when a file is dragged in: bare, 'quoted',
-    backslash-escaped or as a file:// URI, one or several. Empty unless every item is an existing image file."""
+def dropped_files(text: str) -> List[str]:
+    """Files or folders named by a paste. Terminals paste the path when a file is dragged in: bare, 'quoted',
+    backslash-escaped or as a file:// URI, one or several. Empty unless every item is an existing file or folder."""
     text = text.strip()
     if not text or len(text) > 8000:
         return []
@@ -37,25 +37,31 @@ def dropped_images(text: str) -> List[str]:
         if tok.startswith("file://"):
             tok = unquote(tok[7:])
         tok = os.path.expanduser(tok)
-        if not (os.path.isabs(tok) and tok.lower().endswith(IMAGE_EXTS) and os.path.isfile(tok)):
+        if not (os.path.isabs(tok) and os.path.exists(tok)):
             return []
-        paths.append(tok)
+        paths.append(tok.rstrip("/") or "/")
     return paths
 
 
+def dropped_images(text: str) -> List[str]:
+    """Like dropped_files, but only when every item is an image file."""
+    paths = dropped_files(text)
+    return paths if all(p.lower().endswith(IMAGE_EXTS) and os.path.isfile(p) for p in paths) else []
+
+
 def image_dirs(text: str) -> List[str]:
-    """Directories of the image files named in a request, as `[Image #n: path]` or as a bare path (the AI is given
-    read access to them)."""
+    """Folders the AI is given read access to for a request's attachments: the folder of each image or file named as
+    `[Image #n: path]` / `[File #n: path]` or as a bare image path, or the folder itself when one was attached."""
     paths = IMAGE_REF_RE.findall(text) + IMAGE_PATH_RE.findall(text)
-    return list(dict.fromkeys(os.path.dirname(p) for p in paths if os.path.isfile(p)))
+    return list(dict.fromkeys(p if os.path.isdir(p) else os.path.dirname(p) for p in paths if os.path.exists(p)))
 
 
 class Attachments:
     """Chips created in this input session and the content behind each."""
 
     def __init__(self) -> None:
-        self.items: Dict[str, Tuple[str, str]] = {}   # chip -> (kind, content or image path)
-        self._n = {"text": 0, "image": 0}
+        self.items: Dict[str, Tuple[str, str]] = {}   # chip -> (kind, content or file path)
+        self._n = {"text": 0, "image": 0, "file": 0}
 
     def known(self, buf: str):
         return [m for m in CHIP_RE.finditer(buf) if m.group(0) in self.items]
@@ -111,11 +117,21 @@ class Attachments:
         self.items[chip] = ("image", path)
         return chip
 
+    def file(self, path: str) -> str:
+        """A dragged-in file or folder that is not an image: `[File #1 report.csv]`."""
+        self._n["file"] += 1
+        chip = f"[File #{self._n['file']} {os.path.basename(path) or path}]"
+        self.items[chip] = ("file", path)
+        return chip
+
     def expand(self, buf: str) -> str:
         """The message with every chip replaced by what it stands for."""
         def fill(m):
             kind, content = self.items[m.group(0)]
-            return content if kind == "text" else f"[Image #{m.group(0)[8:-1]}: {content}]"
+            if kind == "text":
+                return content
+            num = re.match(r"\[\w+ #(\d+)", m.group(0)).group(1)
+            return f"[{'Image' if kind == 'image' else 'File'} #{num}: {content}]"
         return CHIP_RE.sub(lambda m: fill(m) if m.group(0) in self.items else m.group(0), buf)
 
 
