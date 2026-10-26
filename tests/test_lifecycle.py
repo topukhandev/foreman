@@ -140,9 +140,10 @@ class LifecycleTest(unittest.TestCase):
         nxt = self.eng._next_step(done, load_modes()["planning"])
         self.assertEqual(nxt["mode"], "development")
         self.assertIn("settle the 2 open items first", nxt["reason"])
-        done["steps"][0]["status"] = "failed"
-        self.assertEqual(self.eng._next_step(done, load_modes()["planning"]),
-                         {"mode": "planning", "reason": "resolve what is blocking it"})
+        done["steps"][0]["status"], done["status"] = "failed", "blocked"
+        nxt = self.eng._next_step(done, load_modes()["planning"])
+        self.assertEqual((nxt["mode"], nxt["resume"]), ("planning", done["id"]), "the same task carries on")
+        self.assertIn("1 step left", nxt["reason"])
 
     def test_go_for_plan_after_research_starts_the_planning_step(self):
         from orchestrator.engine import NEXT_DO_RE

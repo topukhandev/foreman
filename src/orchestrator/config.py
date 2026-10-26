@@ -51,6 +51,11 @@ limits:
   step_timeout_sec: 3600   # one worker step (first attempt); planners can ask for more per step
   step_timeout_max_sec: 14400   # ceiling for any single attempt
   timeout_retries: 3       # after a timeout the same session is resumed, with double the time, this many times
+  transient_retries: 3     # network drop / overload: resume the same session after 30 s, 2 min, 5 min
+  limit_retry_sec: 300     # all providers out of limits: check again every 5 min (or wait for the stated reset)
+  limit_retries: 10        # checks before the task pauses (waiting for a known reset time doesn't count)
+  limit_wait_max_hours: 12 # a reset further away than this pauses the task right away
+  pressure_percent: 90     # a provider at this share of its usage window gets no new work if another can do it
   brain_timeout_sec: 600   # planning / review calls
   check_timeout_sec: 900   # one validation command
   max_fix_rounds: 3        # review/check bounces before escalating
@@ -86,6 +91,11 @@ class Limits:
     step_timeout_sec: int = 3600
     step_timeout_max_sec: int = 14400
     timeout_retries: int = 3
+    transient_retries: int = 3        # network drop / overload: resume the same session after 30 s, 2 min, 5 min
+    limit_retry_sec: int = 300        # every provider out of limits: check again this often
+    limit_retries: int = 10           # ... this many times (waiting for a known reset time doesn't count), then pause
+    limit_wait_max_hours: int = 12    # a known reset further away than this pauses the task right away
+    pressure_percent: int = 90        # a provider reporting this much of its usage window: new work goes elsewhere
     brain_timeout_sec: int = 600
     check_timeout_sec: int = 900
     max_fix_rounds: int = 3

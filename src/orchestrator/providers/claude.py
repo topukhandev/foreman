@@ -5,10 +5,10 @@ they are not allowed, so web access is enforced at the tool level."""
 import json
 import os
 import re
-from typing import List
+from typing import Any, Dict, List, Optional
 
-from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt,
-                                         SessionInfo, stream_session_id, tool_line)
+from orchestrator.providers.base import (GIT_POLICY, LIMIT, OUTPUT, TRANSIENT, Capabilities, Provider, RunRequest,
+                                         RunResult, SessionInfo, fit_prompt, stream_session_id, tool_line)
 
 READ_TOOLS = ["Read", "Grep", "Glob", "LS",
               "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)", "Bash(git show *)",
@@ -32,13 +32,14 @@ def encode_cwd(path: str) -> str:
 class ClaudeProvider(Provider):
     name = "claude"
     capabilities = Capabilities(resume=True, fork=True, structured_output=True,
-                                session_discovery=True, enforced_read_only=True, web=True)
+                                session_discovery=True, enforced_read_only=True, web=True,
+                                writes_extra_dirs=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
         req = fit_prompt(req)
         cmd = [self._binary or self.settings.command, "-p"]
         # stream-json gives live activity (and a readable visible terminal); its last line is the result object.
-        streamed = req.visual or req.on_activity is not None
+        streamed = req.visual or req.on_activity is not None or req.on_session is not None
         cmd += ["--output-format", "stream-json", "--verbose"] if streamed else ["--output-format", "json"]
         model = req.model or self.settings.model
         if model:
@@ -66,9 +67,10 @@ class ClaudeProvider(Provider):
 
     def run(self, req: RunRequest) -> RunResult:
         code, out, err, dur, timed_out = self._exec(self.build_command(req), req)
+        usage = _usage(out)
         if timed_out:  # verified: the first stream line carries session_id, and `--resume` keeps that id
             return RunResult(False, error=f"timed out after {req.timeout}s", session_id=stream_session_id(out),
-                             duration=dur, raw=out)
+                             duration=dur, raw=out, usage=usage)
         payload = {}
         for line in reversed(out.strip().splitlines()):
             try:
@@ -78,22 +80,39 @@ class ClaudeProvider(Provider):
             if isinstance(cand, dict) and cand.get("type") == "result":
                 payload = cand
                 break
-        if not payload:
-            return RunResult(False, error=(err.strip() or out.strip() or f"exit {code}")[-800:], duration=dur, raw=out)
+        if not payload:  # the process died before its result line (crash, network, killed)
+            return RunResult(False, error=(err.strip() or out.strip() or f"exit {code}")[-800:], duration=dur, raw=out,
+                             session_id=stream_session_id(out), usage=usage)
         text = payload.get("result") or ""
         ok = code == 0 and not payload.get("is_error")
         data = payload.get("structured_output") if req.schema else None
         if req.schema and data is None:
             data = self.parse_free_json(text)
+        error, kind, retry_at = None, "", None
+        if not ok:
+            error = (text or err.strip() or f"exit {code}")[-800:]
+            # Verified 2026-10-26: a usage limit ends with is_error, api_error_status 429, api_error
+            # "usage_limit_reached", result "You've hit your session limit · resets 7:10pm (Asia/Dhaka)"; the
+            # stream's rate_limit_event lines carry resetsAt (epoch seconds) and utilization.
+            status = payload.get("api_error_status")
+            if payload.get("api_error") == "usage_limit_reached" or status == 429:
+                kind, retry_at = LIMIT, (usage or {}).get("resets_at")
+            elif isinstance(status, int) and status >= 500:
+                kind = TRANSIENT
+        elif data is None and req.schema:
+            ok, error, kind = False, "finished without the required structured result", OUTPUT
         return RunResult(
-            ok=ok and (data is not None or not req.schema),
+            ok=ok,
             text=text,
             session_id=payload.get("session_id"),
             data=data,
-            error=None if ok else (text or err.strip() or f"exit {code}")[-800:],
+            error=error,
             duration=dur,
             cost_usd=payload.get("total_cost_usd"),
             raw=out,
+            kind=kind,
+            retry_at=retry_at,
+            usage=usage,
         )
 
     def activity(self, ev, cwd):
@@ -126,6 +145,21 @@ class ClaudeProvider(Provider):
                 continue
             sessions.append(SessionInfo(self.name, fname[:-6], cwd, st.st_mtime, _first_prompt(path), st.st_size))
         return sorted(sessions, key=lambda s: s.updated_at, reverse=True)
+
+
+def _usage(out: str) -> Optional[Dict[str, Any]]:
+    """The last rate-limit reading in a stream-json run: {"utilization": 0.0-1.0, "resets_at": epoch seconds}."""
+    for line in reversed(out.splitlines()):
+        if '"rate_limit_info"' not in line:
+            continue
+        try:
+            info = json.loads(line).get("rate_limit_info") or {}
+        except (ValueError, AttributeError):
+            continue
+        if info.get("resetsAt"):
+            return {"utilization": float(info.get("utilization") or (1.0 if info.get("status") == "rejected" else 0.0)),
+                    "resets_at": float(info["resetsAt"]), "window": info.get("rateLimitType", "")}
+    return None
 
 
 def _first_prompt(path: str) -> str:

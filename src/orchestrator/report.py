@@ -3,12 +3,26 @@
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, Dict, List, Optional
 
 from orchestrator.util import short
 
 ICON = {"done": "✔", "answered": "✔", "partial": "◐", "needs_input": "?", "blocked": "✘", "failed": "✘",
-        "running": "…", "planning": "…", "queued": "…", "interrupted": "!", "planned": "◌"}
+        "running": "…", "planning": "…", "queued": "…", "interrupted": "!", "planned": "◌",
+        "paused": "‖"}
+
+
+def clock(ts: Optional[float]) -> str:
+    """Epoch seconds as local time: "19:10" today, "Tue 19:10" within a week, else "2026-11-03 19:10"."""
+    if not ts:
+        return "?"
+    t, now = time.localtime(ts), time.localtime()
+    if t.tm_yday == now.tm_yday and t.tm_year == now.tm_year:
+        return time.strftime("%H:%M", t)
+    if 0 < ts - time.time() < 6 * 86400:
+        return time.strftime("%a %H:%M", t)
+    return time.strftime("%Y-%m-%d %H:%M", t)
 
 
 def notify(title: str, body: str) -> None:
@@ -24,6 +38,11 @@ def notify(title: str, body: str) -> None:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
+
+
+def option_labels(q: Dict[str, Any], mark: str = "recommended") -> List[str]:
+    """A question's options, the worker's recommendation first and marked."""
+    return [f"{o} ({mark})" if o == q.get("default") else o for o in q.get("options") or []]
 
 
 def _projects_line(task: Dict[str, Any]) -> str:
@@ -102,7 +121,7 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
     if open_q and questions:
         lines += ["", "Needs your decision"]
         for i, q in enumerate(open_q, 1):
-            opts = f"  [{' / '.join(q['options'])}]" if q.get("options") else ""
+            opts = f"  [{' / '.join(option_labels(q))}]" if q.get("options") else ""
             first, *rest = q["text"].splitlines()
             lines.append(f"  {i}. {first}{opts}")
             lines += [f"     {r.strip()}" if not r.startswith("  ") else f"   {r}" for r in rest]

@@ -17,8 +17,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import List
 
-from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt,
-                                         SessionInfo, tool_line)
+from orchestrator.providers.base import (GIT_POLICY, OUTPUT, Capabilities, Provider, RunRequest, RunResult,
+                                         SessionInfo, fit_prompt, stream_session_id, tool_line)
 
 
 # Plan mode denies terminal commands; if the agent tries one anyway, agy aborts with no output.
@@ -35,11 +35,12 @@ def antigravity_index() -> str:
 class AntigravityProvider(Provider):
     name = "antigravity"
     capabilities = Capabilities(resume=True, fork=False, structured_output=True,
-                                session_discovery=True, enforced_read_only=True, web=True)
+                                session_discovery=True, enforced_read_only=True, web=True,
+                                writes_extra_dirs=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
         req = fit_prompt(req)
-        streamed = req.visual or req.on_activity is not None
+        streamed = req.visual or req.on_activity is not None or req.on_session is not None
         cmd = [self._binary or self.settings.command, "--output-format", "stream-json" if streamed else "json"]
         model = req.model or self.settings.model
         if model:
@@ -63,8 +64,9 @@ class AntigravityProvider(Provider):
 
     def run(self, req: RunRequest) -> RunResult:
         code, out, err, dur, timed_out = self._exec(self.build_command(req), req)
-        if timed_out:
-            return RunResult(False, error=f"timed out after {req.timeout}s", duration=dur, raw=out)
+        if timed_out:  # verified: the first stream-json event is {"event":"init","conversation_id":...}
+            return RunResult(False, error=f"timed out after {req.timeout}s", duration=dur, raw=out,
+                             session_id=stream_session_id(out, "conversation_id"))
         payload = {}
         for line in reversed(out.strip().splitlines()):
             try:
@@ -80,20 +82,26 @@ class AntigravityProvider(Provider):
         if not payload:
             try:
                 payload = json.loads(out)
-            except ValueError:
-                return RunResult(False, out.strip(), error=(err.strip() or f"exit {code}")[-800:], duration=dur, raw=out)
+            except ValueError:  # died before its result (crash, network, killed): keep the conversation resumable
+                return RunResult(False, out.strip()[-2000:], error=(err.strip() or f"exit {code}")[-800:], duration=dur,
+                                 raw=out, session_id=stream_session_id(out, "conversation_id"))
         text = (payload.get("response") or "").strip()
         data = payload.get("structured_output") if req.schema else None
         if req.schema and data is None:
             data = self.parse_free_json(text)
-        ok = code == 0 and str(payload.get("status", "")).upper() == "SUCCESS" and (bool(text) or data is not None)
+        success = code == 0 and str(payload.get("status", "")).upper() == "SUCCESS"
+        ok = success and (bool(text) or data is not None)
+        error, kind = None, ""
         if req.schema and data is None:
             ok = False
-        error = None
-        if not ok:
+            if success and text and not payload.get("denied_actions"):
+                error, kind = "finished without the required structured result", OUTPUT
+        if not ok and not error:
             denied = payload.get("denied_actions")
-            error = (err.strip()[-600:] or f"status {payload.get('status')}") + (f"; denied: {denied}" if denied else "")
-        return RunResult(ok, text, payload.get("conversation_id"), data, error, dur, raw=out)
+            error = (err.strip()[-600:] or text[-600:] or f"status {payload.get('status')}") + \
+                (f"; denied: {denied}" if denied else "")
+        sid = payload.get("conversation_id") or stream_session_id(out, "conversation_id")
+        return RunResult(ok, text, sid, data, error, dur, raw=out, kind=kind)
 
     def activity(self, ev, cwd):
         su = ev.get("step_update") or {}

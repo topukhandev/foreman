@@ -2,9 +2,11 @@
 
 import json
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from orchestrator.config import ProviderSettings
@@ -29,6 +31,7 @@ class Capabilities:
     session_discovery: bool = False  # list existing sessions per directory
     enforced_read_only: bool = False  # tool-level (not just prompt-level) read-only mode
     web: bool = False                # can search / fetch the web in read-only steps
+    writes_extra_dirs: bool = False  # write steps can also write in extra_dirs (Foreman's progress notes)
 
 
 @dataclass
@@ -47,6 +50,9 @@ class RunRequest:
     title: str = ""                        # window title when visual
     on_activity: Optional[Callable[[str], None]] = field(default=None, repr=False)  # live "Read(x)" lines
     web: bool = False                      # read steps may search / fetch the web (R&D and planning modes)
+    # Called once with the session id as soon as the CLI's output reveals it, so a run that is cut off (crash,
+    # killed terminal, network) can still be resumed.
+    on_session: Optional[Callable[[str], None]] = field(default=None, repr=False)
 
 
 # A command-line argument can hold about 128 KB on Linux; a big paste in the request can exceed that.
@@ -73,17 +79,84 @@ def fit_prompt(req: RunRequest) -> RunRequest:
     return replace(req, prompt=stub, extra_dirs=[*req.extra_dirs, folder])
 
 
-def stream_session_id(out: str) -> Optional[str]:
-    """The session id in a CLI's JSON-lines output (Claude Code prints it in its first `system`/`init` line), so a run
-    that was cut off can still be resumed."""
+def stream_session_id(out: str, key: str = "session_id") -> Optional[str]:
+    """The session id in a CLI's JSON-lines output (Claude Code prints it in its first `system`/`init` line, agy as
+    `conversation_id` in its `init` event), so a run that was cut off can still be resumed."""
     for line in out.splitlines()[:50]:
         try:
             ev = json.loads(line)
         except ValueError:
             continue
-        if isinstance(ev, dict) and ev.get("session_id"):
-            return str(ev["session_id"])
+        if isinstance(ev, dict) and ev.get(key):
+            return str(ev[key])
     return None
+
+
+# Why a run failed, in terms the engine has a policy for (see Engine._run_step).
+TIMEOUT, LIMIT, TRANSIENT, AUTH, CONTEXT, OUTPUT, CRASH, STOPPED = (
+    "timeout", "limit", "transient", "auth", "context", "output", "crash", "stopped")
+
+LIMIT_RE = re.compile(r"usage.?limit|session limit|rate.?limit|quota|resource.?exhausted|too many requests|\b429\b|"
+                      r"limit reached|out of (credits|requests)|credit balance|insufficient.?(credit|balance|quota)", re.I)
+TRANSIENT_RE = re.compile(r"overloaded|\b(500|502|503|504|529)\b|internal server error|bad gateway|service unavailable|"
+                          r"econnreset|econnrefused|etimedout|eai_again|enotfound|socket hang up|fetch failed|"
+                          r"network (error|is unreachable)|connection (error|reset|refused|closed)|temporarily unavailable|"
+                          r"unavailable_error|stream (closed|ended) unexpectedly|api error", re.I)
+AUTH_RE = re.compile(r"api key|expired|unauthori[sz]ed|\b401\b|not logged in|log ?in required|authenticat|credential",
+                     re.I)
+CONTEXT_RE = re.compile(r"prompt is too long|context (length|window)|maximum context|too many tokens|"
+                        r"input is too long|context_length_exceeded", re.I)
+
+
+def classify(error: str) -> str:
+    """Failure kind from an error text (adapters with structured errors may decide more precisely)."""
+    text = error or ""
+    if text.startswith("timed out"):
+        return TIMEOUT
+    if text.startswith("stopped by user"):
+        return STOPPED
+    if CONTEXT_RE.search(text):
+        return CONTEXT
+    if LIMIT_RE.search(text):
+        return LIMIT
+    if AUTH_RE.search(text):
+        return AUTH
+    if TRANSIENT_RE.search(text):
+        return TRANSIENT
+    return CRASH
+
+
+def reset_time(text: str, now: Optional[float] = None) -> Optional[float]:
+    """When a limit lifts, from messages such as "resets 7:10pm (Asia/Dhaka)", "resets at 19:10", "try again in
+    15 minutes" or "retry after 120 seconds". None when the text doesn't say."""
+    now = time.time() if now is None else now
+    m = re.search(r"(?:try again|retry|resets?|available again)\s+(?:in|after)\s+(\d+)\s*(second|sec|s|minute|min|m|"
+                  r"hour|hr|h)\w*\b", text or "", re.I)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        return now + n * (3600 if unit.startswith("h") else 60 if unit.startswith("m") else 1)
+    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([\w/+-]+)\))?", text or "", re.I)
+    if not m or (not m.group(2) and not m.group(3)):
+        return None
+    hour, minute, half, zone = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower(), m.group(4)
+    if half == "pm" and hour < 12:
+        hour += 12
+    if half == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    tz = None
+    if zone:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(zone)
+        except Exception:
+            tz = None
+    current = datetime.fromtimestamp(now, tz) if tz else datetime.fromtimestamp(now)
+    at = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if at.timestamp() <= now:
+        at += timedelta(days=1)
+    return at.timestamp()
 
 
 @dataclass
@@ -96,6 +169,15 @@ class RunResult:
     duration: float = 0.0
     cost_usd: Optional[float] = None
     raw: str = ""
+    kind: str = ""                         # failure kind (TIMEOUT, LIMIT, ...); "" when ok
+    retry_at: Optional[float] = None       # LIMIT: when the provider can be used again, if it said so
+    usage: Optional[Dict[str, Any]] = None  # how close the provider is to its limit: {"utilization", "resets_at"}
+
+    def __post_init__(self):
+        if not self.ok and not self.kind:
+            self.kind = classify(self.error or "")
+        if self.kind == LIMIT and self.retry_at is None:
+            self.retry_at = reset_time(self.error or "")
 
 
 def tool_line(name: str, arg: Any, cwd: str) -> str:
@@ -153,23 +235,35 @@ class Provider:
         return res.code, res.out, res.err, res.duration, res.timed_out
 
     def _line_handler(self, req: RunRequest):
-        if not req.on_activity:
+        if not req.on_activity and not req.on_session:
             return None
+        seen: List[str] = []
 
         def handle(line: str) -> None:
             try:
                 ev = json.loads(line)
             except ValueError:
                 return
-            if isinstance(ev, dict):
-                act = self.activity(ev, req.cwd)
-                if act:
-                    req.on_activity(act)
+            if not isinstance(ev, dict):
+                return
+            if req.on_session and not seen:
+                sid = self.session_from_event(ev)
+                if sid:
+                    seen.append(sid)
+                    req.on_session(sid)
+            act = self.activity(ev, req.cwd) if req.on_activity else None
+            if act:
+                req.on_activity(act)
         return handle
 
     def activity(self, event: Dict[str, Any], cwd: str) -> Optional[str]:
         """One short human line ("Read(src/x.js)") for a streamed output event, or None."""
         return None
+
+    def session_from_event(self, event: Dict[str, Any]) -> Optional[str]:
+        """The session id carried by a streamed output event, if any."""
+        sid = event.get("session_id") or event.get("sessionID") or event.get("conversation_id")
+        return str(sid) if sid else None
 
     @staticmethod
     def schema_instruction(schema: Dict[str, Any]) -> str:

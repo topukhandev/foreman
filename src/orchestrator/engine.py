@@ -31,12 +31,13 @@ from orchestrator.clipboard import image_dirs
 from orchestrator.config import Config
 from orchestrator.knowledge import ProjectKnowledge, slug
 from orchestrator.modes import Mode, catalog, load_modes, resolve as resolve_mode
-from orchestrator.providers.base import OWN_PROMPT_PREFIXES, Provider, RunRequest, RunResult
+from orchestrator.providers.base import (AUTH, CONTEXT, LIMIT, OUTPUT, OWN_PROMPT_PREFIXES, STOPPED, TIMEOUT,
+                                         TRANSIENT, Provider, RunRequest, RunResult)
 from orchestrator.registry import Registry
-from orchestrator.report import notify, render_plan, render_report, render_status
+from orchestrator.report import clock, notify, render_plan, render_report, render_status
 from orchestrator.store import FINAL, Store
-from orchestrator.util import (STOPPING, changed_since, diff_text, git_head, now_iso, run_process, short,
-                               snapshot)
+from orchestrator.util import (STOPPING, changed_since, diff_text, git_head, now_iso, read_json, run_process, short,
+                               snapshot, write_json)
 
 STATUS_RE = re.compile(
     r"^\s*(status\b|state\b|progress\b|"
@@ -49,8 +50,14 @@ YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|conti
 GIT_INIT_RE = re.compile(r"\bgit init\b", re.I)
 BARE_YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|do it|approved?|lgtm)\s*[.!]*\s*$", re.I)
 NO_RE = re.compile(r"^\s*(n|no|nope|cancel|stop|abort|don'?t)\s*[.!]*\s*$", re.I)
-AUTH_RE = re.compile(r"api key|expired|unauthori[sz]ed|\b401\b|not logged in|log ?in required|authenticat|credential",
-                     re.I)
+# Why an attempt stopped, as the next worker is told.
+STOP_REASONS = {TIMEOUT: "Foreman's time limit", LIMIT: "the provider's usage limit", TRANSIENT: "a network or API error",
+                AUTH: "a login problem", CONTEXT: "a full context window", OUTPUT: "a missing final report",
+                "crash": "the process stopping unexpectedly", "interrupted": "Foreman being stopped or closed",
+                STOPPED: "you stopping the task"}
+TRANSIENT_WAITS = (30, 120, 300)
+SKIP_RE = re.compile(r"^\s*skip( (this|the) step)?\b", re.I)
+ANSWER_ITEM_RE = re.compile(r"^\s*(?:q\s*)?(\d+)\s*[.):\-]\s*", re.I)
 SMALL_TALK_RE = re.compile(
     r"^\s*(hi|hey|hello|hiya|yo|sup|good (morning|afternoon|evening|night)|thanks?( you)?( so much)?|thx|ty|"
     r"ok(ay)?|cool|nice|great|awesome|perfect|bye|goodbye|see you)( there| foreman| again)?\s*[!.?]*\s*$", re.I)
@@ -210,25 +217,50 @@ class Engine:
         return self.execute(task) if task else {"task": None, "report": msg}
 
     def prepare_resume(self, ref: Optional[str], note: str = "", cwd: str = ".") -> Tuple[Optional[Dict[str, Any]], str]:
-        """Pick the task to continue and mark it for re-planning. Does not execute."""
+        """Pick the task to continue. Does not execute. The task carries on with its plan where it stopped, in the
+        sessions it had (a cut-off step resumes its session); it is re-planned only when the user adds instructions,
+        the code changed under it since it last ran, or nothing of the plan is left to run."""
         cwd = os.path.abspath(cwd)
         self.registry.ensure_scanned(cwd)
         anchor = self.registry.project_for_path(cwd)
         cands = self.store.resolve(ref, cwd=cwd, project_names=[anchor.name] if anchor else None,
                                    fallback=ref is None or bool(PREVIOUS_RE.search(note or "")))
+        if not cands and ref and not re.fullmatch(r"#?\d+", ref.strip()):
+            # "continue, but use the CSV dumps": the words are instructions, not a task name; continue the latest here
+            ref = None
+            cands = self.store.resolve(None, cwd=cwd, project_names=[anchor.name] if anchor else None)
         unfinished = [t for t in cands if t["status"] not in FINAL]
         if not cands:
             return None, "No task found to continue" + (f" matching '{ref}'." if ref else ".")
         if (ref and len(cands) > 1) or (not ref and len(unfinished) > 1):
             return None, self._ambiguous(unfinished or cands)
         task = (unfinished or cands)[0]
-        if note:
+        extra = _instructions(note)
+        if extra:
             task["decisions"].append({"text": f"User asked to continue: {note}", "by": "user", "at": now_iso()})
-        task["replan"] = bool(note) or task["status"] != "planned"  # a dry-run plan is run as it stands
+        left = [s for s in task["steps"] if not _settled(s)]
+        task["replan"] = task["status"] != "planned" and (  # a dry-run plan is run as it stands
+            bool(extra) or not left or bool(self._changes_since_last_run(task)))
+        if not task["replan"]:
+            self._reopen_steps(task)
         task["dry_run"] = False
         task["status"] = "queued"
         self.store.save(task)
         return task, ""
+
+    @staticmethod
+    def _reopen_steps(task: Dict[str, Any]) -> None:
+        """Before a task runs its own plan again: unfinished steps run again (keeping their sessions and history, so a
+        cut-off one resumes); a step that asked questions runs again once they are all answered."""
+        open_from = {q.get("from_step") for q in task["questions"] if not q.get("answer")}
+        for s in task["steps"]:
+            if s["status"] in ("failed", "blocked", "skipped", "paused") and not s.get("skipped_by_user"):
+                s["status"], s["summary"] = "pending", ""
+                s.pop("fresh_retry", None)
+            elif s["status"] == "needs_input" and s["id"] not in open_from:
+                s["status"] = "pending"
+                if any(q.get("from_step") == s["id"] and q.get("answer") for q in task["questions"]):
+                    s["followup"] = "answered"
 
     def prepare_answer(self, ref: str, text: str) -> Tuple[Optional[Dict[str, Any]], str]:
         cands = self.store.resolve(ref, fallback=False) if ref else self.store.resolve(None, active_only=True)
@@ -247,23 +279,28 @@ class Engine:
             self.store.event(task["id"], "cancelled", text=text)
             return None, f"Cancelled #{task['id']}. Nothing was changed."
         yes = bool(YES_RE.match(text))
+        replies = _split_answers(text, len(open_q))
         home = self._home_project(task)
-        business = [q for q in open_q if q.get("kind") == "business"]
-        targets = {q.get("project") for q in business} - {None} or ({home.name} if home and business else set())
-        for name in targets:  # confirmed business rules outlive the task: keep them in the project(s)
-            proj = self.registry.projects.get(name)
-            if proj:
-                asked = " / ".join(q["text"] for q in business if q.get("project") in (None, name))
-                ProjectKnowledge(proj.path).add_decision(asked, text, task["id"], task.get("feature", ""))
-        for q in open_q:
-            q["answer"] = text
-            if q.get("kind") == "budget" and yes:
+        for q, reply in zip(open_q, replies):
+            q["answer"] = reply
+            if q.get("kind") == "budget" and YES_RE.match(reply):
                 task["budget_ack"] = now_iso()
-            if q.get("kind") == "approval" and yes:
+            if q.get("kind") == "approval" and YES_RE.match(reply):
                 task["plan_approved"] = now_iso()
-        task["decisions"].append({"text": f"User answered: {text}", "by": "user", "at": now_iso()})
-        # Plain approvals continue the existing plan; anything else is feedback that needs a new plan.
-        task["replan"] = not (yes and all(q.get("kind") in ("budget", "approval") for q in open_q))
+            if q.get("kind") == "business":  # confirmed business rules outlive the task: keep them in the project
+                proj = self.registry.projects.get(q.get("project") or "") or home
+                if proj:
+                    ProjectKnowledge(proj.path).add_decision(q["text"], reply, task["id"], task.get("feature", ""))
+            step = next((s for s in task["steps"] if s["id"] == q.get("from_step")), None)
+            if step and SKIP_RE.match(reply):
+                step.update(status="skipped", skipped_by_user=True, summary=f"skipped by you: {short(q['text'], 120)}")
+            task["decisions"].append({"text": f"User answered \"{short(q['text'], 160)}\": {reply}", "by": "user",
+                                      "at": now_iso()})
+        # Answers to a worker's questions go back to that worker's session and the plan carries on; plain approvals
+        # also continue the plan. Anything else (the planner's own questions, feedback) needs a new plan.
+        task["replan"] = not all(q.get("from_step") or (q.get("kind") in ("budget", "approval") and yes) for q in open_q)
+        if not task["replan"]:
+            self._reopen_steps(task)
         task["dry_run"] = False
         task["status"] = "queued"
         self.store.save(task)
@@ -378,6 +415,8 @@ class Engine:
             return None, "Nothing is waiting for a next step here. " + self.lifecycle_text(cwd)
         prev = cands[0]
         nxt = prev["next"]
+        if nxt.get("resume"):  # the work isn't finished: carry on with that task rather than opening a new one
+            return self.prepare_resume(str(nxt["resume"]), cwd=cwd)
         mode = self.modes(cwd).get(nxt["mode"])
         title = mode.title if mode else nxt["mode"]
         doc = prev.get("document") or {}
@@ -390,23 +429,26 @@ class Engine:
         self.store.save(prev)
         return task, ""
 
-    def _next_step(self, task: Dict[str, Any], mode: Mode) -> Optional[Dict[str, str]]:
-        """Recommended next mode, from the mode's template and the outcome (deterministic)."""
-        if task["status"] in ("interrupted", "cancelled", "failed", "needs_input"):
-            return None
-        latest = {}
-        for e in task["evidence"]:
-            if e["kind"] in ("check", "review"):
-                latest[(e["kind"], e["project"], e.get("command"))] = e
-        stuck = task["status"] in ("partial", "blocked") or any(s["status"] in ("failed", "blocked") for s in task["steps"]) \
-            or any(not e["ok"] for e in latest.values())
-        problems = stuck or bool(task["remaining"])
-        if problems and mode.writes == "code":
-            return {"mode": mode.name, "reason": "finish the remaining items"}
-        if problems and mode.name == "qa":
+    def _next_step(self, task: Dict[str, Any], mode: Mode) -> Optional[Dict[str, Any]]:
+        """What comes next, from the facts of the run (deterministic). An unfinished task is continued, never replaced
+        by a new one ("resume": its plan, sessions and history carry on); a finished one moves to the next mode."""
+        if task["status"] in ("cancelled", "failed", "needs_input"):
+            return None  # nothing to recommend: the report shows the error or the questions
+        if task["status"] in ("interrupted", "paused", "blocked", "partial"):
+            left = [s for s in task["steps"] if not _settled(s)]
+            if task["status"] == "paused":
+                why = f"carry on once a provider is available ({short((task.get('paused') or {}).get('reason', ''), 120)})" \
+                    if task.get("paused") else "carry on once a provider is available"
+            elif task["status"] == "partial":
+                why = "fix the problems the last checks or review still found"
+            elif left:
+                why = f"{len(left)} step{'s' if len(left) != 1 else ''} left, starting with {left[0]['id']} in " \
+                      f"{left[0]['project']}"
+            else:
+                why = "finish what was stopped"
+            return {"mode": mode.name, "reason": why, "resume": task["id"]}
+        if task["remaining"] and mode.name == "qa":
             return {"mode": "development", "reason": "fix what QA found"}
-        if stuck:  # the mode itself did not get done
-            return {"mode": mode.name, "reason": "resolve what is blocking it"}
         if not mode.next:
             return None
         # A finished research / planning / deployment step moves on; open items it found are for the user to settle first.
@@ -440,9 +482,17 @@ class Engine:
         task["notices"] = []
         # Remaining items are recomputed every run; the previous list is kept as context for re-planning.
         task["previous_remaining"], task["remaining"] = task["remaining"] or task.get("previous_remaining", []), []
+        task.pop("waiting", None)
+        task.pop("paused", None)
         for s in task["steps"]:
-            if s["status"] == "running":  # interrupted run
+            if s["status"] in ("running", "paused"):  # an interrupted run, or one that waited out provider limits
                 s["status"] = "pending"
+            for a in s.get("history") or []:
+                if not a.get("ended"):  # this process (or the machine) died mid-attempt: its session is resumable
+                    a.update(ended=now_iso(), outcome="interrupted")
+            if s["status"] == "pending":  # a new run gets fresh retry allowances
+                for k in ("paused", "limit_checks", "transient", "format_retry"):
+                    s.pop(k, None)
         self.store.save(task)
         try:
             self._run(task)
@@ -494,8 +544,15 @@ class Engine:
                 if self._replan(task, discoveries) and self._pending(task):
                     continue
             break
-        if any(s["status"] in ("failed", "blocked", "skipped") for s in task["steps"]):
+        if any(s["status"] == "paused" for s in task["steps"]):
+            task["status"] = "paused"  # every provider is out of its usage limit; "continue" picks it up
+            task["paused"] = next(s["paused"] for s in task["steps"] if s.get("paused"))
+            return
+        if any(not _settled(s) for s in task["steps"]):
+            # A step could not finish (and the steps waiting for it didn't run). A half-done plan is not verified,
+            # fixed or written up; "continue" retries from here, in the same sessions.
             task["status"] = "blocked"
+            return
         mode = self._mode(task)
         if any(s["kind"] == "implement" and s["status"] == "done" for s in task["steps"]):
             self._verify(task)
@@ -543,11 +600,14 @@ class Engine:
         self._say(task, "planning…")
         before = snapshot(cwd)
         try:
-            plan = self._brain(task).call(prompt, PLAN_SCHEMA, cwd, extra, purpose="plan",
-                                          web=bool(fixed and modes[fixed].web))
+            plan = self._think(task, lambda: self._brain(task).call(prompt, PLAN_SCHEMA, cwd, extra, purpose="plan",
+                                                                    web=bool(fixed and modes[fixed].web)))
         except BrainError as e:
-            task["status"] = "blocked"
-            task["remaining"].append(f"Planning failed: {e}")
+            if task.get("paused"):  # every provider is out of its usage limit: nothing is wrong with the task
+                task["status"] = "paused"
+            else:
+                task["status"] = "blocked"
+                task["remaining"].append(f"Planning failed: {e}")
             self.store.event(task["id"], "plan_failed", error=str(e))
             return False
         self.store.event(task["id"], "plan", plan=plan)
@@ -571,8 +631,9 @@ class Engine:
     def _replan(self, task: Dict[str, Any], discoveries: List[str]) -> bool:
         sel = self.registry.select(task["request"], task["cwd"], extra=list(task["projects"]))
         try:
-            plan = self._brain(task).call(Brain.replan_prompt(task, discoveries, self.registry.render_context(sel)),
-                                          PLAN_SCHEMA, sel.anchor.path if sel.anchor else task["cwd"], purpose="replan")
+            plan = self._think(task, lambda: self._brain(task).call(
+                Brain.replan_prompt(task, discoveries, self.registry.render_context(sel)), PLAN_SCHEMA,
+                sel.anchor.path if sel.anchor else task["cwd"], purpose="replan"))
         except BrainError as e:
             task["notices"].append(f"Could not re-plan after discoveries: {e}")
             return False
@@ -701,17 +762,16 @@ class Engine:
                 for s in task["steps"]:
                     if s["status"] != "pending":
                         continue
+                    # A step whose dependency didn't finish stays pending (waiting for it): "continue" runs it once the
+                    # dependency is done, instead of it being lost as skipped.
                     deps = [by_id.get(d) for d in s["depends_on"]]
-                    if any(d and d["status"] in ("failed", "blocked", "skipped", "needs_input") for d in deps):
-                        s["status"] = "skipped"
-                        s["summary"] = "skipped: a step it depends on did not complete"
-                        continue
-                    if all(d is None or d["status"] == "done" for d in deps) and s["project"] not in busy_projects \
+                    if all(d is None or _settled(d) for d in deps) and s["project"] not in busy_projects \
                             and len(running) < self.cfg.limits.max_parallel:
                         s["status"] = "running"
                         busy_projects.add(s["project"])
                         running[pool.submit(self._run_step, task, s)] = s
-                self.store.save(task)
+                with self._lock:  # workers write to the task too (live session ids)
+                    self.store.save(task)
                 if not running:
                     break
                 done, _ = wait(list(running), return_when=FIRST_COMPLETED)
@@ -724,65 +784,91 @@ class Engine:
                         step["summary"] = f"orchestrator error: {e}"
 
     def _run_step(self, task: Dict[str, Any], step: Dict[str, Any]) -> None:
+        """Run one step to a result, whatever happens to the providers on the way. Every attempt is journaled in
+        step["history"] and its session id is saved the moment the CLI reveals it, so nothing is lost when a run is cut
+        off. Policy by failure kind (providers.base): a timeout or a network error resumes the same session; a missing
+        final report is asked for in the same session; a usage limit or a login problem rests that provider and hands
+        the step to the next one with a handoff brief; when every provider is out of limits, Foreman waits for the
+        reset (checking every few minutes) and then carries on; a crash retries once fresh, then moves on."""
         proj = self.registry.projects[step["project"]]
         before = snapshot(proj.path)
         head_before = git_head(proj.path)
+        self._step_snapshot(task, step, before)
         prompt = self._step_prompt(task, step, proj)
-        tried: List[str] = []
+        lim = self.cfg.limits
+        tried: List[str] = []    # providers given up on for this step in this run
+        limited: List[str] = []  # ... of those, the ones out of usage limits (worth waiting for)
         result: Optional[RunResult] = None
-        while True:
+        while not STOPPING.is_set():
             choice = self._choose(task, step, proj.path, tried)
             if not choice:
+                if limited and self._wait_for_limits(task, step, limited):
+                    tried = [n for n in tried if n not in limited]
+                    limited.clear()
+                    continue
                 break
             provider, session_id, fork, why = choice
-            tried.append(provider.name)
             ok, warn = self.budget.acquire(provider.name)
-            if not ok:
+            if not ok:  # Foreman's own daily cap behaves like a usage limit that lifts at midnight
                 self._notice(task, warn)
+                self._provider_failed(provider.name, LIMIT, warn, _midnight())
+                tried.append(provider.name)
+                limited.append(provider.name)
                 continue
             if warn:
                 self._notice(task, warn)
             step["attempts"] += 1
             timeout = self._step_timeout(step)
-            attempt_prompt = prompt
-            if step.get("timeouts"):  # the previous attempt ran out of time: carry on, don't start over
-                resume = bool(session_id) and not fork
-                attempt_prompt = self._continue_prompt(step, timeout) if resume else \
-                    prompt + "\n\n" + self._continue_prompt(step, timeout, fresh=True)
-                why = "continuing the same session after a timeout" if resume else "retrying after a timeout"
+            attempt_prompt, why = self._attempt_prompt(task, step, proj, prompt, session_id, fork, timeout, why)
+            notes = self._notes_path(task, step) if step["kind"] == "implement" and \
+                provider.capabilities.writes_extra_dirs else None
+            if notes:
+                attempt_prompt += (f"\n\nPROGRESS NOTES: after each milestone, append one line to {notes} (what is done, "
+                                   "what is next). This file is outside the project and is Foreman's; if your run is cut "
+                                   "off, the next worker continues from it.")
             self._say(task, f"{step['kind']} {step['project']} via {provider.name}" + (f" ({why})" if why else ""))
             self.store.event(task["id"], "step_start", step=step["id"], provider=provider.name, project=step["project"],
                              step_kind=step["kind"], session=session_id, fork=fork, why=why)
+            attempt = {"provider": provider.name, "session": None if fork else session_id, "started": now_iso(),
+                       "why": why}
+            with self._lock:
+                step.setdefault("history", []).append(attempt)
+                self.store.save(task)
             mode = self._mode(task)
             result = provider.run(RunRequest(
                 web=bool(mode and mode.web and step["kind"] == "investigate"),
                 prompt=attempt_prompt, cwd=proj.path, mode="write" if step["kind"] == "implement" else "read",
                 session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=timeout,
                 extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
-                + image_dirs(task["request"]),
+                + image_dirs(task["request"]) + ([os.path.dirname(notes)] if notes else []),
                 visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
-                on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text)))
+                on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text),
+                on_session=lambda sid, _p=provider.name, _a=attempt, _f=(session_id if fork else None):
+                    self._live_session(task, step, _p, sid, _a, _f)))
             self.store.write_log(task["id"], f"step-{step['id']}-{provider.name}", result.raw or result.text or str(result.error))
+            self._note_usage(provider.name, result.usage)
+            kind = "" if result.ok else (STOPPED if STOPPING.is_set() else result.kind)
+            sid = result.session_id or attempt.get("session") or (None if fork else session_id)
             with self._lock:
-                if result.session_id:
-                    task["sessions"].append({"provider": provider.name, "session_id": result.session_id,
-                                             "project": step["project"], "step": step["id"], "forked_from": session_id if fork else None,
+                attempt.update(ended=now_iso(), outcome="done" if result.ok else kind, session=sid,
+                               error=short(result.error or "", 300) or None)
+                if sid and not any(s["session_id"] == sid for s in task["sessions"]):
+                    task["sessions"].append({"provider": provider.name, "session_id": sid, "project": step["project"],
+                                             "step": step["id"], "forked_from": session_id if fork else None,
                                              "at": now_iso()})
+            step.pop("followup", None)
             if result.ok:
-                step["provider"], step["session_id"] = provider.name, result.session_id or session_id
+                step["provider"], step["session_id"] = provider.name, sid
                 break
-            if STOPPING.is_set():
+            if kind == STOPPED:
                 break  # the user stopped the task: not a provider failure
-            self._record_failure(provider.name, result.error or "")
-            self.store.event(task["id"], "step_failed", step=step["id"], provider=provider.name, error=result.error)
-            if (result.error or "").startswith("timed out") and step.get("timeouts", 0) < self.cfg.limits.timeout_retries:
+            self._provider_failed(provider.name, kind, result.error or "", result.retry_at)
+            self.store.event(task["id"], "step_failed", step=step["id"], provider=provider.name, error=result.error,
+                             cause=kind)
+            if kind == TIMEOUT and step.get("timeouts", 0) < lim.timeout_retries:
                 # Running out of time is not a stale session: resume the same one (same provider) with more time.
                 step["timeouts"] = step.get("timeouts", 0) + 1
-                sid = result.session_id or session_id
-                if sid:
-                    step["provider"], step["session_id"] = provider.name, sid
-                    step.pop("no_reuse", None)
-                tried.remove(provider.name)
+                self._keep_session(step, provider.name, sid, "timeout")
                 more = self._step_timeout(step)
                 self.store.event(task["id"], "step_timeout", step=step["id"], provider=provider.name, session=sid,
                                  next_timeout=more)
@@ -790,17 +876,195 @@ class Engine:
                                    f"{'the same session' if sid else 'in a new session (none to resume)'} with up to "
                                    f"{more // 60} min")
                 continue
-            self._notice(task, f"{provider.name} failed on {step['project']}: {short(result.error or '', 160)}")
-            # A failed resume may be a stale session: retry the same provider fresh before moving on (a timeout is not
-            # that; once its retries are used up the step moves on to the next provider).
-            if session_id and provider.name not in step.setdefault("fresh_retry", []) \
-                    and not (result.error or "").startswith("timed out"):
-                step["fresh_retry"].append(provider.name)
-                tried.remove(provider.name)
-                step["session_id"] = None
-                step["no_reuse"] = True
+            if kind == TRANSIENT and step.get("transient", 0) < lim.transient_retries:
+                wait = TRANSIENT_WAITS[min(step.get("transient", 0), len(TRANSIENT_WAITS) - 1)]
+                step["transient"] = step.get("transient", 0) + 1
+                self._keep_session(step, provider.name, sid, "interrupted")
+                self.store.event(task["id"], "step_retry", step=step["id"], provider=provider.name, wait=wait,
+                                 reason=short(result.error or "", 160))
+                self._notice(task, f"{provider.name} hit a network/API error on {step['project']}; resumed its session "
+                                   f"after {wait}s")
+                if STOPPING.wait(wait):
+                    break
+                continue
+            if kind == OUTPUT and sid and not step.get("format_retry"):
+                step["format_retry"] = True  # the work is probably done; only the final report is missing
+                self._keep_session(step, provider.name, sid, "format")
+                continue
+            if kind == LIMIT:
+                limited.append(provider.name)
+                until = f" (resets {clock(result.retry_at)})" if result.retry_at else ""
+                self._notice(task, f"{provider.name} reached its usage limit{until} during {step['project']}; another "
+                                   "provider takes over from where it stopped")
+            elif kind == AUTH:
+                self._notice(task, f"{provider.name} can't log in ({short(result.error or '', 120)}); renew its key. "
+                                   "Another provider takes over.")
+            elif kind == CONTEXT and provider.name not in step.setdefault("fresh_retry", []):
+                step["fresh_retry"].append(provider.name)  # same provider, fresh session, with a handoff brief
+                step["session_id"], step["no_reuse"] = None, True
+                self._notice(task, f"{provider.name}'s session for {step['project']} is full; continuing in a fresh "
+                                   "session with a handoff")
+                continue
+            else:
+                self._notice(task, f"{provider.name} failed on {step['project']}: {short(result.error or '', 160)}")
+                # A failed resume may be a stale session: retry the same provider fresh before moving on (a timeout is
+                # not that; once its retries are used up the step moves on to the next provider).
+                if session_id and kind != TIMEOUT and provider.name not in step.setdefault("fresh_retry", []):
+                    step["fresh_retry"].append(provider.name)
+                    step["session_id"], step["no_reuse"] = None, True
+                    continue
+            tried.append(provider.name)
         with self._lock:
             self._record_step(task, step, proj, result, before, head_before)
+
+    @staticmethod
+    def _keep_session(step: Dict[str, Any], provider: str, sid: Optional[str], followup: str) -> None:
+        """The next attempt continues this session (same provider) and is told why it was cut off."""
+        if sid:
+            step["provider"], step["session_id"] = provider, sid
+            step.pop("no_reuse", None)
+        step["followup"] = followup
+
+    def _live_session(self, task, step, provider: str, sid: str, attempt: Dict[str, Any],
+                      forked_from: Optional[str]) -> None:
+        """A run revealed its session id: record it now, so it can be resumed even if this process dies."""
+        with self._lock:
+            attempt["session"] = sid
+            step["provider"], step["session_id"] = provider, sid
+            step.pop("no_reuse", None)
+            if not any(s["session_id"] == sid for s in task["sessions"]):
+                task["sessions"].append({"provider": provider, "session_id": sid, "project": step["project"],
+                                         "step": step["id"], "forked_from": forked_from, "at": now_iso()})
+            self.store.save(task)
+
+    def _attempt_prompt(self, task, step, proj, prompt: str, session_id: Optional[str], fork: bool, timeout: int,
+                        why: str) -> Tuple[str, str]:
+        """The prompt for this attempt. Back in the session that was cut off: why it stopped and to carry on. In a
+        different session than the step's last one: the full step plus a handoff brief of what was done so far."""
+        history = step.get("history") or []
+        last = history[-1] if history else None
+        same = bool(session_id) and not fork and bool(last) and last.get("session") == session_id
+        follow = step.get("followup")
+        if same and follow == "format":
+            return ("Your previous run of this step finished without the required final result. Do not redo the work: "
+                    "check its state briefly and report the result of this step now, in the required format."), \
+                "asking for the result it didn't report"
+        if same and follow == "timeout":
+            return self._continue_prompt(timeout), "continuing the same session after a timeout"
+        answers = [q for q in task["questions"] if q.get("from_step") == step["id"] and q.get("answer")]
+        if same and follow == "answered" and answers:
+            return ("The user answered the questions you returned:\n"
+                    + "\n".join(f"- Q: {short(q['text'], 300)}\n  A: {q['answer']}" for q in answers)
+                    + f"\nContinue this step in this session with these answers and finish it. You have about "
+                      f"{timeout // 60} minutes; report the final result in the required format."), \
+                "continuing with your answers"
+        if same and last.get("outcome") not in (None, "done"):
+            reason = STOP_REASONS.get(last.get("outcome"), "an error")
+            return (f"Your previous run of this step was cut off by {reason} before it reported. Continue the SAME step "
+                    "in this session: check what is already done on disk and in your background jobs, do not redo "
+                    f"finished work or restart downloads, and finish what is left. You have about {timeout // 60} "
+                    "minutes; report the final result in the required format."), f"resuming its session after {reason}"
+        if history and not same:
+            prev = next((a["provider"] for a in reversed(history)), "")
+            return prompt + "\n\n" + self._handoff(task, step, proj, timeout), \
+                why or f"taking over from {prev}" if prev else why
+        return prompt, why
+
+    @staticmethod
+    def _continue_prompt(timeout: int) -> str:
+        return ("Foreman's time limit cut your previous run of this step short before you reported a result. Continue "
+                "the SAME step in this session: check what already exists on disk and in your background jobs, do not "
+                "redo finished work or restart downloads, and finish what is left. "
+                f"You now have about {timeout // 60} minutes. Keep long jobs in the background and poll them "
+                "briefly, and report the final result in the required format as soon as the step is done.")
+
+    def _handoff(self, task, step, proj, timeout: int) -> str:
+        """What a new session needs to take over a started step: who worked on it and why they stopped, the files
+        changed since the step started, the previous worker's progress notes and its last actions."""
+        history = step.get("history") or []
+        lines = ["HANDOFF: this step was already started in another session and is not finished. Take it over; do not "
+                 "start from scratch."]
+        for a in history[-5:]:
+            outcome = a.get("outcome")
+            state = "stopped for your input (see USER ANSWERS)" if outcome == "done" else \
+                f"cut off by {STOP_REASONS.get(outcome or 'interrupted', 'an error')}"
+            lines.append(f"- {a['provider']} from {str(a.get('started', ''))[11:16]}: {state}"
+                         + (f" ({short(a['error'], 140)})" if a.get("error") and outcome != "done" else ""))
+        if step.get("summary") and history and history[-1].get("outcome") == "done":
+            lines.append(f"Its report: {short(step['summary'], 600)}")
+        base = read_json(self._snapshot_path(task, step), None)
+        files = changed_since(proj.path, base) if base else []
+        if files:
+            lines.append(f"Files changed in {proj.name} since this step started ({len(files)}): " + ", ".join(files[:40])
+                         + (" …" if len(files) > 40 else ""))
+        notes = _tail(self._notes_path(task, step), 3000)
+        if notes:
+            lines.append(f"The previous worker's progress notes ({self._notes_path(task, step)}):\n{notes}")
+        started = history[0].get("started", "") if history else ""
+        acts = [e["text"] for e in self.store.events(task["id"]) if e.get("event") == "activity"
+                and e.get("where") == step["project"] and str(e.get("at", "")) >= started][-15:]
+        if acts:
+            lines.append("Its last actions:\n" + "\n".join(f"  {short(a, 160)}" for a in acts))
+        lines.append("First verify on disk what is already done (the files above, background jobs, logs), then finish the "
+                     f"rest. Do not redo finished work or restart completed downloads. You have about {timeout // 60} "
+                     "minutes.")
+        return "\n".join(lines)
+
+    def _snapshot_path(self, task, step) -> str:
+        return self.store.path(task["id"], "snapshots", re.sub(r"[^\w.-]", "_", step["id"]) + ".json")
+
+    def _notes_path(self, task, step) -> str:
+        return self.store.path(task["id"], "notes", re.sub(r"[^\w.-]", "_", step["id"]) + ".md")
+
+    def _step_snapshot(self, task, step, snap: Dict[str, Any]) -> None:
+        """The project as it was when the step first started (kept across runs, for handoffs)."""
+        path = self._snapshot_path(task, step)
+        if not os.path.exists(path):
+            write_json(path, snap)
+        os.makedirs(os.path.dirname(self._notes_path(task, step)), exist_ok=True)
+
+    def _wait_for_limits(self, task, holder: Dict[str, Any], limited: List[str]) -> bool:
+        """Every usable provider is out of its usage limit. Wait for the earliest one to be usable again (its stated
+        reset, or the next periodic check) and return True to try again; False to give up: the checks are used up,
+        the reset is too far away, or the user stopped the task. holder (a step or a dict) keeps the check count."""
+        lim = self.cfg.limits
+        while not STOPPING.is_set():
+            health, now = self._health(), time.time()
+            entries = [health.get(n) or {} for n in limited]
+            until = min([e.get("until", 0) for e in entries] or [0])
+            known = any(e.get("known") and e.get("until", 0) == until for e in entries)
+            checks = holder.get("limit_checks", 0)
+            names = ", ".join(f"{n}" + (f" (resets {clock(e['until'])})" if e.get("known") else "")
+                              for n, e in zip(limited, entries))
+            if checks >= lim.limit_retries or (known and until - now > lim.limit_wait_max_hours * 3600):
+                holder["paused"] = {"reason": f"all providers are out of their usage limits: {names}",
+                                    "until": until if known else None}
+                self._notice(task, f"Paused: {holder['paused']['reason']}. Say \"continue\" when one is available.")
+                return False
+            if until <= now:
+                holder["limit_checks"] = checks + 1
+                return True
+            with self._lock:
+                task["waiting"] = {"until": until, "reason": f"waiting for provider limits: {names}",
+                                   "check": checks + 1, "of": lim.limit_retries, "known": known}
+                self.store.save(task)
+            self.store.event(task["id"], "waiting", until=until, reason=task["waiting"]["reason"], check=checks + 1,
+                             of=lim.limit_retries)
+            self._say(task, f"{task['waiting']['reason']}; next try at {clock(until)}")
+            # Sleep in short slices: another provider may become usable sooner (key renewed, daily cap reset).
+            while time.time() < until and not STOPPING.is_set():
+                if STOPPING.wait(min(30.0, max(0.05, until - time.time()))):
+                    break
+                if any(self._usable(n) for n in self.providers if n not in limited):
+                    break
+            with self._lock:
+                task.pop("waiting", None)
+            if STOPPING.is_set():
+                return False
+            if not known:
+                holder["limit_checks"] = checks + 1
+            return True
+        return False
 
     def _step_timeout(self, step: Dict[str, Any]) -> int:
         """Seconds for the step's next attempt: the configured time, or about 1.5x what the planner expects for a long
@@ -809,17 +1073,16 @@ class Engine:
         base = max(lim.step_timeout_sec, min(int(step.get("expected_min") or 0) * 90, lim.step_timeout_max_sec))
         return int(min(base * 2 ** step.get("timeouts", 0), max(lim.step_timeout_max_sec, base)))
 
-    @staticmethod
-    def _continue_prompt(step: Dict[str, Any], timeout: int, fresh: bool = False) -> str:
-        earlier = ("A previous attempt at this step ran out of time before it reported. Check what already exists on disk "
-                   "and in background jobs; do not redo finished work or restart downloads. " if fresh else
-                   "Foreman's time limit cut your previous run of this step short before you reported a result. Continue "
-                   "the SAME step in this session: check what already exists on disk and in your background jobs, do not "
-                   "redo finished work or restart downloads, and finish what is left. ")
-        return (earlier + f"You now have about {timeout // 60} minutes. Keep long jobs in the background and poll them "
-                "briefly, and report the final result in the required format as soon as the step is done.")
-
     def _record_step(self, task, step, proj, result, before, head_before) -> None:
+        if STOPPING.is_set() and not (result and result.ok):
+            step["status"], step["summary"] = "pending", "stopped by you before it finished; continue resumes it"
+            return
+        if step.get("paused") and not (result and result.ok):
+            step["status"] = "paused"
+            step["summary"] = step["paused"]["reason"]
+            self.store.event(task["id"], "step_done", step=step["id"], project=step["project"], status="paused",
+                             summary=step["summary"])
+            return
         if not result or not result.ok:
             step["status"] = "failed"
             step["summary"] = "no provider could complete this step" + (f": {short(result.error or '', 200)}" if result else "")
@@ -845,12 +1108,32 @@ class Engine:
             if app:
                 self._notice(task, f"QA rule broken: application files changed in {proj.name} (QA may only change "
                                    f"tests): {', '.join(app[:8])}. Review them.")
+        # Every question a worker asks goes to the user (business or technical), with the worker's options and its
+        # recommendation first. A step never waits for input without a question the user can see and answer.
+        asked = []
         for q in data.get("questions", []) or []:
-            if q.get("kind") == "business":
-                task["questions"].append({"text": q["text"], "kind": "business", "options": q.get("options", []),
-                                          "default": q.get("default"), "answer": None, "from_step": step["id"]})
-                if step["status"] == "done":
-                    step["status"] = "needs_input"
+            if not str(q.get("text") or "").strip():
+                continue
+            options = [str(o) for o in q.get("options") or [] if str(o).strip()]
+            default = str(q.get("default") or "").strip() or None
+            if default:
+                options = [default] + [o for o in options if o != default]
+            asked.append({"text": q["text"].strip(), "kind": q.get("kind") or "technical", "options": options,
+                          "default": default, "answer": None, "from_step": step["id"], "project": step["project"]})
+        if not asked and step["status"] == "needs_input":
+            asked.append({"text": f"The worker in {proj.name} stopped and needs your input:\n{short(step['summary'], 900)}",
+                          "kind": "technical", "options": [], "default": None, "answer": None, "from_step": step["id"],
+                          "project": step["project"]})
+        if not asked and step["status"] == "blocked":
+            asked.append({"text": f"The worker in {proj.name} is blocked:\n{short(step['summary'], 900)}\n"
+                                  "How should it continue?", "kind": "blocker",
+                          "options": ["Try again", "Skip this step"], "default": "Try again", "answer": None,
+                          "from_step": step["id"], "project": step["project"]})
+        for q in asked:
+            if not any(x["text"] == q["text"] and not x.get("answer") for x in task["questions"]):
+                task["questions"].append(q)
+        if asked:
+            step["status"] = "needs_input"
         for dep in data.get("dependencies", []) or []:
             other = self.registry.find(dep.get("project", "")) or (
                 self.registry.add_project(dep["project"]) if os.path.isdir(os.path.expanduser(dep.get("project", ""))) else None)
@@ -868,6 +1151,8 @@ class Engine:
         avail = [p for n, p in self.providers.items() if n not in tried and self._usable(n)]
         if not avail:
             return None
+        # A provider near its usage limit keeps the sessions it has, but new work goes to the others first.
+        avail = [p for p in avail if not self._pressed(p.name)] + [p for p in avail if self._pressed(p.name)]
         mode = self._mode(task)
         if mode and mode.web and step["kind"] == "investigate":  # research steps go to providers that can browse
             avail = [p for p in avail if p.capabilities.web] + [p for p in avail if not p.capabilities.web]
@@ -915,6 +1200,10 @@ class Engine:
             "relevant tests. Fix straightforward problems you find along the way.\n"
             "- Do not invent business/product rules. If one is needed and cannot be inferred from code, docs or "
             "the decisions below, stop and return it as a question of kind 'business'.\n"
+            "- Routine technical choices are yours. A choice that changes what was asked (a new dependency, dropping a "
+            "source or feature, deviating from the plan) is the user's: stop and return it as a question of kind "
+            "'technical' with the options and your recommended one as 'default'. The user is asked and you continue "
+            "in this session with the answer.\n"
             if step["kind"] == "implement" else
             "- Read-only step: do not create, modify or delete files.\n"
             "- Answer precisely with file references; stop as soon as you have enough evidence.\n")
@@ -968,7 +1257,7 @@ class Engine:
             if not any(changed.values()):
                 task["notices"].append("Implementation steps reported done but no file changes were detected.")
             if not failing and not issues:
-                task["status"] = "done" if task["status"] != "blocked" else "blocked"
+                task["status"] = "done"
                 for a in task["projects"]:
                     for b in task["projects"]:
                         if a < b:
@@ -986,6 +1275,10 @@ class Engine:
             self._run_steps(task)
             if self._open_questions(task):
                 task["status"] = "needs_input"
+                return
+            if any(s["status"] == "paused" for s in task["steps"]):
+                task["status"] = "paused"
+                task["paused"] = next(s["paused"] for s in task["steps"] if s.get("paused"))
                 return
 
     def _project_checks(self, name: str) -> Dict[str, str]:
@@ -1042,11 +1335,10 @@ class Engine:
         names = list(changed)
         cwd = task["projects"][names[0]]["path"]
         extra = [task["projects"][n]["path"] for n in names[1:]]
-        brain = self._brain(task, prefer_not=implementers)
         try:
             knowledge = "\n".join(k for k in (ProjectKnowledge(task["projects"][n]["path"]).context(n) for n in names) if k)
-            review = brain.call(Brain.review_prompt(task, diffs, checks, knowledge[:4000]), REVIEW_SCHEMA, cwd, extra,
-                                purpose="review")
+            review = self._think(task, lambda: self._brain(task, prefer_not=implementers).call(
+                Brain.review_prompt(task, diffs, checks, knowledge[:4000]), REVIEW_SCHEMA, cwd, extra, purpose="review"))
         except BrainError as e:
             self._notice(task, f"Independent review unavailable: {e}")
             return None
@@ -1096,10 +1388,10 @@ class Engine:
             text, summary = task.get("answer") or "", short(task.get("answer") or "", 300)
         else:
             try:
-                data = self._brain(task).call(
+                data = self._think(task, lambda: self._brain(task).call(
                     Brain.document_prompt(task, mode.title, mode.section("output"), findings or "(none)", checks),
                     DOC_SCHEMA, home.path, [e["path"] for n, e in task["projects"].items() if n != home.name][:5],
-                    purpose="document")
+                    purpose="document"))
                 self._provider_errors(task, data)
                 text, summary = clean_text(data.get("document", "")), clean_text(data.get("summary", ""))
                 task["remaining"] += [short(p, 200) for p in data.get("open_problems") or [] if p.strip()][:8]
@@ -1120,10 +1412,15 @@ class Engine:
     def _finalize(self, task) -> None:
         if task["status"] == "running":
             task["status"] = "done"
-        if task["status"] in ("blocked", "partial", "failed"):
+        if task["status"] in ("blocked", "partial", "failed", "paused", "interrupted"):
+            by_id = {s["id"]: s for s in task["steps"]}
             for s in task["steps"]:
-                if s["status"] in ("failed", "blocked", "skipped", "pending") and s["summary"] not in task["remaining"]:
-                    task["remaining"].append(f"{s['project']} ({s['kind']}): {s['summary'] or s['instructions'][:160]}")
+                if _settled(s):
+                    continue
+                waits = [d for d in s["depends_on"] if d in by_id and not _settled(by_id[d])]
+                why = f"waiting for {', '.join(waits)}" if waits and s["status"] == "pending" else \
+                    s["summary"] or s["instructions"][:160]
+                task["remaining"].append(f"{s['project']} ({s['kind']}, {s['id']}): {short(why, 200)}")
         task["remaining"] = list(dict.fromkeys(task["remaining"]))[-12:]
         for name, entry in task["projects"].items():
             if os.path.isdir(entry["path"]):
@@ -1140,12 +1437,13 @@ class Engine:
     def _record_lifecycle(self, task) -> None:
         """Note the stage this feature reached, and the recommended next mode, in each involved project."""
         mode = self._mode(task)
-        if not mode or task["status"] in ("interrupted", "cancelled"):
-            return
-        task["next"] = self._next_step(task, mode)
+        task["next"] = self._next_step(task, mode) if mode and task["status"] != "cancelled" else None
         if task["next"]:
             nxt = self.modes(task["cwd"]).get(task["next"]["mode"])
-            task["next"]["title"] = nxt.title if nxt else task["next"]["mode"]
+            task["next"]["title"] = f"Continue #{task['id']}" if task["next"].get("resume") else \
+                (nxt.title if nxt else task["next"]["mode"])
+        if not mode or task["status"] in ("interrupted", "cancelled"):
+            return
         home = self._home_project(task)
         names = {n for n, e in task["projects"].items() if e.get("role") == "modify"} | ({home.name} if home else set())
         doc = (task.get("document") or {}).get("path")
@@ -1175,6 +1473,7 @@ class Engine:
             names.insert(0, self.cfg.brain)
         if prefer_not:
             names = [n for n in names if n not in prefer_not] + [n for n in names if n in prefer_not]
+        names = [n for n in names if not self._pressed(n)] + [n for n in names if self._pressed(n)]
         provs = [self.providers[n] for n in names if self._usable(n)]
         models = {n: s.brain_model for n, s in self.cfg.providers.items() if s.brain_model}
         tid = task["id"] if task else None
@@ -1186,31 +1485,70 @@ class Engine:
 
     # ------------------------------------------------------------------ provider health
     def _health(self) -> Dict[str, Any]:
-        from orchestrator.util import read_json
         return read_json(os.path.join(self.cfg.home, "health.json"), {}) or {}
 
     def unhealthy(self) -> Dict[str, str]:
-        """Providers skipped because they recently failed to authenticate: name -> reason."""
+        """Providers resting because they can't work right now (login failed, usage limit): name -> reason."""
         now = time.time()
-        return {n: h["error"] for n, h in self._health().items() if h.get("until", 0) > now}
+        return {n: h["error"] + (f" (until {clock(h['until'])})" if h.get("kind") == LIMIT and h.get("known") else "")
+                for n, h in self._health().items() if not n.startswith("_") and h.get("until", 0) > now}
 
     def _usable(self, name: str) -> bool:
         p = self.providers.get(name)
         return bool(p and p.available()[0] and name not in self.unhealthy())
 
-    def _record_failure(self, name: str, error: str) -> None:
-        if not AUTH_RE.search(error or ""):
+    def _provider_failed(self, name: str, kind: str, error: str, retry_at: Optional[float] = None) -> None:
+        """Rest a provider that can't work right now: a login problem for 6 h; a usage limit until its stated reset, or
+        until the next periodic check when it didn't say. Other failures don't make a provider unusable."""
+        now = time.time()
+        if kind == AUTH:
+            until, known = now + 6 * 3600, True
+        elif kind == LIMIT:
+            until, known = (retry_at, True) if retry_at and retry_at > now else (now + self.cfg.limits.limit_retry_sec, False)
+        else:
             return
-        from orchestrator.util import write_json
         with self._lock:
             h = self._health()
-            h[name] = {"error": short(error, 160), "at": now_iso(), "until": time.time() + 6 * 3600}
+            h[name] = {"error": short(error, 160), "kind": kind, "at": now_iso(), "until": until, "known": known}
             write_json(os.path.join(self.cfg.home, "health.json"), h)
 
-    def _brain_failed(self, task_id: Optional[str], name: str, error: str) -> None:
-        self._record_failure(name, error)
+    def _note_usage(self, name: str, usage: Optional[Dict[str, Any]]) -> None:
+        """Remember how close a provider is to its usage limit (providers that report it), for _pressed."""
+        if not usage:
+            return
+        with self._lock:
+            h = self._health()
+            h.setdefault("_usage", {})[name] = usage
+            write_json(os.path.join(self.cfg.home, "health.json"), h)
+
+    def _pressed(self, name: str) -> bool:
+        """The provider said it is near its usage limit (at or above pressure_percent) and the window hasn't reset."""
+        u = (self._health().get("_usage") or {}).get(name) or {}
+        return u.get("resets_at", 0) > time.time() and \
+            float(u.get("utilization") or 0) * 100 >= self.cfg.limits.pressure_percent
+
+    def _brain_failed(self, task_id: Optional[str], name: str, result: RunResult) -> None:
+        self._provider_failed(name, result.kind, result.error or "", result.retry_at)
+        self._note_usage(name, result.usage)
         if task_id:
-            self.store.event(task_id, "thinking_failed", provider=name, error=short(error, 160))
+            self.store.event(task_id, "thinking_failed", provider=name, error=short(result.error or "", 160),
+                             cause=result.kind)
+
+    def _think(self, task: Dict[str, Any], call: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+        """A brain call (plan, review, document) that waits like a step does when every provider is out of its usage
+        limit, instead of failing. Other errors are raised as they are."""
+        holder: Dict[str, Any] = {}
+        while True:
+            try:
+                return call()
+            except BrainError as e:
+                limited = [n for n, h in self._health().items() if not n.startswith("_") and n in self.providers
+                           and h.get("kind") == LIMIT and h.get("until", 0) > time.time() - 5]
+                if not limited or any(k not in (LIMIT, AUTH) for k in e.kinds) or \
+                        not self._wait_for_limits(task, holder, limited):
+                    if holder.get("paused"):
+                        task["paused"] = holder["paused"]
+                    raise
 
     def _activity(self, task_id: Optional[str], provider: str, where: str, text: str) -> None:
         """Live worker/planner activity for front ends (throttles assistant-text chatter)."""
@@ -1322,3 +1660,51 @@ def _pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _midnight() -> float:
+    """Next local midnight (when Foreman's daily run counters reset)."""
+    t = time.localtime()
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 5, 0, 0, -1))
+
+
+def _tail(path: str, limit: int) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    return text[-limit:].strip()
+
+
+def _settled(step: Dict[str, Any]) -> bool:
+    """Nothing is left to do for this step: done, or skipped because the user said so."""
+    return step["status"] == "done" or bool(step.get("skipped_by_user"))
+
+
+def _instructions(note: str) -> str:
+    """What a "continue" message says beyond continuing ("continue, but use the CSV dumps" -> "but use the CSV
+    dumps"); "" for a plain "continue" / "resume #26" / "continue the previous task"."""
+    rest = RESUME_RE.sub("", note or "")
+    rest = re.sub(r"#\d+|\b(the|a|it|this|that|previous|last|task|work|please|now|again|from|where|you|we|i|left|"
+                  r"off|stopped|with|on|my|our|one|ok(ay)?|so|then)\b", " ", rest, flags=re.I)
+    words = re.findall(r"[^\W_]{2,}", rest)
+    return " ".join(words) if len(words) > 2 else ""
+
+
+def _split_answers(text: str, count: int) -> List[str]:
+    """One answer per open question. Numbered answers ("1. use pyarrow" / "2: no exemption", one per line) go to
+    those questions; a single unnumbered answer goes to every question."""
+    if count > 1:
+        found: Dict[int, List[str]] = {}
+        current = None
+        for line in text.splitlines():
+            m = ANSWER_ITEM_RE.match(line)
+            if m and 1 <= int(m.group(1)) <= count:
+                current = int(m.group(1))
+                found[current] = [line[m.end():].strip()]
+            elif current is not None and line.strip():
+                found[current].append(line.strip())
+        if found:
+            return [" ".join(found[i]) if i in found else text.strip() for i in range(1, count + 1)]
+    return [text.strip()] * count

@@ -70,7 +70,8 @@ class TimeoutResumeTest(unittest.TestCase):
         second = self.requests[1]
         self.assertIsNone(second.session_id)
         self.assertIn("YOUR STEP", second.prompt)
-        self.assertIn("ran out of time", second.prompt)
+        self.assertIn("HANDOFF", second.prompt)
+        self.assertIn("cut off by Foreman's time limit", second.prompt)
 
     def test_the_planner_can_ask_for_more_time_for_a_long_step(self):
         long_step = {**step("1", "orders-api", kind="investigate"), "expected_minutes": 100}

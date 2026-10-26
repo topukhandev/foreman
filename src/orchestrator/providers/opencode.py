@@ -3,8 +3,8 @@
 import json
 from typing import List
 
-from orchestrator.providers.base import (GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt,
-                                         SessionInfo, tool_line)
+from orchestrator.providers.base import (GIT_POLICY, OUTPUT, Capabilities, Provider, RunRequest, RunResult,
+                                         SessionInfo, fit_prompt, tool_line)
 from orchestrator.util import run_process
 
 
@@ -55,10 +55,11 @@ class OpenCodeProvider(Provider):
             error = f"timed out after {req.timeout}s"
         ok = code == 0 and not error and bool(text)
         data = self.parse_free_json(text) if req.schema else None
+        kind = ""
         if req.schema and data is None and ok:
-            ok, error = False, "no structured JSON in reply"
+            ok, error, kind = False, "no structured JSON in reply", OUTPUT
         return RunResult(ok, text, session_id, data,
-                         None if ok else (error or err.strip()[-800:] or f"exit {code}"), dur, raw=out)
+                         None if ok else (error or err.strip()[-800:] or f"exit {code}"), dur, raw=out, kind=kind)
 
     def activity(self, ev, cwd):
         part = ev.get("part") or {}

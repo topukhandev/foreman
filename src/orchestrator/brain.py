@@ -8,7 +8,7 @@ but is told to stop as soon as scope is clear (progressive context expansion).
 import json
 from typing import Any, Callable, Dict, List, Optional
 
-from orchestrator.providers.base import Provider, RunRequest
+from orchestrator.providers.base import Provider, RunRequest, RunResult
 
 _STR = {"type": "string"}
 _STRS = {"type": "array", "items": _STR}
@@ -143,30 +143,33 @@ The user chose the "{mode}" mode: set "mode" to "{mode}" and plan within its rul
 
 
 class BrainError(Exception):
-    pass
+    def __init__(self, message: str, kinds: Optional[List[str]] = None):
+        super().__init__(message)
+        self.kinds = kinds or []  # failure kind per provider tried (see providers.base), e.g. ["limit", "auth"]
 
 
 class Brain:
     def __init__(self, providers: List[Provider], timeout: int = 600, model_for: Optional[Dict[str, str]] = None,
                  on_call: Optional[Callable[[str], bool]] = None, on_start: Optional[Callable[[str, str], None]] = None,
                  on_activity: Optional[Callable[[str, str, str], None]] = None,
-                 on_fail: Optional[Callable[[str, str], None]] = None):
+                 on_fail: Optional[Callable[[str, RunResult], None]] = None):
         self.providers = providers  # preference order; first that succeeds wins
         self.timeout = timeout
         self.model_for = model_for or {}
         self.on_call = on_call or (lambda name: True)  # budget hook; False = provider over its limit
         self.on_start = on_start or (lambda name, purpose: None)
         self.on_activity = on_activity
-        self.on_fail = on_fail or (lambda name, error: None)
+        self.on_fail = on_fail or (lambda name, result: None)
 
     def call(self, prompt: str, schema: Dict[str, Any], cwd: str, extra_dirs: Optional[List[str]] = None,
              exclude: Optional[List[str]] = None, purpose: str = "plan", web: bool = False) -> Dict[str, Any]:
-        errors = []
+        errors, kinds = [], []
         for p in self.providers:
             if exclude and p.name in exclude:
                 continue
             if not self.on_call(p.name):
                 errors.append(f"{p.name}: daily limit reached")
+                kinds.append("limit")
                 continue
             self.on_start(p.name, purpose)
             act = (lambda text, _n=p.name: self.on_activity(_n, purpose, text)) if self.on_activity else None
@@ -178,8 +181,9 @@ class Brain:
                 res.data["_errors"] = errors
                 return res.data
             errors.append(f"{p.name}: {res.error or 'no structured output'}")
-            self.on_fail(p.name, res.error or "")
-        raise BrainError("; ".join(errors) or "no provider available for planning")
+            kinds.append(res.kind)
+            self.on_fail(p.name, res)
+        raise BrainError("; ".join(errors) or "no provider available for planning", kinds)
 
     # ------------------------------------------------------------------ prompts
     @staticmethod
