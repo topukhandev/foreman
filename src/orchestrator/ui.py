@@ -1087,23 +1087,41 @@ def read_input(hint_left: str = "", hint_right: str = "", suggestion: str = "") 
     return editor.read(hint_left, hint_right, suggestion)
 
 
+PREV, NEXT = "\x00prev", "\x00next"  # what choose(nav=True) returns for ← / →
+
+
+def chips(labels: List[str], current: int) -> str:
+    """'← ☐ Scope  ✔ Titles  ☐ Submit →': one chip per question (✔ = answered), the current one highlighted."""
+    out = []
+    for i, label in enumerate(labels):
+        done = label.startswith("✔ ")
+        text = f" {label if done else '☐ ' + label} "
+        out.append(c(text, BOLD, "\033[7m") if i == current else c(text, GREEN if done else GREY))
+    return clip(c("← ", GREY) + " ".join(out) + c(" →", GREY), width())
+
+
 def choose(title: str, body: List[str], options: List[str], allow_text: bool = True, start: int = 0,
            color: str = YELLOW, esc: str = "decide later", transient: bool = False,
-           enter: str = "choose") -> Optional[str]:
+           enter: str = "choose", descriptions: Optional[List[str]] = None, tabs: str = "",
+           nav: bool = False, typed_text: str = "") -> Optional[str]:
     """Arrow-key / number menu. Returns the chosen option, typed text ("" when skipped), or None on Esc.
     transient: a panel at the bottom (title and text included) that disappears when it closes and leaves nothing in
-    the transcript, for settings; otherwise the question and the answer stay in the transcript."""
+    the transcript, for settings and questions; otherwise the question and the answer stay in the transcript.
+    descriptions: a grey line (or more) under each option, like Claude Code's questions. tabs: a row above the
+    panel (see chips()). nav: ← / → return PREV / NEXT, to move between questions. typed_text: what the
+    "Type something else…" row already holds."""
     if not TTY or not sys.stdin.isatty():
         return None
     import termios
     import tty as _tty
     items = options + (["Type something else…"] if allow_text else [])
     sel = max(0, min(start, len(items) - 1))
-    head = box(body, title, color).split("\n") if transient else []
+    head = ([tabs] if tabs else []) + box(body, title, color).split("\n") if transient else []
     if not transient:
         out(box(body, title, color))
 
-    typed = [""]  # the answer typed into the "Type something else…" row itself (no separate input box)
+    typed = [typed_text]  # the answer typed into the "Type something else…" row itself (no separate input box)
+    notes = list(descriptions or [])
 
     def is_text(i: int) -> bool:
         return allow_text and i == len(items) - 1
@@ -1123,8 +1141,12 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
             parts = textwrap.wrap(items[i], wrap, break_on_hyphens=False) or [""]
         mark = c("›", ACCENT) if i == sel else " "
         style = (lambda s: c(s, BOLD)) if i == sel and not is_text(i) else (lambda s: s)
-        return [clip(f" {mark if k == 0 else ' '} " + style((num if k == 0 else " " * len(num)) + p), cols)
+        rows = [clip(f" {mark if k == 0 else ' '} " + style((num if k == 0 else " " * len(num)) + p), cols)
                 for k, p in enumerate(parts)]
+        note = notes[i] if i < len(notes) and not is_text(i) else ""
+        rows += [clip(" " * (3 + len(num)) + c(p, GREY), cols)
+                 for p in textwrap.wrap(note, wrap, break_on_hyphens=False)]
+        return rows
 
     peak = [0]
 
@@ -1150,7 +1172,9 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
         shown = [r for i in range(top, bottom + 1) for r in rows[i]]
         shown = (shown[-n:] if is_text(sel) else shown[:n]) + [""] * (n - len(shown))  # a long answer: its end
         more = f"{sel + 1}/{len(items)} · " if top > 0 or bottom < len(items) - 1 else ""
-        keys = "type your answer, Enter to send" if is_text(sel) else f"↑/↓ or number, Enter to {enter}"
+        keys = "type your answer, Enter to send" if is_text(sel) else \
+            f"↑/↓ · Enter to {enter}" if nav else f"↑/↓ or number, Enter to {enter}"
+        keys += " · ←/→ questions" if nav and not (is_text(sel) and typed[0]) else ""
         return head + shown + [clip(c(f"   {more}{keys} · Esc to {esc}", GREY), cols)]
 
     def body() -> str:
@@ -1172,7 +1196,7 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    live, pending, cancelled = _Live(), "", False
+    live, pending, cancelled, moved = _Live(), "", False, None
     decode = codecs.getincrementaldecoder("utf-8")("ignore").decode  # a character split across reads stays whole
     draw(first=True)
     SCROLL.push(live)
@@ -1192,6 +1216,10 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
                     SCROLL.bottom()
                     if key == "\x1b":
                         continue
+                if nav and key in ("\x1b[D", "\x1bOD", "\x1b[C", "\x1bOC") and not (is_text(sel) and typed[0]):
+                    moved = PREV if key in ("\x1b[D", "\x1bOD") else NEXT
+                    done = True
+                    break
                 if is_text(sel) and key not in ("\r", "\n", "\x1b", "\x03") and not key.startswith("\x1b"):
                     if key in ("\x7f", "\b"):
                         typed[0] = typed[0][:-1]
@@ -1228,6 +1256,8 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
             SCROLL.add("\n".join(lines()))
     if cancelled:
         return None
+    if moved:
+        return moved
     return typed[0].strip() if is_text(sel) else items[sel]
 
 

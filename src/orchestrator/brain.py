@@ -22,7 +22,12 @@ SUGGESTION_RULE = ("Suggestions are for the user's decision: only MAJOR items ou
                    "itself instead. Usually return none.")
 QUESTIONS = {"type": "array", "items": {"type": "object", "properties": {
     "text": _STR, "kind": {"type": "string", "enum": ["business", "technical"]},
-    "options": _STRS, "default": _STR}, "required": ["text", "kind"]}}
+    "header": {"type": "string", "description": "the topic in 1-2 words (at most 12 characters), e.g. Titles"},
+    "options": {"type": "array", "items": {"type": "object", "properties": {
+        "label": {"type": "string", "description": "the choice in a few words"},
+        "description": {"type": "string", "description": "one plain sentence: what this choice means for the user"}},
+        "required": ["label"]}},
+    "default": {"type": "string", "description": "the label of the recommended option"}}, "required": ["text", "kind"]}}
 
 PLAN_SCHEMA = {
     "type": "object",
@@ -94,8 +99,9 @@ QUESTION_RULE = """\
 Questions are read by the user, who may not know the code. Write each one in plain, everyday English: one short
 sentence on what must be decided and why it matters to them. No abbreviations, internal names, file or field names,
 codes or counts they would have to look up (say the source's full name; "more products from the same source", not
-"candidates"). Give 2-4 options, each a short phrase (at most about 10 words) saying what the user gets, the
-recommended one first and its exact text as "default". Before asking, read the conversation and the answered
+"candidates"). Give a "header" (the topic in 1-2 words) and 2-4 options, the recommended one first: each with a
+"label" of a few words and a "description" of one plain sentence on what it means for them; put the recommended
+label in "default". Before asking, read the conversation and the answered
 questions: if the user already said what they want, even loosely or in other words, follow it and do not ask again.
 If they said they did not understand, ask again far more simply."""
 

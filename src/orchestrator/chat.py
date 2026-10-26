@@ -123,12 +123,14 @@ class Chat:
                 return
             self._exchange(line, shown)
 
-    def _exchange(self, line: str, shown: str = "") -> None:
+    def _exchange(self, line: str, shown: str = "", echo: bool = True) -> None:
         """One user message: echo it, respond, remember it in this project's chat history, offer pending choices.
-        shown: the compact form of a message with pasted text or images (chips), echoed instead of the full text."""
+        shown: the compact form of a message with pasted text or images (chips), echoed instead of the full text.
+        echo: False when the message is already on screen (answers picked in the question menus)."""
         shown = shown if shown != line else ""
         self.suggestion = ""
-        ui.out("\n" + ui.user_echo(shown or line))
+        if echo:
+            ui.out("\n" + ui.user_echo(shown or line))
         out = self.respond(line)
         if out:
             ui.out("\n" + out + "\n")
@@ -581,25 +583,80 @@ class Chat:
             self._offer_next(task)
         if not open_q or not ui.TTY:
             return
-        # One menu per question (the worker's recommendation first, marked); the answers go back together.
-        answers = []
-        for i, q in enumerate(open_q, 1):
-            labels = {"approval": ["Yes, go ahead", "No, cancel"], "budget": ["Yes, continue", "No, stop"]}.get(
-                q["kind"], option_labels(q, "Recommended"))
+        if any(q["kind"] in ("approval", "budget") for q in open_q):
+            q = next(q for q in open_q if q["kind"] in ("approval", "budget"))
+            labels = {"approval": ["Yes, go ahead", "No, cancel"], "budget": ["Yes, continue", "No, stop"]}[q["kind"]]
             lines = [l for l in q["text"].splitlines() if not l.startswith("Go ahead?")]
-            title = "Plan needs your go-ahead" if q["kind"] == "approval" else \
-                "Needs your decision" + (f" ({i}/{len(open_q)})" if len(open_q) > 1 else "")
-            choice = ui.choose(title, [ui.md(l) for l in lines], labels)
+            title = "Plan needs your go-ahead" if q["kind"] == "approval" else "Needs your decision"
+            choice = ui.choose(title, [ui.md(l) for l in lines], labels)  # the plan stays in the transcript
             if choice is None:
-                ui.out(ui.c("  Answer any time by typing it below"
-                            + (" (one per line: 1. … 2. …)." if len(open_q) > 1 else "."), ui.GREY))
-                return
+                ui.out(ui.c("  Answer any time by typing it below.", ui.GREY))
+            elif choice:
+                self._exchange("yes" if choice.startswith("Yes") else "no")
+            return
+        answers = self._ask(open_q)
+        if answers is None:
+            ui.out(ui.c("  Answer any time by typing it below"
+                        + (" (one per line: 1. … 2. …)." if len(open_q) > 1 else "."), ui.GREY))
+            return
+        record = []  # the questions and your answers stay in the conversation, the menus don't
+        for q, a in zip(open_q, answers):
+            record += [ui.c("? ", ui.YELLOW, ui.BOLD) + ui.c(short(q["text"].splitlines()[0], 160), ui.BOLD),
+                       ui.c(f"  {ui.LINK} ", ui.FRAME) + a]
+        ui.out("\n" + "\n".join(record))
+        self._exchange(answers[0] if len(answers) == 1 else "\n".join(f"{i}. {a}" for i, a in enumerate(answers, 1)),
+                       echo=False)
+
+    def _ask(self, questions: List[Dict[str, Any]]) -> Optional[List[str]]:
+        """Claude Code-style questions: one panel per question (a short label and a grey description per option, the
+        recommendation first, your own answer typed into the last row). Several questions get chips across the top,
+        ←/→ to move between them, and a review step before the answers are sent. None = decide later (Esc)."""
+        answers: Dict[int, str] = {}
+        typed: Dict[int, str] = {}
+        multi, i = len(questions) > 1, 0
+        while True:
+            names = [("✔ " if k in answers else "") + (q.get("header") or f"Question {k + 1}")
+                     for k, q in enumerate(questions)] + ["Submit"]
+            tabs = ui.chips(names, i) if multi else ""
+            if multi and i >= len(questions):  # the review step
+                missing = [k for k in range(len(questions)) if k not in answers]
+                body = [ui.c(q.get("header") or f"Question {k + 1}", ui.BOLD) + ": "
+                        + (answers[k] if k in answers else ui.c("not answered yet", ui.YELLOW))
+                        for k, q in enumerate(questions)]
+                choice = ui.choose("Review your answers", body, ["Submit answers", "Cancel"], allow_text=False,
+                                   transient=True, tabs=tabs, nav=True, esc="decide later")
+                if choice == ui.PREV:
+                    i = len(questions) - 1
+                elif choice == "Submit answers" and missing:
+                    i = missing[0]
+                elif choice == "Submit answers":
+                    return [answers[k] for k in range(len(questions))]
+                elif choice != ui.NEXT:
+                    return None
+                continue
+            q = questions[i]
+            labels = option_labels(q, "Recommended")
+            notes = list(q.get("descriptions") or [])
+            start = q["options"].index(answers[i]) if answers.get(i) in q["options"] else \
+                len(labels) if i in typed else 0
+            body = [ui.md(l) for l in q["text"].splitlines()]
+            title = q.get("header") or "Needs your decision"
+            choice = ui.choose(title, body, labels, transient=True, descriptions=notes, tabs=tabs, nav=multi,
+                               typed_text=typed.get(i, ""), start=start)
+            if choice is None:
+                return None
+            if choice in (ui.PREV, ui.NEXT):
+                i = max(0, i - 1) if choice == ui.PREV else i + 1
+                continue
             if not choice:
-                return
-            choice = {"Yes, go ahead": "yes", "No, cancel": "no", "Yes, continue": "yes", "No, stop": "no"}.get(
-                choice, choice)
-            answers.append(re.sub(r" \(Recommended\)$", "", choice))
-        self._exchange(answers[0] if len(answers) == 1 else "\n".join(f"{i}. {a}" for i, a in enumerate(answers, 1)))
+                return None
+            answer = re.sub(r" \(Recommended\)$", "", choice)
+            answers[i] = answer
+            if answer not in q["options"]:
+                typed[i] = answer
+            if not multi:
+                return [answer]
+            i += 1
 
     def _offer_next(self, task: Dict[str, Any]) -> None:
         """After a lifecycle step, offer the recommended next one once (Esc or 'Not now' = keep chatting)."""

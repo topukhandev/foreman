@@ -166,7 +166,9 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
             first, *rest = q["text"].splitlines()
             lines.append(f"  {i}. {first}")
             lines += [f"     {r.strip()}" if not r.startswith("  ") else f"   {r}" for r in rest]
-            lines += [f"     {chr(96 + k)}) {o}" for k, o in enumerate(option_labels(q), 1)] if q.get("options") else []
+            notes = list(q.get("descriptions") or [])
+            lines += [f"     {chr(96 + k)}) {o}" + (f" — {notes[k - 1]}" if k <= len(notes) and notes[k - 1] else "")
+                      for k, o in enumerate(option_labels(q), 1)] if q.get("options") else []
         lines.append("  → just type your answer" if chat else f"  → foreman answer {task['id']} \"<your answer>\"")
 
     if task["remaining"]:

@@ -91,6 +91,28 @@ DENY_CHECK = re.compile(r"(rm\s+-rf|\bgit\s|\bsudo\b|curl[^|]*\|\s*(ba)?sh|migra
                         re.I)
 
 
+def question_options(q: Dict[str, Any]) -> Dict[str, Any]:
+    """A question's choices as stored: option labels with the recommended one first, a description per option ("" if
+    none) and a short header. Options may come as {label, description} objects or as plain strings."""
+    labels, notes = [], []
+    for o in q.get("options") or []:
+        label = str(o.get("label") or "") if isinstance(o, dict) else str(o)
+        if label.strip() and label.strip() not in labels:
+            labels.append(label.strip())
+            notes.append(" ".join(str(o.get("description") or "").split()) if isinstance(o, dict) else "")
+    default = str(q.get("default") or "").strip() or None
+    if default and default not in labels:  # the recommendation written out in full instead of its label
+        hit = next((i for i, l in enumerate(labels) if default.startswith(l) or l.startswith(default)), None)
+        default = labels[hit] if hit is not None else default
+        if hit is None:
+            labels, notes = [default] + labels, [""] + notes
+    if default:
+        i = labels.index(default)
+        labels, notes = [labels[i]] + labels[:i] + labels[i + 1:], [notes[i]] + notes[:i] + notes[i + 1:]
+    header = " ".join(str(q.get("header") or "").split())[:12]
+    return {"options": labels, "descriptions": notes, "default": default, "header": header}
+
+
 def clean_text(text: str) -> str:
     """Undo double-escaping some models apply inside JSON strings (literal \\n, wrapping quotes)."""
     text = (text or "").strip()
@@ -759,8 +781,7 @@ class Engine:
             task["decisions"].append({"text": d, "by": f"planner ({plan.get('_provider')})", "at": now_iso()})
         for q in plan.get("questions", []) or []:
             if q.get("kind") == "business" and not any(x["text"] == q["text"] for x in task["questions"]):
-                task["questions"].append({"text": q["text"], "kind": "business", "options": q.get("options", []),
-                                          "default": q.get("default"), "answer": None})
+                task["questions"].append({"text": q["text"], "kind": "business", **question_options(q), "answer": None})
             elif q.get("kind") == "technical":
                 task["decisions"].append({"text": f"Open technical question left to workers: {q['text']}",
                                           "by": "planner", "at": now_iso()})
@@ -1186,12 +1207,8 @@ class Engine:
         for q in data.get("questions", []) or []:
             if not str(q.get("text") or "").strip():
                 continue
-            options = [str(o) for o in q.get("options") or [] if str(o).strip()]
-            default = str(q.get("default") or "").strip() or None
-            if default:
-                options = [default] + [o for o in options if o != default]
-            asked.append({"text": q["text"].strip(), "kind": q.get("kind") or "technical", "options": options,
-                          "default": default, "answer": None, "from_step": step["id"], "project": step["project"]})
+            asked.append({"text": q["text"].strip(), "kind": q.get("kind") or "technical", **question_options(q),
+                          "answer": None, "from_step": step["id"], "project": step["project"]})
         if not asked and step["status"] == "needs_input":
             asked.append({"text": f"The worker in {proj.name} stopped and needs your input:\n{short(step['summary'], 900)}",
                           "kind": "technical", "options": [], "default": None, "answer": None, "from_step": step["id"],
