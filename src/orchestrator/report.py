@@ -85,6 +85,9 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
                   questions: bool = True, chat: bool = False) -> str:
     st = task["status"]
     lines = [f"{ICON.get(st, '•')} #{task['id']} {task['title']} — {task.get('outcome') or st}"]
+    if task.get("closed"):
+        c = task["closed"]
+        lines += ["", f"{c['how'].capitalize()} on {c['at'][:10]}" + (f": {c['note']}" if c.get("note") else "") + "."]
     if st in ("interrupted", "paused", "blocked", "partial"):
         where = stopped_at(task)
         go = "Say \"continue\" to pick it up there." if chat else f"`foreman resume {task['id']}` picks it up there."

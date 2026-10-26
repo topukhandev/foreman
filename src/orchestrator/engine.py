@@ -56,6 +56,9 @@ STOP_REASONS = {TIMEOUT: "Foreman's time limit", LIMIT: "the provider's usage li
                 "crash": "the process stopping unexpectedly", "interrupted": "Foreman being stopped or closed",
                 STOPPED: "you stopping the task"}
 TRANSIENT_WAITS = (30, 120, 300)
+# "close #26", "close task 26: finished by hand", "cancel #5" (the user settles a task Foreman can't judge itself)
+CLOSE_RE = re.compile(r"^\s*(?:please\s+)?(close|cancel|drop|abandon)\s+(?:the\s+)?(?:task\s+)?#(\d+)\b[\s:,.-]*(.*)$",
+                      re.I | re.S)
 SKIP_RE = re.compile(r"^\s*skip( (this|the) step)?\b", re.I)
 ANSWER_ITEM_RE = re.compile(r"^\s*(?:q\s*)?(\d+)\s*[.):\-]\s*", re.I)
 SMALL_TALK_RE = re.compile(
@@ -160,6 +163,9 @@ class Engine:
         self.registry.ensure_scanned(cwd)
         if SMALL_TALK_RE.match(request):
             return None, self.small_talk(request, cwd)
+        m = CLOSE_RE.match(request)
+        if m:
+            return None, self.close(m.group(2), m.group(3).strip(), cancel=m.group(1).lower() != "close")["report"]
         if NEXT_DO_RE.match(request):
             return self.prepare_next(cwd)
         if NEXT_Q_RE.match(request):
@@ -229,6 +235,7 @@ class Engine:
             # "continue, but use the CSV dumps": the words are instructions, not a task name; continue the latest here
             ref = None
             cands = self.store.resolve(None, cwd=cwd, project_names=[anchor.name] if anchor else None)
+        cands = [t for t in cands if not t.get("closed")]  # settled by the user: never picked up again
         unfinished = [t for t in cands if t["status"] not in FINAL]
         if not cands:
             return None, "No task found to continue" + (f" matching '{ref}'." if ref else ".")
@@ -247,6 +254,42 @@ class Engine:
         task["status"] = "queued"
         self.store.save(task)
         return task, ""
+
+    def close(self, ref: str, note: str = "", cancel: bool = False) -> Dict[str, Any]:
+        """The user settles a task by hand: it was finished another way (close: done) or isn't wanted any more
+        (cancel). Nothing in the projects is touched. Its unfinished steps and open questions are closed with it, so a
+        later "continue" never picks it up again; a closed task recommends the next mode like a finished one."""
+        cands = self.store.resolve(ref, fallback=False)
+        if len(cands) != 1:
+            return {"task": None, "report": self._ambiguous(cands) if cands else f"No task '{ref}'."}
+        task = cands[0]
+        lock = self.store.path(task["id"], "lock")
+        if os.path.exists(lock) and _pid_alive(_read_int(lock)):
+            return {"task": task, "report": f"#{task['id']} is running; stop it first (Esc twice in the chat)."}
+        if task["status"] in FINAL:
+            return {"task": task, "report": f"#{task['id']} is already {task['status']}."}
+        how = "cancelled by you" if cancel else "closed by you"
+        for s in task["steps"]:
+            if not _settled(s):
+                s.update(status="skipped", skipped_by_user=True, summary=f"{how} before it ran" if s["status"] == "pending"
+                         else f"{how}: {short(s.get('summary') or '', 160)}".rstrip(": "))
+        for q in task["questions"]:
+            if not q.get("answer"):
+                q["answer"] = f"({how})"
+        task["previous_remaining"], task["remaining"] = task["remaining"], []
+        for k in ("waiting", "paused", "replan"):
+            task.pop(k, None)
+        task["status"] = "cancelled" if cancel else "done"
+        task["closed"] = {"at": now_iso(), "how": how, "note": note}
+        task["decisions"].append({"text": f"Task {how}" + (f": {note}" if note else ""), "by": "user", "at": now_iso()})
+        task["outcome"] = how
+        self._record_lifecycle(task)
+        self.store.save(task)
+        self.store.event(task["id"], "closed", how=how, note=note)
+        report = render_report(task, self.store.suggestions())
+        with open(self.store.path(task["id"], "report.md"), "w", encoding="utf-8") as f:
+            f.write(report)
+        return {"task": task, "report": report}
 
     @staticmethod
     def _reopen_steps(task: Dict[str, Any]) -> None:

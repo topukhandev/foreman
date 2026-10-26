@@ -5,7 +5,8 @@ from typing import Dict, List, Tuple
 COMMANDS: List[Tuple[str, str]] = [
     ("chat", "interactive chat"), ("ask", "submit a request"), ("next", "start the recommended next step"),
     ("lifecycle", "where features stand"), ("modes", "list lifecycle modes"), ("status", "state of a task"),
-    ("resume", "continue a task"), ("answer", "answer an open question"), ("tasks", "list tasks"),
+    ("resume", "continue a task"), ("answer", "answer an open question"), ("close", "mark a task finished or cancelled"),
+    ("tasks", "list tasks"),
     ("show", "task details"), ("projects", "project registry"), ("sessions", "existing AI sessions"),
     ("suggestions", "open suggestions"), ("accept", "act on a suggestion"), ("dismiss", "dismiss a suggestion"),
     ("config", "show or change settings"), ("doctor", "check providers and setup"), ("mcp", "MCP server"),

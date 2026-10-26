@@ -137,6 +137,32 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual([s["status"] for s in task["steps"]], ["done"] * 4)
         self.assertEqual(len(self.eng.store.all()), 1)
 
+    def test_a_task_finished_another_way_is_closed_and_never_continued(self):
+        self.worker(asks=[{"kind": "technical", "text": "Install pyarrow?", "options": ["Yes", "No"], "default": "Yes"}])
+        task = self.eng.handle("build the dataset", self.ws.api)["task"]
+        self.assertEqual(task["status"], "needs_input")
+        task, msg = self.eng.route("close #1: the fix round already built everything", self.ws.api)
+        self.assertIsNone(task)
+        self.assertIn("Closed by you", msg)
+        self.assertIn("the fix round already built everything", msg)
+        task = self.eng.store.load("1")
+        self.assertEqual((task["status"], task["remaining"]), ("done", []))
+        self.assertTrue(all(s["status"] == "done" or s.get("skipped_by_user") for s in task["steps"]))
+        self.assertEqual(task["questions"][0]["answer"], "(closed by you)")
+        self.assertEqual(task["next"]["mode"], "qa", "closed as finished: QA comes next")
+        nxt, msg = self.eng.route("continue", self.ws.api)
+        self.assertNotEqual((nxt or {}).get("status"), "queued", "a closed task is not continued")
+        self.assertIn("already done", self.eng.close("1")["report"])
+        self.assertEqual(self.eng.close("1", cancel=True)["task"]["status"], "done")
+
+    def test_cancel_drops_a_task(self):
+        self.worker(status="blocked", summary="no key")
+        self.eng.handle("build the dataset", self.ws.api)
+        task, msg = self.eng.route("cancel #1", self.ws.api)
+        self.assertIn("Cancelled by you", msg)
+        task = self.eng.store.load("1")
+        self.assertEqual((task["status"], task.get("next")), ("cancelled", None))
+
     def test_continue_with_new_instructions_re_plans(self):
         self.s.fail_steps = lambda provider, req: "s1" in self._step_of(req)
         self.s.step = self.work

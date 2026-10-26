@@ -104,6 +104,7 @@ foreman lifecycle | next              # where features stand | start the recomme
 foreman status                      # state of your current task (instant, no AI)
 foreman resume                      # continue the most recent unfinished task here
 foreman answer 3 "10% off above $500"   # answer a question a task is waiting on ("1. …" per line for several)
+foreman close 3 "done by hand"      # a task finished another way (--cancel: not wanted); "close #3" in the chat
 foreman accept s2 | dismiss s2      # act on, or silence, a suggestion
 foreman tasks | show 3 [--events]   # history, full record, audit log
 foreman projects [scan|show X|link A B tests "note"|test X "cmd"]

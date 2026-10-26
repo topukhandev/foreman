@@ -14,7 +14,7 @@ from orchestrator.config import load_config, set_option
 from orchestrator.report import task_summary
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
-               "accept", "dismiss", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "completion", "version"}
+               "accept", "dismiss", "close", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "completion", "version"}
 
 
 def _progress(msg: str) -> None:
@@ -133,6 +133,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = add("answer", "answer a task's open question")
     p.add_argument("task")
     p.add_argument("text", nargs="+")
+    p = add("close", "mark a task finished by hand (or --cancel it); nothing in the project changes")
+    p.add_argument("task")
+    p.add_argument("note", nargs="*")
+    p.add_argument("--cancel", action="store_true", help="not wanted any more (instead of: finished another way)")
     p = sub.add_parser("tasks", help="list tasks")
     p.add_argument("-n", type=int, default=15)
     p.add_argument("--json", action="store_true")
@@ -268,6 +272,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if cmd == "answer":
         _print_result(eng, eng.answer(args.task, " ".join(args.text)), args.json)
+        return 0
+    if cmd == "close":
+        _print_result(eng, eng.close(args.task, " ".join(args.note), cancel=args.cancel), args.json)
         return 0
     if cmd == "run-task":
         task = eng.store.load(args.task)
@@ -484,6 +491,7 @@ Foreman
   foreman status [task]            state of a task (instant, no AI)
   foreman resume [task] [note]     continue a task, re-verifying against current code
   foreman answer <task> <text>     answer a task's open question
+  foreman close <task> [note]      mark a task finished another way (--cancel: not wanted); "close #N" in chat
   foreman tasks | show <task>      history and details (show --events for the audit log)
   foreman suggestions | accept <id> | dismiss <id>
   foreman projects [list|scan|show|add|link|unlink|test]
