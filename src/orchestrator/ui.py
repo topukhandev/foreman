@@ -77,6 +77,23 @@ def clear_screen() -> None:
         SCROLL.clear()
 
 
+class busy:
+    """`with busy("Asking x for its models…"):` a one-line notice that is wiped when the work is done (not kept in the
+    transcript)."""
+
+    def __init__(self, text: str):
+        self.text = text
+
+    def __enter__(self):
+        if TTY:
+            write("\r" + clip(c(f"  {self.text}", GREY), width()) + "\033[K")
+
+    def __exit__(self, *exc):
+        if TTY:
+            write("\r\033[K")
+        return False
+
+
 # ---------------------------------------------------------------------- scrollback
 
 SEQ_RE = re.compile(r"\x1b(\[<[0-9;]*[Mm]|\[[0-9;]*[A-Za-z~]|O[A-Za-z])")
@@ -848,20 +865,25 @@ def read_input(hint_left: str = "", hint_right: str = "") -> str:
 
 
 def choose(title: str, body: List[str], options: List[str], allow_text: bool = True, start: int = 0,
-           color: str = YELLOW, esc: str = "decide later") -> Optional[str]:
-    """Arrow-key / number menu. Returns the chosen option, typed text ("" when skipped), or None on Esc."""
+           color: str = YELLOW, esc: str = "decide later", transient: bool = False,
+           enter: str = "choose") -> Optional[str]:
+    """Arrow-key / number menu. Returns the chosen option, typed text ("" when skipped), or None on Esc.
+    transient: a panel at the bottom (title and text included) that disappears when it closes and leaves nothing in
+    the transcript, for settings; otherwise the question and the answer stay in the transcript."""
     if not TTY or not sys.stdin.isatty():
         return None
     import termios
     import tty as _tty
     items = options + (["Type something else…"] if allow_text else [])
     sel = max(0, min(start, len(items) - 1))
-    out(box(body, title, color))
+    head = box(body, title, color).split("\n") if transient else []
+    if not transient:
+        out(box(body, title, color))
 
     def visible() -> int:
         """Items shown at once: all of them, or a window that fits the terminal (a menu taller than the screen
         can't be redrawn in place, and a wrapped row would make every redraw drift)."""
-        return max(1, min(len(items), shutil.get_terminal_size((100, 24)).lines - 2))
+        return max(1, min(len(items), shutil.get_terminal_size((100, 24)).lines - 2 - len(head)))
 
     def lines() -> List[str]:
         n, cols = visible(), width()
@@ -872,7 +894,7 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
             label = c(f"{i + 1}. {items[i]}", BOLD) if i == sel else f"{i + 1}. {items[i]}"
             rows.append(clip(f" {mark} {label}", cols))
         more = f"{sel + 1}/{len(items)} · " if n < len(items) else ""
-        return rows + [clip(c(f"   {more}↑/↓ or number, Enter to choose · Esc to {esc}", GREY), cols)]
+        return head + rows + [clip(c(f"   {more}↑/↓ or number, Enter to {enter} · Esc to {esc}", GREY), cols)]
 
     def body() -> str:
         return "".join("\r" + eol(l, width()) + "\n" for l in lines())
@@ -882,12 +904,14 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
     def draw(first=False):
         with OUTPUT_LOCK:
             up = "" if first else f"\033[{drawn[0]}A"
-            drawn[0] = visible() + 1
+            drawn[0] = len(head) + visible() + 1
             frame(up + body())
 
+    closed = [False]
+
     class _Live:  # the menu stays at the bottom while the transcript above scrolls
-        live_height = staticmethod(lambda: visible() + 1)
-        frame = staticmethod(body)
+        live_height = staticmethod(lambda: 0 if closed[0] else len(head) + visible() + 1)
+        frame = staticmethod(lambda: "" if closed[0] else body())
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -926,9 +950,14 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
             if not SCROLL.flush():
                 draw()
     finally:
+        if transient:  # take the panel away: the screen is as it was before it opened
+            closed[0] = True
+            with OUTPUT_LOCK:
+                frame(f"\033[{drawn[0]}A\r\033[J")
         SCROLL.pop(live)
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        SCROLL.add("\n".join(lines()))
+        if not transient:
+            SCROLL.add("\n".join(lines()))
     if cancelled:
         return None
     if allow_text and sel == len(items) - 1:

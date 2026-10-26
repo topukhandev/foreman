@@ -222,7 +222,7 @@ its own default. The planner rates each step light or standard; **light steps an
 your choice** (when the model has a lower level), everything else, review included, runs exactly as chosen. Reports
 show what ran ("Models  claude sonnet (xhigh) ×3").
 
-`foreman config` lists these settings with their current values; pick one to change it, Esc closes:
+`foreman config` lists these settings with their current values in a panel that leaves nothing in the chat; Enter flips a true/false setting on the spot and opens a sub-panel for the others, Esc closes:
 
 | Setting | |
 |---|---|

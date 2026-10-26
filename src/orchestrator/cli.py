@@ -10,7 +10,6 @@ from typing import List, Optional
 from orchestrator import completion
 from orchestrator.app import build_engine
 from orchestrator.completion import SHELLS
-from orchestrator import ui
 from orchestrator.config import load_config, set_option
 from orchestrator.report import task_summary
 
@@ -365,15 +364,9 @@ def _models(eng, args) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print(menus.models_summary(eng))
         return 0
-    while True:
-        note = menus.models_menu(eng)
-        if not note:
-            break
+    note = menus.models_loop(eng)
+    if note:
         print(note)
-        again = ui.choose("Models", ["Change another provider?"], ["No, done", "Yes, another provider"], allow_text=False,
-                          esc="done")
-        if not again or again.startswith("No"):
-            break
     return 0
 
 

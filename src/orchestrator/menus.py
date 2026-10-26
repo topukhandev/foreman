@@ -16,6 +16,11 @@ from orchestrator.util import short
 MANY = 30  # a model list longer than this is narrowed by typing part of a name first
 
 
+def _panel(title, body, options, **kw):
+    """A settings panel: drawn at the bottom, gone when it closes, nothing left in the chat."""
+    return ui.choose(title, body, options, transient=True, **kw)
+
+
 def current_text(eng, name: str) -> str:
     """What the provider uses now, for menus and summaries: "claude-sonnet-5-5 · effort high"."""
     c = eng.cfg.providers[name].chosen()
@@ -41,16 +46,16 @@ def models_menu(eng) -> Optional[str]:
     for n in names:
         ok, info = eng.providers[n].available()
         labels.append(f"{n:<12} {current_text(eng, n) if ok else 'not installed'}")
-    pick = ui.choose("Provider", ["Choose the provider whose model and effort you want to change."], labels,
-                     allow_text=False, color=ui.FRAME, esc="cancel")
+    pick = _panel("Provider", ["Choose the provider whose model and effort you want to change."], labels,
+                  allow_text=False, color=ui.FRAME, esc="close")
     if not pick:
         return None
     name = names[labels.index(pick)]
     provider = eng.providers[name]
     if not provider.available()[0]:
         return f"{name} isn't installed, so there is nothing to choose."
-    ui.out(ui.c(f"  Asking {name} which models it offers…", ui.GREY))
-    models = provider.list_models()
+    with ui.busy(f"Asking {name} which models it offers…"):
+        models = provider.list_models()
     model = _pick_model(eng, name, models)
     if model is None:
         return None
@@ -79,8 +84,8 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
     """(model id or "default", its ModelInfo or None); None when cancelled."""
     current = eng.cfg.providers[name].chosen().model
     if not models:
-        ui.out(ui.c(f"  {name} can't list its models. Type one, or keep its CLI default.", ui.GREY))
-        typed = ui.choose("Model", [f"Type the model name for {name}."], [f"CLI default (let {name} decide)"],
+        typed = _panel("Model", [f"{name} can't list its models. Type the model name, or keep its CLI default."],
+                       [f"CLI default (let {name} decide)"],
                           color=ui.FRAME, esc="cancel")
         if typed is None:
             return None
@@ -88,19 +93,21 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
     pool = models
     groups = sorted({m.group for m in models if m.group})
     browse = len(groups) > 1
+    note = ""
     while len(pool) > MANY:  # a long list: narrow it by typing words, or browse one backend at a time
         options = (["Browse by backend"] if browse else []) + [f"Show all {len(pool)}"]
-        term = ui.choose("Find a model", [f"{len(pool)} models. Type words to narrow the list: each is a regex and all "
-                                          "must match, e.g. deepseek free, or qwen.*coder (not case sensitive; "
-                                          "matches the id, which starts with the backend, and the name)."],
-                         options, color=ui.FRAME, esc="cancel")
+        term = _panel("Find a model", ([note] if note else []) + [
+            f"{len(pool)} models. Type words to narrow the list: each is a regex and all must match, e.g. "
+            "deepseek free, or qwen.*coder (not case sensitive; matches the id, which starts with the backend, "
+            "and the name)."], options, color=ui.FRAME, esc="cancel")
+        note = ""
         if term is None:
             return None
         if term == "Browse by backend":
             counts = {g: sum(1 for m in pool if m.group == g) for g in groups}
             mine = next((m.group for m in models if m.id == current), None)
             glabels = [f"{g}  ({counts[g]} models)" for g in groups]
-            g = ui.choose(f"{name}: backend", [f"{name} offers {len(models)} models through {len(groups)} backends."],
+            g = _panel(f"{name}: backend", [f"{name} offers {len(models)} models through {len(groups)} backends."],
                           glabels, allow_text=False, start=groups.index(mine) if mine in groups else 0,
                           color=ui.FRAME, esc="cancel")
             if not g:
@@ -111,18 +118,18 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
         else:
             hits = search(pool, term)
             if hits is None:
-                ui.out(ui.c(f"  '{term}' is not a valid regex.", ui.YELLOW))
+                note = f"'{term}' is not a valid regex."
             elif hits:
                 pool = hits
             else:
-                ui.out(ui.c(f"  No model matches '{term}'. Try fewer words, or browse by backend.", ui.YELLOW))
+                note = f"No model matches '{term}'. Try fewer words, or browse by backend."
     labels = [f"CLI default (let {name} decide)"]
     for m in pool:
         lv = f"  [{', '.join(m.levels)}]" if m.levels else ""
         labels.append(f"{m.id}" + (f"  {short(m.name, 36)}" if m.name and m.name != m.id else "") + lv
                       + ("   ← current" if m.id == current else ""))
     start = 1 + next((i for i, m in enumerate(pool) if m.id == current), -1) if current else 0
-    pick = ui.choose(f"{name}: model", ["Type a model name to use one that isn't listed."], labels,
+    pick = _panel(f"{name}: model", ["Type a model name to use one that isn't listed."], labels,
                      start=start, color=ui.FRAME, esc="cancel")
     if pick is None:
         return None
@@ -155,7 +162,7 @@ def _pick_effort(eng, name: str, model: str, levels: List[str]) -> Optional[str]
     body = [f"Effort levels {model} supports on {name}. Higher is slower and uses more of your limits.",
             "Light steps and planning run one level lower."]
     labels = [lv + ("   ← current" if c.model == model and lv == c.effort else "") for lv in levels]
-    pick = ui.choose(f"{name}: effort for {model}", body, labels, allow_text=False, start=start, color=ui.FRAME,
+    pick = _panel(f"{name}: effort for {model}", body, labels, allow_text=False, start=start, color=ui.FRAME,
                      esc="cancel")
     return levels[labels.index(pick)] if pick else None
 
@@ -169,36 +176,71 @@ def _save(eng, name: str, model: str, effort: Optional[str], levels: List[str]) 
 
 
 # ---------------------------------------------------------------------------------------------- settings
-def _yes_no(title: str, body: str, current: bool) -> Optional[bool]:
-    pick = ui.choose(title, [body], ["Yes", "No"], allow_text=False, start=0 if current else 1, color=ui.FRAME,
-                     esc="keep it as it is")
-    return None if pick is None else pick == "Yes"
+def models_loop(eng) -> Optional[str]:
+    """The models menu until Esc: several providers can be changed in one go. Returns what was changed."""
+    notes: List[str] = []
+    while True:
+        note = models_menu(eng)
+        if not note:
+            return "\n".join(notes) or None
+        notes.append(note)
+
+
+def _toggle(eng, key: str) -> str:
+    """Flip a yes/no setting right away (Enter on its row), save it, and say what it is now."""
+    cfg = eng.cfg
+    if key == "display":
+        v = cfg.display != "terminal"
+        set_option(cfg.home, "ui.display", "terminal" if v else "headless")
+        return f"Workers {'open in terminal windows' if v else 'run headless'}."
+    if key == "switch":
+        v = not cfg.auto_switch
+        set_option(cfg.home, "auto_switch", v)
+        return "Providers switch automatically at a limit." if v else \
+            "Foreman waits for a provider's limit to reset instead of switching."
+    if key == "notify":
+        set_option(cfg.home, "ui.notify", not cfg.notify)
+        return f"Notifications {'off' if cfg.notify else 'on'}."
+    if key == "reuse":
+        v = cfg.reuse_sessions != "fork"
+        set_option(cfg.home, "sessions.reuse", "fork" if v else "off")
+        return f"Session reuse {'on' if v else 'off'}."
+    set_option(cfg.home, "ui.copy_on_select", not cfg.copy_on_select)  # "copy"
+    return f"Copy on select {'off' if cfg.copy_on_select else 'on'} (applies the next time you open the chat)."
+
+
+TOGGLES = ("display", "switch", "notify", "reuse", "copy")
 
 
 def config_menu(eng) -> Optional[str]:
-    """A list of settings with their current values; pick one to change it. Esc closes. Returns what changed."""
+    """A list of settings with their current values. Enter flips a yes/no setting on the spot and opens a panel for the
+    others; Esc closes. Nothing is left in the chat while it is open. Returns what changed (one line each)."""
     changed: List[str] = []
+    at = 0
     while True:
         cfg = eng.cfg
         first = next(iter(eng.providers), "?")
+        yes = lambda v: "true" if v else "false"  # noqa: E731
         rows = [
-            ("display", "Show workers in terminal windows", "yes" if cfg.display == "terminal" else "no (headless)"),
-            ("switch", "Switch provider automatically at a limit", "yes" if cfg.auto_switch else "no (wait for it)"),
+            ("display", "Show workers in terminal windows", yes(cfg.display == "terminal")),
+            ("switch", "Switch provider automatically at a limit", yes(cfg.auto_switch)),
             ("models", "Models and effort", " · ".join(f"{n} {current_text(eng, n)}" for n in eng.providers
                                                       if cfg.providers[n].enabled)),
             ("planner", "Planner (plans and reviews)", cfg.brain),
             ("first", "First worker", first),
-            ("notify", "Desktop notification when a task finishes", "on" if cfg.notify else "off"),
-            ("reuse", "Start from your recent sessions", "yes" if cfg.reuse_sessions == "fork" else "no"),
-            ("copy", "Copy selected text in the chat", "on" if cfg.copy_on_select else "off"),
+            ("notify", "Desktop notification when a task finishes", yes(cfg.notify)),
+            ("reuse", "Start from your recent sessions", yes(cfg.reuse_sessions == "fork")),
+            ("copy", "Copy selected text in the chat", yes(cfg.copy_on_select)),
         ]
         labels = [ui.clip(f"{name:<42} {value}", ui.width() - 8) for _, name, value in rows]
-        pick = ui.choose("Settings", ["Pick a setting to change it. Saved to ~/.foreman/config.yaml.",
-                                      "Esc closes this menu."], labels, allow_text=False, color=ui.FRAME, esc="close")
+        pick = _panel("Settings", ["Enter changes the selected setting (yes/no ones flip right away). Saved to "
+                                   "~/.foreman/config.yaml.", "Esc closes this menu."], labels, allow_text=False,
+                      start=at, color=ui.FRAME, esc="close", enter="change")
         if not pick:
             return "\n".join(changed) if changed else None
-        key = rows[labels.index(pick)][0]
-        note = _change(eng, key)
+        at = labels.index(pick)
+        key = rows[at][0]
+        note = _toggle(eng, key) if key in TOGGLES else _change(eng, key)
         if note:
             changed.append(note)
         eng.reload_config()
@@ -207,42 +249,7 @@ def config_menu(eng) -> Optional[str]:
 def _change(eng, key: str) -> Optional[str]:
     cfg, home = eng.cfg, eng.cfg.home
     if key == "models":
-        return models_menu(eng)
-    if key == "display":
-        v = _yes_no("Terminal windows", "Open each worker in a visible terminal window (instead of running under the "
-                    "hood)?", cfg.display == "terminal")
-        if v is None:
-            return None
-        set_option(home, "ui.display", "terminal" if v else "headless")
-        return f"Workers {'open in terminal windows' if v else 'run headless'} (saved)."
-    if key == "switch":
-        v = _yes_no("Switch automatically", "When a provider reaches its usage limit, hand the step to another provider? "
-                    "(No: wait for that provider's reset and continue in the same session.)", cfg.auto_switch)
-        if v is None:
-            return None
-        set_option(home, "auto_switch", v)
-        return "Providers switch automatically at a limit (saved)." if v else \
-            "Foreman waits for a provider's limit to reset instead of switching (saved)."
-    if key == "notify":
-        v = _yes_no("Notification", "Show one desktop notification when a task run finishes?", cfg.notify)
-        if v is None:
-            return None
-        set_option(home, "ui.notify", v)
-        return f"Notifications {'on' if v else 'off'} (saved)."
-    if key == "reuse":
-        v = _yes_no("Recent sessions", "Let workers continue from your recent sessions in a project (forked, yours stay "
-                    "untouched)?", cfg.reuse_sessions == "fork")
-        if v is None:
-            return None
-        set_option(home, "sessions.reuse", "fork" if v else "off")
-        return f"Session reuse {'on' if v else 'off'} (saved)."
-    if key == "copy":
-        v = _yes_no("Copy on select", "Copy text to the clipboard when you select it with the mouse in the chat?",
-                    cfg.copy_on_select)
-        if v is None:
-            return None
-        set_option(home, "ui.copy_on_select", v)
-        return f"Copy on select {'on' if v else 'off'} (saved; applies the next time you open the chat)."
+        return models_loop(eng)
     if key in ("planner", "first"):
         names = [n for n in eng.providers if cfg.providers[n].enabled]
         labels = []
@@ -252,7 +259,7 @@ def _change(eng, key: str) -> Optional[str]:
         current = cfg.brain if key == "planner" else next(iter(eng.providers), "")
         title, body = ("Planner", "The planner scopes requests, answers questions and reviews work.") if key == "planner" \
             else ("First worker", "Workers make the changes; the first ready one in the list is used.")
-        pick = ui.choose(title, [body], labels, allow_text=False, start=names.index(current) if current in names else 0,
+        pick = _panel(title, [body], labels, allow_text=False, start=names.index(current) if current in names else 0,
                          color=ui.FRAME, esc="cancel")
         if not pick:
             return None

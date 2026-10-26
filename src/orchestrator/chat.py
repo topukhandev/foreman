@@ -311,7 +311,7 @@ class Chat:
         if not ui.TTY:
             return menus.models_summary(self.eng)
         before = self.eng.cfg.display
-        note = menus.models_menu(self.eng) if which == "models" else menus.config_menu(self.eng)
+        note = menus.models_loop(self.eng) if which == "models" else menus.config_menu(self.eng)
         if self.eng.cfg.display != before:  # the display setting was changed in the menu: it wins over a startup flag
             self.visual = self.eng.cfg.display == "terminal"
         self.last_providers = None

@@ -309,21 +309,26 @@ class MenuTest(Base):
         self.run_menu(menus.models_menu, ["claude", "claude-opus-5-5", "high"])
         self.assertEqual(self.eng.cfg.providers["claude"].chosen(), Choice("claude-opus-5-5", "high"))
 
-    def test_the_settings_menu_changes_display_and_auto_switch(self):
+    def test_the_settings_menu_flips_yes_no_settings_on_enter(self):
         self.eng._fixed_visual = None  # as when started without --visual/--headless: the setting decides
-        text = self.run_menu(menus.config_menu, ["Show workers", "Yes", "Switch provider", "No", None])
-        self.assertIn("Workers open in terminal windows", text)
+        text = self.run_menu(menus.config_menu, ["Show workers", "Switch provider", "Desktop notification", None])
+        self.assertEqual([t for t, _, _ in self.asked], ["Settings"] * 4, "no yes/no question: Enter flips the value")
+        self.assertIn("Workers open in terminal windows.", text)
         self.assertIn("Foreman waits for a provider's limit", text)
+        self.assertIn("Notifications off.", text)
         saved = self.saved()
-        self.assertEqual((saved["ui"]["display"], saved["auto_switch"]), ("terminal", False))
+        self.assertEqual((saved["ui"]["display"], saved["auto_switch"], saved["ui"]["notify"]),
+                         ("terminal", False, False))
         self.assertEqual((self.eng.cfg.display, self.eng.cfg.auto_switch, self.eng.visual), ("terminal", False, True))
-        rows = self.asked[-1][1]
-        self.assertTrue(rows[0].startswith("Show workers in terminal windows") and rows[0].endswith("yes"), rows[0])
-        self.assertTrue(rows[1].endswith("no (wait for it)"), rows[1])
-        self.assertIn("claude claude-sonnet-5-5 · effort high", rows[2])
+        first, last = self.asked[0][1], self.asked[-1][1]
+        self.assertTrue(first[0].startswith("Show workers in terminal windows") and first[0].endswith("false"), first[0])
+        self.assertTrue(last[0].endswith("true") and last[1].endswith("false") and last[5].endswith("false"), last)
+        self.assertEqual([s for _, _, s in self.asked], [0, 0, 1, 5], "the selection stays on the row you changed")
+        again = self.run_menu(menus.config_menu, ["Show workers", None])
+        self.assertIn("run headless", again)
 
     def test_the_settings_menu_reaches_models_and_the_first_worker(self):
-        self.run_menu(menus.config_menu, ["Models", "claude", "sonnet", "max", "First worker", "antigravity", None])
+        self.run_menu(menus.config_menu, ["Models", "claude", "sonnet", "max", None, "First worker", "antigravity", None])
         self.assertEqual(self.eng.cfg.providers["claude"].chosen(), Choice("sonnet", "max"))
         self.assertEqual(next(iter(self.eng.providers)), "antigravity")
 
