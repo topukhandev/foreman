@@ -10,11 +10,11 @@ from typing import List, Optional
 from orchestrator import completion
 from orchestrator.app import build_engine
 from orchestrator.completion import SHELLS
-from orchestrator.config import load_config, set_option
+from orchestrator.config import EFFORTS, ROLES, load_config, set_option
 from orchestrator.report import task_summary
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
-               "accept", "dismiss", "close", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "completion", "version"}
+               "accept", "dismiss", "close", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version"}
 
 
 def _progress(msg: str) -> None:
@@ -117,6 +117,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--cwd", default=os.getcwd())
     p.add_argument("--mode", help="lifecycle mode: research, planning, development, qa, deployment (default: recommended)")
     p.add_argument("--dry-run", action="store_true", help="plan only: show what would be done, change nothing")
+    p.add_argument("--effort", choices=EFFORTS, help="reasoning effort for this task's workers (default: the profiles)")
+    p.add_argument("--model", help="model for this task's workers: `name` (the preferred provider) or `provider:name`")
     p = add("next", "start the recommended next lifecycle step for the latest work here")
     p.add_argument("--cwd", default=os.getcwd())
     p = sub.add_parser("lifecycle", help="where this project's features stand and what's next (no AI)")
@@ -137,6 +139,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("task")
     p.add_argument("note", nargs="*")
     p.add_argument("--cancel", action="store_true", help="not wanted any more (instead of: finished another way)")
+    p = sub.add_parser("models", help="model and effort per provider and kind of work; set one: models claude heavy opus high")
+    p.add_argument("provider", nargs="?")
+    p.add_argument("role", nargs="?", choices=ROLES)
+    p.add_argument("model", nargs="?", help="model name, or 'default' for the CLI's own")
+    p.add_argument("effort", nargs="?", choices=EFFORTS + ("default",))
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("tasks", help="list tasks")
     p.add_argument("-n", type=int, default=15)
     p.add_argument("--json", action="store_true")
@@ -243,8 +251,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.mode and not resolve(args.mode, eng.modes(args.cwd)):
             print(f"unknown mode '{args.mode}'. Modes: " + ", ".join(eng.modes(args.cwd)), file=sys.stderr)
             return 1
-        _print_result(eng, eng.handle(" ".join(args.request), args.cwd, mode=args.mode, dry_run=args.dry_run), args.json)
+        _print_result(eng, eng.handle(" ".join(args.request), args.cwd, mode=args.mode, dry_run=args.dry_run,
+                                      effort=args.effort, model=args.model), args.json)
         return 0
+    if cmd == "models":
+        return _models(eng, args)
     if cmd == "next":
         task, msg = eng.prepare_next(args.cwd)
         _print_result(eng, eng.execute(task) if task else {"task": None, "report": msg}, args.json)
@@ -336,6 +347,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("dismissed" if eng.store.set_suggestion(args.id, "dismissed") else "not found")
         return 0
     return 1
+
+
+def _models(eng, args) -> int:
+    """Show the model and effort every provider uses for each kind of work; with arguments, change one in the config."""
+    if args.provider and args.role and args.model:
+        if args.provider not in eng.providers:
+            print(f"unknown provider '{args.provider}'. Providers: " + ", ".join(eng.providers), file=sys.stderr)
+            return 1
+        base = f"providers.{args.provider}.profiles.{args.role}"
+        set_option(eng.cfg.home, base + ".model", None if args.model == "default" else args.model)
+        if args.effort:
+            set_option(eng.cfg.home, base + ".effort", None if args.effort == "default" else args.effort)
+        eng.cfg = load_config(eng.cfg.home)
+    rows = {n: {r: s.choice(r) for r in ROLES} for n, s in eng.cfg.providers.items() if s.enabled}
+    if args.json:
+        _dump({n: {r: {"model": c.model, "effort": c.effort} for r, c in roles.items()} for n, roles in rows.items()})
+        return 0
+    print("Model and effort per kind of work (light/standard/heavy = how big the planner rates a step; plan/review = "
+          "Foreman's own calls).\nChange one: foreman models <provider> <kind> <model|default> [effort|default]\n")
+    for name, roles in rows.items():
+        print(name)
+        for role, c in roles.items():
+            print(f"  {role:<9} {c.label()}")
+    print("\nPer task: foreman --effort high --model sonnet \"…\" · /effort in the chat")
+    return 0
 
 
 def _show(t, eng) -> str:
@@ -488,6 +524,8 @@ Foreman
   foreman --dry-run "<request>"    plan only: what would be done, nothing runs; `foreman resume` then runs that plan
   foreman lifecycle | next         where this project's features stand | start the recommended next step
   foreman modes                    the mode templates and where each comes from
+  foreman models [prov kind model [effort]]   model and effort per provider and kind of work (light/standard/heavy/plan/review)
+  foreman --effort high --model sonnet "<request>"   model/effort for one task ("provider:name" to name the provider)
   foreman status [task]            state of a task (instant, no AI)
   foreman resume [task] [note]     continue a task, re-verifying against current code
   foreman answer <task> <text>     answer a task's open question

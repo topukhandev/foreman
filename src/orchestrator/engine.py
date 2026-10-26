@@ -28,7 +28,7 @@ from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCH
                                 task_context)
 from orchestrator.budget import Budget
 from orchestrator.clipboard import image_dirs
-from orchestrator.config import Config
+from orchestrator.config import WEIGHTS, Choice, Config
 from orchestrator.knowledge import ProjectKnowledge, slug
 from orchestrator.modes import Mode, catalog, load_modes, resolve as resolve_mode
 from orchestrator.providers.base import (AUTH, CONTEXT, LIMIT, OUTPUT, OWN_PROMPT_PREFIXES, STOPPED, TIMEOUT,
@@ -147,16 +147,18 @@ class Engine:
 
     # ================================================================== entry points
     def handle(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
-               mode: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+               mode: Optional[str] = None, dry_run: bool = False, effort: Optional[str] = None,
+               model: Optional[str] = None) -> Dict[str, Any]:
         """Single entry for free-form requests from any interface. Returns {"task": ..., "report": str}.
         dry_run: plan only (see plan_only)."""
-        task, msg = self.route(request, cwd, conversation, confirm_plan, mode)
+        task, msg = self.route(request, cwd, conversation, confirm_plan, mode, effort, model)
         if not task:
             return {"task": None, "report": msg}
         return self.plan_only(task) if dry_run else self.execute(task)
 
     def route(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
-              mode: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+              mode: Optional[str] = None, effort: Optional[str] = None,
+              model: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
         """mode: a lifecycle mode the user chose (name or title), or None to let the planner recommend one."""
         """Decide what a request is without executing it: an instant answer (returned as text) or a task to run."""
         cwd = os.path.abspath(cwd)
@@ -176,7 +178,7 @@ class Engine:
                 return None, res["report"]  # otherwise nothing recorded matches: let the planner answer it
         if RESUME_RE.search(request):
             return self.prepare_resume(self._ref_from(request), note=request, cwd=cwd)
-        return self.prepare_new(request, cwd, conversation, confirm_plan, mode), ""
+        return self.prepare_new(request, cwd, conversation, confirm_plan, mode, effort=effort, model=model), ""
 
     def small_talk(self, text: str, cwd: str) -> str:
         """Instant, AI-free reply to greetings/thanks so a 'hey' never costs a model call."""
@@ -352,8 +354,17 @@ class Engine:
 
     def prepare_new(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
                     mode: Optional[str] = None, feature: Optional[str] = None,
-                    parent: Optional[str] = None) -> Dict[str, Any]:
+                    parent: Optional[str] = None, effort: Optional[str] = None,
+                    model: Optional[str] = None) -> Dict[str, Any]:
         task = self.store.new_task(request, os.path.abspath(cwd))
+        if effort:
+            task["effort"] = effort  # for every worker of this task, whichever provider runs it
+        if model:  # "claude:opus" names the provider; a bare model name is for the preferred (first usable) one
+            name, _, rest = model.partition(":")
+            name, rest = (name, rest) if rest and name in self.providers else \
+                (next((n for n in self.providers if self._usable(n)), ""), model)
+            if name:
+                task["model_for"] = {name: rest}
         task["status"] = "queued"
         task["conversation"] = conversation[-2500:]
         task["confirm_plan"] = confirm_plan
@@ -467,7 +478,11 @@ class Engine:
                    f"Previous step ({prev.get('mode')}, task #{prev['id']}): {short(prev.get('summary') or prev['title'], 400)}"
                    + (f"\nIts document: {doc['project']}/{doc['path']}" if doc else "")
                    + f"\nOriginal request: {prev['request']}")
-        task = self.prepare_new(request, prev["cwd"], mode=nxt["mode"], feature=prev.get("feature"), parent=prev["id"])
+        task = self.prepare_new(request, prev["cwd"], mode=nxt["mode"], feature=prev.get("feature"), parent=prev["id"],
+                                effort=prev.get("effort"))
+        if prev.get("model_for"):
+            task["model_for"] = dict(prev["model_for"])
+            self.store.save(task)
         prev["next_started"] = task["id"]
         self.store.save(prev)
         return task, ""
@@ -733,6 +748,7 @@ class Engine:
                 "read_projects": [r.name for r in reads if r and r.name != proj.name],
                 "status": "pending", "attempts": 0, "provider": None, "session_id": None, "summary": "",
                 "expected_min": max(0, min(int(s.get("expected_minutes") or 0), 600)),
+                "weight": s.get("weight") if s.get("weight") in WEIGHTS else "standard",
             })
         for c in plan.get("checks", []):
             proj = self.registry.find(c.get("project", ""))
@@ -784,6 +800,7 @@ class Engine:
         task["steps"].append({
             "id": sid, "project": home, "kind": "investigate", "status": "pending", "attempts": 0, "provider": None,
             "session_id": None, "summary": "", "depends_on": [], "read_projects": reads, "impact": True,
+            "weight": "standard",
             "instructions": (
                 "Impact analysis before anything is changed. The planned change: " + task["request"] + "\n"
                 "Find everything the change could affect, here and in the related projects: callers and consumers of the "
@@ -870,10 +887,12 @@ class Engine:
                                    "what is next). This file is outside the project and is Foreman's; if your run is cut "
                                    "off, the next worker continues from it.")
             self._say(task, f"{step['kind']} {step['project']} via {provider.name}" + (f" ({why})" if why else ""))
+            pick = self._pick(task, provider.name, step.get("weight") or "standard")
             self.store.event(task["id"], "step_start", step=step["id"], provider=provider.name, project=step["project"],
-                             step_kind=step["kind"], session=session_id, fork=fork, why=why)
+                             step_kind=step["kind"], session=session_id, fork=fork, why=why, model=pick.model,
+                             effort=pick.effort, weight=step.get("weight"))
             attempt = {"provider": provider.name, "session": None if fork else session_id, "started": now_iso(),
-                       "why": why}
+                       "why": why, "model": pick.model, "effort": pick.effort}
             with self._lock:
                 step.setdefault("history", []).append(attempt)
                 self.store.save(task)
@@ -881,7 +900,8 @@ class Engine:
             result = provider.run(RunRequest(
                 web=bool(mode and mode.web and step["kind"] == "investigate"),
                 prompt=attempt_prompt, cwd=proj.path, mode="write" if step["kind"] == "implement" else "read",
-                session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=timeout,
+                session_id=session_id, fork=fork, schema=STEP_SCHEMA, timeout=timeout, model=pick.model,
+                effort=pick.effort,
                 extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
                 + image_dirs(task["request"]) + ([os.path.dirname(notes)] if notes else []),
                 visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
@@ -1189,6 +1209,17 @@ class Engine:
                     f"{proj.name} {dep.get('type', 'relates to')} {other.name}: {dep.get('evidence', '')}")
         task.setdefault("suggestion_buffer", []).extend(data.get("suggestions", []) or [])
 
+    def _pick(self, task: Optional[Dict[str, Any]], provider: str, role: str) -> Choice:
+        """Model and effort for one run: the provider's profile for the role (light / standard / heavy for a step, plan or
+        review for Foreman's own calls), then the user's choices for this task on top: `--effort` for every provider,
+        `--model` for the one it was given for. Providers without a profile use their CLI default."""
+        settings = self.cfg.providers.get(provider)
+        base = settings.choice(role) if settings else Choice()
+        mine = ((task or {}).get("model_for") or {}).get(provider)
+        effort = (task or {}).get("effort")
+        return Choice(mine if mine and role in WEIGHTS else base.model,
+                      effort if effort and role in WEIGHTS else base.effort)
+
     def _choose(self, task, step, cwd, tried) -> Optional[Tuple[Provider, Optional[str], bool, str]]:
         """Pick provider + session. Continuity first, then forking a recent user session, then a new session."""
         avail = [p for n, p in self.providers.items() if n not in tried and self._usable(n)]
@@ -1413,6 +1444,7 @@ class Engine:
                 "depends_on": [], "read_projects": prev["read_projects"] if prev else [], "status": "pending",
                 "attempts": 0, "provider": prev.get("provider") if prev else None,
                 "session_id": prev.get("session_id") if prev else None, "summary": "",
+                "weight": prev.get("weight", "standard") if prev else "standard",
             })
 
     # ------------------------------------------------------------------ documents
@@ -1518,9 +1550,9 @@ class Engine:
             names = [n for n in names if n not in prefer_not] + [n for n in names if n in prefer_not]
         names = [n for n in names if not self._pressed(n)] + [n for n in names if self._pressed(n)]
         provs = [self.providers[n] for n in names if self._usable(n)]
-        models = {n: s.brain_model for n, s in self.cfg.providers.items() if s.brain_model}
         tid = task["id"] if task else None
-        return Brain(provs, timeout=self.cfg.limits.brain_timeout_sec, model_for=models,
+        return Brain(provs, timeout=self.cfg.limits.brain_timeout_sec,
+                     choice_for=lambda name, purpose: self._pick(task, name, "review" if purpose == "review" else "plan"),
                      on_call=lambda name: self.budget.acquire(name)[0],
                      on_start=lambda name, purpose: tid and self.store.event(tid, "thinking", provider=name, purpose=purpose),
                      on_activity=(lambda name, purpose, text: self._activity(tid, name, purpose, text)) if tid else None,

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from orchestrator import ui
 from orchestrator.app import build_engine, spawn_task
 from orchestrator.config import set_first_provider, set_option
+from orchestrator.config import EFFORTS
 from orchestrator.engine import BARE_YES_RE, NO_RE, RESUME_RE, YES_RE, clean_text, is_task_status_query
 from orchestrator.report import OUTCOME, clock, option_labels, render_report, stopped_at
 from orchestrator.store import ACTIVE
@@ -31,6 +32,7 @@ COMMANDS = [
     ("/suggestions", "open suggestions"),
     ("/providers", "choose the planner (and first worker) with ↑/↓"),
     ("/mode", "lifecycle mode: R&D, planning, development, QA, deployment, or auto"),
+    ("/effort", "reasoning effort for your next tasks: low, medium, high, xhigh, max, or auto"),
     ("/lifecycle", "where this project's features stand and what's next"),
     ("/doctor", "providers, health and setup"),
     ("/exit", "leave the chat (Ctrl+D)"),
@@ -45,7 +47,7 @@ Drag an image file into the window, or press Ctrl+V with an image on the clipboa
 Paste the same thing again right after a chip to expand it: the full text, or the image's path.
 Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
-  /mode  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
+  /mode  /effort  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
 Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters). Esc twice stops a running task;
 `foreman config copy-on-select off` gives selection back to the terminal (then hold Shift).
@@ -68,6 +70,7 @@ class Chat:
         self.history = ChatHistory(self.eng.cfg.home, self._project_key)
         self.last_providers: Optional[str] = None
         self.mode: Optional[str] = None       # lifecycle mode fixed with /mode (None = recommended per request)
+        self.effort: Optional[str] = None     # reasoning effort fixed with /effort (None = the profiles decide)
         self._offered_next: set = set()
 
     # ------------------------------------------------------------------ loop
@@ -300,8 +303,29 @@ class Chat:
             return handled
         if (BARE_YES_RE.match(text) or NO_RE.match(text)) and not RESUME_RE.search(text):
             return ui.bullet("Nothing is waiting for a yes/no right now. What would you like to do?")
-        task, msg = self.eng.route(text, self.cwd, self._conversation(), confirm_plan=True, mode=self.mode)
+        task, msg = self.eng.route(text, self.cwd, self._conversation(), confirm_plan=True, mode=self.mode,
+                                   effort=self.effort)
         return self._run(text, task, msg)
+
+    def _effort_menu(self, arg: str) -> str:
+        if arg:
+            if arg.lower() in ("auto", "off", "none", "default"):
+                self.effort = None
+                return ui.bullet("Effort: auto. Each step gets what its size calls for (see `foreman models`).")
+            if arg.lower() not in EFFORTS:
+                return ui.bullet(f"Unknown effort '{arg}'. Use auto, " + ", ".join(EFFORTS), ui.YELLOW)
+            self.effort = arg.lower()
+            return ui.bullet(f"Effort: {self.effort} for every worker of your next tasks (/effort auto to go back)")
+        if not ui.TTY:
+            return f"Effort: {self.effort or 'auto'}. Choices: auto, " + ", ".join(EFFORTS)
+        labels = ["Auto: by the size of each step"] + list(EFFORTS)
+        choice = ui.choose("Reasoning effort", ["Applies to your next tasks in this chat. Higher is slower and uses "
+                                                 "more of your limits."], labels, allow_text=False,
+                           start=0 if not self.effort else 1 + EFFORTS.index(self.effort), color=ui.FRAME,
+                           esc="keep the current effort")
+        if choice is None:
+            return ui.bullet("Effort unchanged.", ui.GREY)
+        return self._effort_menu("auto" if choice.startswith("Auto") else choice)
 
     def _mode_menu(self, arg: str) -> str:
         modes = self.eng.modes(self.cwd)
@@ -384,6 +408,8 @@ class Chat:
             return self._providers_menu(arg)
         if cmd == "/mode":
             return self._mode_menu(arg)
+        if cmd == "/effort":
+            return self._effort_menu(arg)
         if cmd == "/lifecycle":
             return ui.bullet(self.eng.lifecycle_text(self.cwd))
         if cmd == "/doctor":

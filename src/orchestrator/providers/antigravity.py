@@ -6,6 +6,8 @@
 - Headless mode cannot prompt, and any denied permission aborts the turn with no output, so both modes pass
   `--dangerously-skip-permissions`. Read steps add `--mode plan` + a read-only rule; Foreman flags any file the
   planner or a read step changes. Git safety: prompt policy plus the engine's HEAD check.
+- `--model=<id>` (ids from `agy models`, e.g. gemini-3.8-flash-high, which carry their effort) and `--effort=<level>`
+  are both accepted together (verified 2026-10-26).
 - `-p` must be attached (`-p=<prompt>`), otherwise agy parses the next flag as the prompt.
 - Web (verified 2026-10-25): plan mode has `search_web` (and `read_url_content`); agy cannot disable them per run,
   so the read-only rule tells it whether web research is allowed (prompt-level only).
@@ -45,6 +47,8 @@ class AntigravityProvider(Provider):
         model = req.model or self.settings.model
         if model:
             cmd.append(f"--model={model}")
+        if req.effort:  # verified 2026-10-26 together with --model=gemini-3.8-flash-high (`agy models` lists the ids)
+            cmd.append(f"--effort={req.effort}")
         if req.session_id:
             cmd.append(f"--conversation={req.session_id}")
         for d in req.extra_dirs:

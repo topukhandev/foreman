@@ -65,6 +65,9 @@
 - **Asking.** Business questions, worker questions about technical choices that change what was asked (with the
   worker's options and recommendation), and the 80% budget sign-off pause a task. Routine technical choices are
   recorded as decisions. Answers to a worker go back into that worker's session; the plan is not redone.
+- **Models and effort are Foreman's call.** Per provider profiles (light / standard / heavy / plan / review) in
+  `config.py`; the planner rates each step's weight, the engine maps it (`Engine._pick`), the adapters pass
+  `--model` / `--effort` where the CLI has them. Per-task overrides live on the task record.
 - **Cut-offs are routine.** Providers translate their errors into failure kinds (`providers/base.py`: timeout,
   limit with reset time, transient, auth, context, output, crash) and report session ids while running. The
   engine journals every attempt per step and applies one policy per kind: resume the same session, hand over to

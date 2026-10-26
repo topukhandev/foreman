@@ -39,7 +39,8 @@ PLAN_SCHEMA = {
         "steps": {"type": "array", "items": {"type": "object", "properties": {
             "id": _STR, "project": _STR, "kind": {"type": "string", "enum": ["investigate", "implement"]},
             "instructions": _STR, "depends_on": _STRS, "read_projects": _STRS,
-            "expected_minutes": {"type": "integer"}},
+            "expected_minutes": {"type": "integer"},
+            "weight": {"type": "string", "enum": ["light", "standard", "heavy"]}},
             "required": ["id", "project", "kind", "instructions"]}},
         "checks": {"type": "array", "items": {"type": "object", "properties": {
             "project": _STR, "command": _STR, "why": _STR}, "required": ["project", "command"]}},
@@ -108,7 +109,10 @@ How to plan (be proportional - most requests are small):
    frontend that consumes it). Independent steps run in parallel. read_projects lists other projects the worker
    may need to read. For a step that waits on long jobs (large downloads, builds, big scans) set expected_minutes
    honestly (Foreman allows about 1.5x that; a step that still runs out of time is resumed in the same session),
-   and prefer splitting "start the job in the background" from "process its result".
+   and prefer splitting "start the job in the background" from "process its result". Rate each step's "weight" so
+   Foreman can give it the right model and effort: light = reading, summarising, a lookup or a one-spot edit;
+   standard = an ordinary feature or fix in one project; heavy = a risky or intricate change (money, auth, data,
+   migrations, a shared interface, a hard bug) where a mistake is costly. Most steps are light or standard.
 6. Checks: commands Foreman runs itself to validate (tests, type-check, build) in modified or test projects.
    Prefer the registry's test command; narrow it when the suite is large. Non-destructive only: no deploys, DB
    resets, network installs or git commands.
@@ -149,13 +153,14 @@ class BrainError(Exception):
 
 
 class Brain:
-    def __init__(self, providers: List[Provider], timeout: int = 600, model_for: Optional[Dict[str, str]] = None,
+    def __init__(self, providers: List[Provider], timeout: int = 600,
+                 choice_for: Optional[Callable[[str, str], Any]] = None,
                  on_call: Optional[Callable[[str], bool]] = None, on_start: Optional[Callable[[str, str], None]] = None,
                  on_activity: Optional[Callable[[str, str, str], None]] = None,
                  on_fail: Optional[Callable[[str, RunResult], None]] = None):
         self.providers = providers  # preference order; first that succeeds wins
         self.timeout = timeout
-        self.model_for = model_for or {}
+        self.choice_for = choice_for or (lambda provider, purpose: None)  # -> Choice(model, effort) or None
         self.on_call = on_call or (lambda name: True)  # budget hook; False = provider over its limit
         self.on_start = on_start or (lambda name, purpose: None)
         self.on_activity = on_activity
@@ -173,9 +178,10 @@ class Brain:
                 continue
             self.on_start(p.name, purpose)
             act = (lambda text, _n=p.name: self.on_activity(_n, purpose, text)) if self.on_activity else None
+            pick = self.choice_for(p.name, purpose)
             res = p.run(RunRequest(prompt=prompt, cwd=cwd, mode="read", extra_dirs=extra_dirs or [], persist=False,
-                                   schema=schema, timeout=self.timeout, model=self.model_for.get(p.name),
-                                   on_activity=act, web=web))
+                                   schema=schema, timeout=self.timeout, model=pick.model if pick else None,
+                                   effort=pick.effort if pick else None, on_activity=act, web=web))
             if res.ok and isinstance(res.data, dict):
                 res.data["_provider"] = p.name
                 res.data["_errors"] = errors

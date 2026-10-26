@@ -1,4 +1,5 @@
-"""OpenCode (`opencode run --format json`). Supports resume/fork and session discovery; read-only via the `plan` agent."""
+"""OpenCode (`opencode run --format json`). Supports resume/fork and session discovery; read-only via the `plan` agent.
+Model: `-m provider/model`. No effort option is passed (not verified; OpenCode isn't installed where this was written)."""
 
 import json
 from typing import List

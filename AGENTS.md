@@ -31,6 +31,14 @@
    `.foreman/`; workers never do.
 9. Before code changes that are risky or touch something with known consumers, an impact investigation runs first.
 
+## Models and effort
+
+- Every run gets a model and effort from `providers.<name>.profiles` (light / standard / heavy for steps, plan /
+  review for Foreman's own calls; built-in defaults in `config.DEFAULT_PROFILES`). The planner only rates a step's
+  `weight`; the mapping is deterministic. Per-task `--effort` / `--model` (`/effort` in chat) sit on top.
+- Verify a CLI's model and effort options before passing them, and record that in the adapter's docstring; a CLI
+  without an effort option ignores `effort` (OpenCode).
+
 ## Limits (config.yaml → `limits`)
 
 - Concurrency `max_parallel` (default 4); one running step per project at a time.

@@ -130,6 +130,14 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
         rows.append(("Review", short(reviews[-1]["summary"], 160)))
     if task.get("fix_rounds"):
         rows.append(("Fixes", f"{task['fix_rounds']} automatic fix round(s) after validation"))
+    used: Dict[str, int] = {}
+    for st_ in task["steps"]:
+        for a in st_.get("history") or []:
+            if a.get("outcome") == "done" or a.get("ended") is None:
+                key = f"{a['provider']} {a.get('model') or 'default'}" + (f" ({a['effort']})" if a.get("effort") else "")
+                used[key] = used.get(key, 0) + 1
+    if used:
+        rows.append(("Models", ", ".join(f"{k} ×{n}" for k, n in used.items())))
     sessions = task.get("sessions") or []
     if sessions:
         by = {}

@@ -45,6 +45,7 @@ class RunRequest:
     schema: Optional[Dict[str, Any]] = None
     timeout: int = 1200
     model: Optional[str] = None
+    effort: Optional[str] = None           # reasoning effort (low|medium|high|xhigh|max) where the CLI has the option
     persist: bool = True                   # keep the session on disk (planning/review calls don't need to)
     visual: bool = False                   # show the worker in a visible terminal window
     title: str = ""                        # window title when visual

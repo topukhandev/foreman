@@ -199,6 +199,35 @@ a missing migration. Minor issues are fixed by the workers instead. Dismissed it
 Workers never run git. The one exception is a "run `git init`" suggestion for a project without a repository: when you
 accept it (`do s6`), Foreman itself runs `git init` (no commit), so it can detect and review changes there.
 
+## Models and effort
+
+Foreman chooses the model and reasoning effort for every run instead of leaving it to whatever the CLI last had
+(your `/model` setting in Claude Code no longer changes what Foreman's workers use). The planner rates each step
+**light** (reading, a lookup, a one-spot edit), **standard** (an ordinary change in one project) or **heavy** (risky
+or intricate: money, auth, data, shared interfaces, hard bugs), and Foreman maps that to the provider's profile.
+Planning and review have their own profiles (**plan**, **review**).
+
+Built-in profiles, used when your config says nothing (the middle tier at high effort, never max):
+
+| | light | standard | heavy | plan | review |
+|---|---|---|---|---|---|
+| Claude | Sonnet 5.5, medium | Sonnet 5.5, high | Sonnet 5.5, high | Sonnet 5.5, medium | Sonnet 5.5, high |
+| Antigravity | Gemini 3.8 Flash medium | Flash high | Flash high | Flash medium | Flash high |
+| OpenCode and others | the CLI's own default | | | | |
+
+```bash
+foreman models                                  # what every provider uses for each kind of work
+foreman models claude heavy claude-opus-5-5 high    # change one (heavy steps get Opus); `default` = the CLI's own
+foreman --effort max "…"                        # this task's workers, whichever provider runs them
+foreman --model opus "…"                        # this task, on the preferred provider; `claude:opus` names it
+```
+
+In the chat, `/effort` sets the effort for your next tasks (`/effort auto` goes back to the profiles). A task keeps
+its choices for follow-ups ("next"). When a step moves to another provider, that provider's own profile applies.
+Reports show what ran ("Models  claude claude-sonnet-5-5 (high) ×3") and the step events record it. Antigravity's
+Gemini model ids carry their effort (`agy models` lists them). `model:` / `brain_model:` in a provider's config still
+force one model for workers / for planning and review.
+
 ## When a provider stops
 
 Every attempt at a step is journaled (provider, session, why it ended) and the session id is saved the moment the

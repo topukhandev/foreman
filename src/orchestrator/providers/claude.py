@@ -47,6 +47,8 @@ class ClaudeProvider(Provider):
         model = req.model or self.settings.model
         if model:
             cmd += ["--model", str(model)]
+        if req.effort:  # verified 2026-10-26: `--model claude-sonnet-5-5 --effort high` runs that model (modelUsage)
+            cmd += ["--effort", req.effort]
         if not req.persist and not req.session_id:
             cmd.append("--no-session-persistence")
         if req.session_id:

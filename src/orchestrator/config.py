@@ -22,9 +22,11 @@ providers:
   claude:
     enabled: true
     command: claude
-    model: null          # worker model (null = CLI default)
-    brain_model: null    # model for planning/review (null = CLI default)
+    model: null          # set to force one worker model for every step (null = use `profiles`, see `foreman models`)
+    brain_model: null    # set to force one model for planning/review
     max_runs_per_day: 300
+    # profiles:          # built in; override any part. light / standard / heavy = how big the planner rated a step,
+    #   standard: {model: claude-sonnet-5-5, effort: high}   # plan / review = Foreman's own planning and review
   opencode:
     enabled: true
     command: opencode
@@ -74,6 +76,36 @@ sessions:
 """
 
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+WEIGHTS = ("light", "standard", "heavy")  # how big the planner rates a step
+ROLES = WEIGHTS + ("plan", "review")      # plus Foreman's own planning and review calls
+
+
+@dataclass
+class Choice:
+    """Model and reasoning effort for one kind of work; None = the CLI's own default."""
+    model: Optional[str] = None
+    effort: Optional[str] = None
+
+    def label(self) -> str:
+        return " ".join(x for x in (self.model, f"effort {self.effort}" if self.effort else "") if x) or "CLI default"
+
+
+def _sonnet(effort: str) -> Choice:
+    return Choice("claude-sonnet-5-5", effort)
+
+
+# Built in, used when the config says nothing: the middle tier at high effort (never max); planning one step lower,
+# review at high. agy's Gemini model ids already carry their effort (gemini-3.8-flash-high). Other CLIs: their default.
+DEFAULT_PROFILES: Dict[str, Dict[str, Choice]] = {
+    "claude": {"light": _sonnet("medium"), "standard": _sonnet("high"), "heavy": _sonnet("high"),
+               "plan": _sonnet("medium"), "review": _sonnet("high")},
+    "antigravity": {"light": Choice("gemini-3.8-flash-medium"), "standard": Choice("gemini-3.8-flash-high"),
+                    "heavy": Choice("gemini-3.8-flash-high"), "plan": Choice("gemini-3.8-flash-medium"),
+                    "review": Choice("gemini-3.8-flash-high")},
+}
+
+
 @dataclass
 class ProviderSettings:
     name: str
@@ -83,6 +115,14 @@ class ProviderSettings:
     brain_model: Optional[str] = None
     max_runs_per_day: int = 300
     extra: Dict[str, Any] = field(default_factory=dict)
+    profiles: Dict[str, Choice] = field(default_factory=dict)
+
+    def choice(self, role: str) -> Choice:
+        """Model and effort for a role (light/standard/heavy/plan/review). An explicit `model` / `brain_model` in the
+        config still forces the model for workers / for planning and review."""
+        c = self.profiles.get(role) or Choice()
+        forced = self.brain_model if role in ("plan", "review") else self.model
+        return Choice(forced or c.model, c.effort)
 
 
 @dataclass
@@ -151,7 +191,14 @@ def load_config(home: Optional[str] = None) -> Config:
         data["providers"] = yaml.safe_load(DEFAULT_CONFIG)["providers"]
     for name, p in data["providers"].items():
         p = p or {}
-        known = {"enabled", "command", "model", "brain_model", "max_runs_per_day"}
+        known = {"enabled", "command", "model", "brain_model", "max_runs_per_day", "profiles"}
+        profiles = {role: Choice(c.model, c.effort) for role, c in DEFAULT_PROFILES.get(name, {}).items()}
+        for role, c in (p.get("profiles") or {}).items():
+            if role in ROLES and isinstance(c, dict):
+                base = profiles.get(role) or Choice()
+                effort = str(c["effort"]).lower() if "effort" in c and c["effort"] else (None if "effort" in c else base.effort)
+                profiles[role] = Choice(c["model"] if "model" in c else base.model,
+                                        effort if effort in EFFORTS or effort is None else base.effort)
         providers[name] = ProviderSettings(
             name=name,
             enabled=bool(p.get("enabled", True)),
@@ -160,6 +207,7 @@ def load_config(home: Optional[str] = None) -> Config:
             brain_model=p.get("brain_model"),
             max_runs_per_day=int(p.get("max_runs_per_day", 300)),
             extra={k: v for k, v in p.items() if k not in known},
+            profiles=profiles,
         )
 
     lim = data.get("limits") or {}
