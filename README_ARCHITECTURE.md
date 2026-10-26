@@ -62,8 +62,15 @@
 - **Git policy.** Workers never commit, push, reset or switch branches (tool-level deny for Claude, prompt
   policy for all). Any HEAD movement is reported. Changes are measured against a snapshot, so your own
   uncommitted work isn't attributed to the task.
-- **Asking.** Only business/product questions and the 80% budget sign-off pause a task. Technical choices
-  are recorded as decisions.
+- **Asking.** Business questions, worker questions about technical choices that change what was asked (with the
+  worker's options and recommendation), and the 80% budget sign-off pause a task. Routine technical choices are
+  recorded as decisions. Answers to a worker go back into that worker's session; the plan is not redone.
+- **Cut-offs are routine.** Providers translate their errors into failure kinds (`providers/base.py`: timeout,
+  limit with reset time, transient, auth, context, output, crash) and report session ids while running. The
+  engine journals every attempt per step and applies one policy per kind: resume the same session, hand over to
+  the next provider with a handoff brief (changed files, progress notes, last actions), or wait for usage limits
+  to reset (planning and review too). Unfinished work stays in the plan (dependent steps wait), the status and
+  next step are derived from what actually happened, and "continue" runs the same plan in the same sessions.
 - **Modes are data, not code.** One pipeline; a mode only changes instructions, permissions (read-only,
   tests-only, web) and checks. The planner recommends a mode per request (with a reason) unless the user fixed
   one. A task keeps its mode; the next mode is recommended deterministically from the template and the outcome

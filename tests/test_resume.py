@@ -118,6 +118,14 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(task["next"]["resume"], "1")
         self.assertEqual(task["next"]["title"], "Continue #1")
         self.assertIn("3 steps left, starting with r1.0.s1", task["next"]["reason"])
+        report = render_report(task, chat=True)
+        self.assertIn("Stopped at step r1.0.s1 in orders-api", report)
+        self.assertIn("2 more steps after it", report)
+        self.assertIn("Say \"continue\"", report)
+        self.assertNotIn("Next step", report, "no \"start development\" for an unfinished task")
+        status = self.eng.status("1", self.ws.api)["report"]
+        self.assertIn("✘ r1.0.s1 orders-api implement", status)
+        self.assertIn("· r1.0.s2 orders-api implement", status)
 
         fail["on"] = False
         plans = self.s.log.count("claude:plan")

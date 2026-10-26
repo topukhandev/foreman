@@ -121,6 +121,11 @@ class RecoveryTest(unittest.TestCase):
         checks = [e["check"] for e in self.events() if e["event"] == "waiting"]
         self.assertEqual(max(checks), 3)
         self.assertTrue(any(n.startswith("Paused:") for n in task["notices"]))
+        from orchestrator.report import render_report
+        report = render_report(task, chat=True)
+        self.assertTrue(report.startswith("‖"))
+        self.assertIn("Paused at step r1.0.1 in orders-api", report)
+        self.assertIn("out of their usage limits", report)
         # "continue" later picks it up in claude's session, with a fresh allowance of checks
         self.script("claude", [], session="c-1")
         self.eng._provider_failed("claude", "", "")

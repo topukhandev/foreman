@@ -19,8 +19,11 @@ and returns a short report.
 - Use `orchestrate` for development work, especially work that may span projects, and for questions about
   previous tasks. Pass the user's request verbatim plus the current working directory.
 - Use `task_status` for "what's the state of ..." (instant, no AI) and `resume_task` to continue previous work.
-- If a report has "Needs your decision", ask the user (use your own question UI) and pass the reply to
-  `answer_question`. Never answer business questions on the user's behalf.
+- If a report has "Needs your decision", ask the user (use your own question UI; offer the listed options, the one
+  marked "recommended" first) and pass the reply to `answer_question`; for several questions send one answer per
+  line, numbered ("1. ...", "2. ..."). Never answer questions on the user's behalf.
+- A report that says "Stopped at …" or "Paused …" is unfinished work: `resume_task` continues it where it stopped,
+  in the same sessions. A paused task (every provider out of its usage limit) needs no action until one is back.
 - If a report has "Worth considering", show those items briefly as options; act only if the user accepts
   (`suggestion` with action=accept).
 - Work moves through lifecycle modes: research (R&D), planning, development, qa, deployment. Foreman recommends
@@ -59,7 +62,8 @@ TOOLS = [
     {"name": "resume_task", "description": "Continue an unfinished or previous task; re-verifies against the current code.",
      "inputSchema": {"type": "object", "properties": {"task": _TASK, "note": {"type": "string"}, "cwd": _CWD,
                                                       "wait_seconds": _WAIT, "display": _DISPLAY}}},
-    {"name": "answer_question", "description": "Give the user's answer to a task's open question and continue it.",
+    {"name": "answer_question", "description": "Give the user's answer to a task's open question(s) and continue it. "
+                                               "Several questions: one numbered answer per line (\"1. ...\").",
      "inputSchema": {"type": "object", "properties": {"task": _TASK, "answer": {"type": "string"}, "wait_seconds": _WAIT,
                                                       "display": _DISPLAY}, "required": ["answer"]}},
     {"name": "suggestion", "description": "Accept (starts a task for it) or dismiss (never shown again) a suggestion.",

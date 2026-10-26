@@ -40,6 +40,29 @@ def notify(title: str, body: str) -> None:
         pass
 
 
+def stopped_at(task: Dict[str, Any]) -> str:
+    """Where an unfinished task stopped, from its step journal: "step s1 in api (claude: usage limit, its session
+    is resumed)", or "" when no step is unfinished."""
+    left = [s for s in task.get("steps") or [] if s["status"] != "done" and not s.get("skipped_by_user")]
+    if not left:
+        return ""
+    first = next((s for s in left if s["status"] != "pending" or s.get("history")), left[0])
+    hist = first.get("history") or []
+    last = hist[-1] if hist else {}
+    how = ""
+    if last and last.get("outcome") not in (None, "done"):
+        how = f"{last['provider']}: {OUTCOME.get(last['outcome'], last['outcome'])}"
+        how += ", its session is resumed" if first.get("session_id") else ""
+    more = len(left) - 1
+    return (f"step {first['id']} in {first['project']}" + (f" ({how})" if how else "")
+            + (f", {more} more step{'s' if more != 1 else ''} after it" if more > 0 else ""))
+
+
+OUTCOME = {"timeout": "ran out of time", "limit": "usage limit", "transient": "network/API error", "auth": "login problem",
+           "context": "context full", "output": "no final report", "crash": "stopped unexpectedly",
+           "interrupted": "Foreman was closed", "stopped": "stopped by you"}
+
+
 def option_labels(q: Dict[str, Any], mark: str = "recommended") -> List[str]:
     """A question's options, the worker's recommendation first and marked."""
     return [f"{o} ({mark})" if o == q.get("default") else o for o in q.get("options") or []]
@@ -62,9 +85,17 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
                   questions: bool = True, chat: bool = False) -> str:
     st = task["status"]
     lines = [f"{ICON.get(st, '•')} #{task['id']} {task['title']} — {task.get('outcome') or st}"]
-    if st == "interrupted":
-        lines += ["", "Stopped by you. " + ("Say \"continue\" to pick it up again." if chat
-                                           else f"`foreman resume {task['id']}` picks it up again.")]
+    if st in ("interrupted", "paused", "blocked", "partial"):
+        where = stopped_at(task)
+        go = "Say \"continue\" to pick it up there." if chat else f"`foreman resume {task['id']}` picks it up there."
+        if st == "interrupted":
+            lines += ["", f"Stopped by you{' at ' + where if where else ''}. {go}"]
+        elif st == "paused":
+            lines += ["", f"Paused{' at ' + where if where else ''}: {(task.get('paused') or {}).get('reason', 'no provider is available')}."
+                      + (f" Expected back at {clock(task['paused']['until'])}." if (task.get("paused") or {}).get("until") else "")
+                      + f" {go}"]
+        elif where:
+            lines += ["", f"Stopped at {where}. {go}"]
 
     if task["intent"] == "answer" and task.get("answer"):
         lines += ["", task["answer"].strip()]
@@ -134,7 +165,7 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
         lines += ["", "Notes"] + [f"  - {short(n, 200)}" for n in task["notices"][:5]]
 
     nxt = task.get("next")
-    if nxt and not open_q:
+    if nxt and not open_q and not nxt.get("resume"):  # an unfinished task's way forward is "continue", said above
         lines += ["", "Next step", f"  {nxt.get('title') or nxt['mode']}: {nxt.get('reason', '')}",
                   "  → say \"next\" to start it, or ask for something else" if chat else "  → foreman next"]
 
@@ -218,8 +249,11 @@ def render_status(task: Dict[str, Any], changed_since: Dict[str, List[str]],
     if task["steps"]:
         lines.append(f"  Steps     {len(done)}/{len(task['steps'])} done")
         for s in task["steps"]:
-            mark = {"done": "✔", "pending": "·", "running": "…"}.get(s["status"], "✘")
-            lines.append(f"    {mark} {s['project']} {s['kind']}: {short(s.get('summary') or s['instructions'], 110)}")
+            mark = {"done": "✔", "pending": "·", "running": "…", "needs_input": "?", "paused": "‖"}.get(s["status"], "✘")
+            if s.get("skipped_by_user"):
+                mark = "–"
+            lines.append(f"    {mark} {s['id']} {s['project']} {s['kind']}: "
+                         f"{short(s.get('summary') or s['instructions'], 110)}")
     checks = {}
     for e in task["evidence"]:
         if e["kind"] == "check":
@@ -228,9 +262,17 @@ def render_status(task: Dict[str, Any], changed_since: Dict[str, List[str]],
         lines.append("  Checks    " + "  ".join(f"{'✔' if e['ok'] else '✘'} {e['project']}" for e in checks.values()))
     if task.get("answer") and task["intent"] == "answer":
         lines.append(f"  Answer    {short(task['answer'], 300)}")
+    if task.get("waiting"):
+        w = task["waiting"]
+        lines.append(f"  Waiting   {w.get('reason', '')}; next try at {clock(w.get('until'))}"
+                     + ("" if w.get("known") else f" (check {w.get('check')}/{w.get('of')})"))
+    where = stopped_at(task) if task["status"] in ("interrupted", "paused", "blocked", "partial") else ""
+    if where:
+        lines.append(f"  Stopped   at {where}; `foreman resume {task['id']}` continues there")
     open_q = [q for q in task["questions"] if not q.get("answer")]
     for q in open_q:
-        lines.append(f"  Waiting   {q['text']}")
+        opts = f"  [{' / '.join(option_labels(q))}]" if q.get("options") else ""
+        lines.append(f"  Question  {short(q['text'], 300)}{opts}")
     for r in task["remaining"][:5]:
         lines.append(f"  Remaining {short(r, 160)}")
     for proj, files in changed_since.items():

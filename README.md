@@ -13,10 +13,14 @@ The AI providers supply the intelligence; Foreman supplies the coordination, con
   checks and review.
 - **Remembers tasks.** Every task records its request, projects, decisions, evidence, sessions and what remains,
   so "continue the previous task" just works, after re-checking what changed since.
+- **Survives cut-offs.** A worker that hits a usage limit, a network error, a timeout or a crash doesn't lose its
+  work: its session is resumed, or another provider takes the step over with a handoff. When every provider is out
+  of its limit, Foreman waits for the reset and carries on by itself. See [When a provider stops](#when-a-provider-stops).
 - **Works with what you already use.** Any MCP-capable tool (Claude Code, the Antigravity app/CLI, Codex, …)
   can be the front end. Recent sessions are forked so workers inherit your context.
-- **Autonomous where safe, asks where it matters.** Routine technical decisions are made automatically;
-  business rules are asked; workers never commit; validation commands are allow-listed.
+- **Autonomous where safe, asks where it matters.** Routine technical decisions are made automatically; business
+  rules, and technical choices that change what was asked, are asked, with the worker's options and its
+  recommendation; workers never commit; validation commands are allow-listed.
 - **Follows the lifecycle.** R&D, planning, development, QA and deployment modes, with a recommended mode per
   request and a recommended next step after each one. Impact on existing code and consumers is checked before
   risky edits, and confirmed business decisions are kept in the project and followed by every later session.
@@ -99,7 +103,7 @@ foreman --mode planning "VIP discounts"   # in a chosen mode (research, planning
 foreman lifecycle | next              # where features stand | start the recommended next step
 foreman status                      # state of your current task (instant, no AI)
 foreman resume                      # continue the most recent unfinished task here
-foreman answer 3 "10% off above $500"   # answer a business question a task is waiting on
+foreman answer 3 "10% off above $500"   # answer a question a task is waiting on ("1. …" per line for several)
 foreman accept s2 | dismiss s2      # act on, or silence, a suggestion
 foreman tasks | show 3 [--events]   # history, full record, audit log
 foreman projects [scan|show X|link A B tests "note"|test X "cmd"]
@@ -193,6 +197,33 @@ Details: foreman show 2
 a missing migration. Minor issues are fixed by the workers instead. Dismissed items are never shown again.
 Workers never run git. The one exception is a "run `git init`" suggestion for a project without a repository: when you
 accept it (`do s6`), Foreman itself runs `git init` (no commit), so it can detect and review changes there.
+
+## When a provider stops
+
+Every attempt at a step is journaled (provider, session, why it ended) and the session id is saved the moment the
+CLI prints it, so closing the terminal or a crash loses nothing. What happens next depends on why it stopped:
+
+| Why | What Foreman does |
+|---|---|
+| Foreman's time limit | resumes the **same session** with double the time (up to `timeout_retries`) |
+| Network drop, API overload | resumes the **same session** after 30 s, 2 min, 5 min (`transient_retries`) |
+| Finished but no final report | asks the **same session** for the report only |
+| Usage limit (e.g. Claude "resets 7:10pm") | rests that provider until its reset; **another provider takes over** with a handoff: who worked on it and why it stopped, files changed since the step started, the worker's progress notes, its last actions |
+| Login problem / expired key | rests it for 6 h, tells you to renew the key, another provider takes over |
+| Context window full | a fresh session of the same provider, with the handoff |
+| Crash | one fresh retry with the handoff, then the next provider |
+| Every provider out of limits | waits for the earliest stated reset (doesn't count), otherwise checks every 5 min (`limit_retry_sec`) up to 10 times (`limit_retries`), then pauses; a reset more than `limit_wait_max_hours` away pauses at once. Esc Esc stops the wait. |
+| Foreman itself closed or killed | "continue" resumes the cut-off session where it stopped |
+
+A provider that reports it is near its usage window (Claude does, `pressure_percent`, default 90%) keeps the
+sessions it has, but new work goes to the others first.
+
+When a worker needs a decision (a business rule, or a technical choice that changes what was asked) the task waits
+with the question, its options and the worker's recommendation; your answer goes back into **the same session**.
+The steps after an unfinished one wait instead of being skipped, and a half-done plan is never "fixed" or written
+up. The report says where the task stopped and what continuing does; "continue" (or "next") carries on with that
+task, in the same sessions. It is re-planned only when you add instructions ("continue, but use the CSV dumps") or
+the code changed since it last ran.
 
 ## Tests
 

@@ -16,7 +16,7 @@ from orchestrator import ui
 from orchestrator.app import build_engine, spawn_task
 from orchestrator.config import set_first_provider, set_option
 from orchestrator.engine import BARE_YES_RE, NO_RE, RESUME_RE, YES_RE, clean_text, is_task_status_query
-from orchestrator.report import render_report
+from orchestrator.report import OUTCOME, clock, option_labels, render_report, stopped_at
 from orchestrator.store import ACTIVE
 from orchestrator.util import short
 
@@ -144,7 +144,10 @@ class Chat:
         out = [ui.box(lines, color=ui.FRAME)]
         if proj:
             for t in [t for t in self.eng.store.all() if t["status"] in ACTIVE and proj.name in t["projects"]][:3]:
-                out.append(ui.c(f"  open task #{t['id']} · {short(t['title'], 60)} ({t['status'].replace('_', ' ')})", ui.GREY))
+                asks = sum(1 for q in t["questions"] if not q.get("answer"))
+                where = f"{asks} question{'s' if asks != 1 else ''} for you" if asks else stopped_at(t)
+                out.append(ui.c(f"  open task #{t['id']} · {short(t['title'], 60)} ({t['status'].replace('_', ' ')}"
+                                + (f": {short(where, 90)}" if where else "") + ")", ui.GREY))
         out.append(ui.c("  Try: \"what's the current state of this project?\"", ui.GREY))
         return "\n" + "\n".join(out) + "\n"
 
@@ -526,19 +529,25 @@ class Chat:
             self._offer_next(task)
         if not open_q or not ui.TTY:
             return
-        q = open_q[0]
-        options = {"approval": ["Yes, go ahead", "No, cancel"], "budget": ["Yes, continue", "No, stop"]}.get(
-            q["kind"], list(q.get("options") or []))
-        lines = [l for l in q["text"].splitlines() if not l.startswith("Go ahead?")]
-        title = "Plan needs your go-ahead" if q["kind"] == "approval" else "Needs your decision"
-        choice = ui.choose(title, [ui.md(l) for l in lines], options)
-        if choice is None:
-            ui.out(ui.c("  Answer any time by typing it below.", ui.GREY))
-            return
-        if not choice:
-            return
-        answer = {"Yes, go ahead": "yes", "No, cancel": "no", "Yes, continue": "yes", "No, stop": "no"}.get(choice, choice)
-        self._exchange(answer)
+        # One menu per question (the worker's recommendation first, marked); the answers go back together.
+        answers = []
+        for i, q in enumerate(open_q, 1):
+            labels = {"approval": ["Yes, go ahead", "No, cancel"], "budget": ["Yes, continue", "No, stop"]}.get(
+                q["kind"], option_labels(q, "Recommended"))
+            lines = [l for l in q["text"].splitlines() if not l.startswith("Go ahead?")]
+            title = "Plan needs your go-ahead" if q["kind"] == "approval" else \
+                "Needs your decision" + (f" ({i}/{len(open_q)})" if len(open_q) > 1 else "")
+            choice = ui.choose(title, [ui.md(l) for l in lines], labels)
+            if choice is None:
+                ui.out(ui.c("  Answer any time by typing it below"
+                            + (" (one per line: 1. … 2. …)." if len(open_q) > 1 else "."), ui.GREY))
+                return
+            if not choice:
+                return
+            choice = {"Yes, go ahead": "yes", "No, cancel": "no", "Yes, continue": "yes", "No, stop": "no"}.get(
+                choice, choice)
+            answers.append(re.sub(r" \(Recommended\)$", "", choice))
+        self._exchange(answers[0] if len(answers) == 1 else "\n".join(f"{i}. {a}" for i, a in enumerate(answers, 1)))
 
     def _offer_next(self, task: Dict[str, Any]) -> None:
         """After a lifecycle step, offer the recommended next one once (Esc or 'Not now' = keep chatting)."""
@@ -547,6 +556,16 @@ class Chat:
             return
         self._offered_next.add(task["id"])
         title = nxt.get("title") or nxt["mode"]
+        if nxt.get("resume"):  # unfinished: the way forward is carrying on with this task, where it stopped
+            if task["status"] == "paused":
+                return  # it continues by itself once a provider is back, or when the user says so
+            choice = ui.choose("Not finished", [f"{title}: {nxt.get('reason', '')}"], [f"{title}", "Not now"],
+                               allow_text=False, color=ui.FRAME, esc="decide later")
+            if choice and choice.startswith("Continue"):
+                self._exchange(f"continue #{nxt['resume']}")
+            else:
+                ui.out(ui.c("  Say \"continue\" whenever you want to pick it up.", ui.GREY))
+            return
         choice = ui.choose("Next step", [f"{title}: {nxt.get('reason', '')}"], [f"Start {title}", "Not now"],
                            allow_text=False, color=ui.FRAME, esc="decide later")
         if choice and choice.startswith("Start"):
@@ -561,8 +580,9 @@ class Chat:
             return ""
         head = lines[0]
         mark = head[:1]
-        color = {"✔": ui.GREEN, "✘": ui.RED, "?": ui.YELLOW, "◐": ui.YELLOW, "!": ui.YELLOW}.get(mark, ui.ACCENT)
-        body = head[1:].strip() if mark in "✔✘◐?…!" else head
+        color = {"✔": ui.GREEN, "✘": ui.RED, "?": ui.YELLOW, "◐": ui.YELLOW, "!": ui.YELLOW, "‖": ui.YELLOW}.get(
+            mark, ui.ACCENT)
+        body = head[1:].strip() if mark in "✔✘◐?…!‖" else head
         body = re.sub(r"^#\d+\s+", "", body)  # task numbers stay in the "Details: /show N" footer
         head_lines = ui.wrap_block(body, indent="  ").splitlines()
         out = [ui.c(ui.MARK, color) + " " + ui.c(head_lines[0], ui.BOLD)] + [ui.c(h, ui.BOLD) for h in head_lines[1:]]
@@ -637,6 +657,8 @@ class Phase:
             self.verb, self.who = verb, provider or self.who
         elif e == "step_failed":  # another provider may retry the step; the next step_start says so
             self.verb = "Recovering from a failed attempt"
+        elif e == "waiting":
+            self.verb, self.who = f"Waiting for a provider (next try at {clock(ev.get('until'))})", ""
         elif e == "step_done":
             self.running.pop(ev.get("project", ""), None)
             if self.running:
@@ -708,7 +730,16 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None) -> Optional[
         ok = ev.get("status") == "done"
         return ui.result(("✓ " if ok else "! ") + (ev.get("summary", "") or "done"), ui.GREEN if ok else ui.YELLOW)
     if e == "step_failed":
-        return ui.result(f"{ev.get('provider')} failed: {ev.get('error') or ''}", ui.RED)
+        cause = OUTCOME.get(ev.get("cause") or "", "")
+        return ui.result(f"{ev.get('provider')} {'stopped: ' + cause if cause else 'failed'}: {ev.get('error') or ''}",
+                         ui.YELLOW if ev.get("cause") in ("limit", "transient", "timeout", "output") else ui.RED)
+    if e == "step_retry":
+        return ui.result(f"{ev.get('provider')} lost its connection; resuming its session in {ev.get('wait')}s", ui.YELLOW)
+    if e == "step_timeout":
+        return ui.result(f"{ev.get('provider')} ran out of time; continuing its session with up to "
+                         f"{int(ev.get('next_timeout') or 0) // 60} min", ui.YELLOW)
+    if e == "waiting":
+        return ui.tool("Wait", short(ev.get("reason", ""), 90), f"next try at {clock(ev.get('until'))}", color=ui.YELLOW)
     if e == "check":
         ok = ev.get("ok")
         return ui.tool("Check", f"{ev.get('project')}: {ev.get('command')}", color=ui.GREEN if ok else ui.RED) + "\n" + \
