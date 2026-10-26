@@ -134,5 +134,38 @@ class StatusLineTest(unittest.TestCase):
             ws.cleanup()
 
 
+class PrettyTextTest(unittest.TestCase):
+    def test_plain_command_output_gets_structure_and_colour(self):
+        with mock.patch.object(ui, "TTY", True):
+            text = ui.pretty("Lifecycle of api:\n  orders     Development (done, 2026-10-26) → next: QA\n"
+                             "Recommended: QA for orders. Say \"next\" to start it.")
+            lines = text.split("\n")
+            self.assertIn(ui.BOLD + ui.ACCENT + "Lifecycle of api", lines[0], "a 'Heading:' line")
+            self.assertIn(ui.BOLD + "orders" + ui.RESET, lines[1], "the key of a two-column row")
+            self.assertIn(ui.GREEN + "done", lines[1], "states in colour")
+            self.assertIn(ui.BOLD + "Recommended:", lines[2])
+            self.assertIn(ui.BLUE + '"next"', lines[2], "a quoted command")
+            self.assertIn(ui.ACCENT + "#12", ui.emphasize("see #12"))
+            self.assertNotIn(ui.BLUE, ui.emphasize('{"id": "x1", "source": "off"}'), "JSON stays plain")
+
+    def test_lifecycle_and_tasks_views(self):
+        from orchestrator.chat import Chat
+        ws = Workspace()
+        try:
+            chat = Chat(ws.api, engine=make_engine(ws, Script()))
+            data = {"project": "orders-api", "modes": [], "decisions": 2, "recommended": {"feature": "vip", "mode": "qa"},
+                    "features": {"vip": {"stage": "development", "status": "done", "updated": "2026-10-26T10:00",
+                                         "next": "qa", "next_reason": "test it"}}}
+            with mock.patch.object(chat.eng, "lifecycle_data", return_value=data):
+                view = chat._lifecycle_view()
+            for part in ("Lifecycle of orders-api", "vip", "Development", "done", "2026-10-26", "next: ", "QA",
+                         "Recommended: ", "2 confirmed decisions"):
+                self.assertIn(part, view)
+            chat.eng.store.new_task("add currency", ws.api)
+            self.assertIn("add currency", chat._tasks_view())
+        finally:
+            ws.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

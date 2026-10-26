@@ -440,9 +440,7 @@ class Chat:
         if cmd == "/status":
             return self._style(self.eng.status(arg or self.focus, self.cwd)["report"])
         if cmd == "/tasks":
-            rows = [f"#{t['id']:<4} {t['status'].replace('_', ' '):<12} {short(t['title'], 70)}"
-                    for t in self.eng.store.all()[:12]]
-            return "\n".join(rows) or "No tasks yet."
+            return self._tasks_view()
         if cmd == "/show":
             cands = self.eng.store.resolve(arg or self.focus, fallback=False)
             return self.render(cands[0]) if cands else "Not found."
@@ -480,18 +478,27 @@ class Chat:
         if cmd in ("/models", "/config"):
             return self._settings_menu(cmd[1:])
         if cmd == "/lifecycle":
-            return ui.bullet(self.eng.lifecycle_text(self.cwd))
+            return self._lifecycle_view()
         if cmd == "/doctor":
             lines = []
             for name, p in self.eng.providers.items():
                 ok, info = p.available()
                 bad = self.eng.unhealthy().get(name)
                 mark = ui.c("✔", ui.GREEN) if ok and not bad else ui.c("✘", ui.RED)
-                lines.append(f"  {mark} {name:<12} {('skipped: ' + bad) if bad else info}")
+                lines.append(f"  {mark} {ui.c(name.ljust(12), ui.BOLD)} "
+                             + (ui.c("skipped: " + bad, ui.YELLOW) if bad else ui.emphasize(info, True)))
             return "\n".join(lines)
         if cmd == "/suggestions":
             items = [s for s in self.eng.store.suggestions() if s["status"] == "open"]
-            return "\n".join(f"[{s['id']}] {s['text']}" for s in items) or "No open suggestions."
+            if not items:
+                return ui.bullet("No open suggestions.", ui.GREY)
+            out = [ui.c(ui.MARK, ui.ACCENT) + " " + ui.c(f"Open suggestions ({len(items)})", ui.BOLD)]
+            for s in items:
+                out.append(ui.wrap_block(ui.md(s["text"]), indent="          ", first="    " + ui.c(f"[{s['id']}]", ui.BOLD, ui.ACCENT) + " "))
+                if s.get("why"):
+                    out.append(ui.c(ui.wrap_block(s["why"], indent="          ", first="          "), ui.GREY))
+            out.append(ui.c(f"    → say \"do {items[0]['id']}\" or \"dismiss {items[0]['id']}\"", ui.GREY))
+            return "\n".join(out)
         return f"Unknown shortcut {cmd}. /help lists them."
 
     # ------------------------------------------------------------------ execution
@@ -780,8 +787,52 @@ class Chat:
                 plain = line.strip()
                 bullet_line = re.match(r"^\s*([-•*]|\d+\.)\s", line)
                 cont = indent + (" " * (len(row.group(1)) + len(row.group(2))) if row else "  " if bullet_line else "")
-                wrapped = ui.wrap_block(plain, indent=cont, first=indent) if len(indent + plain) > ui.width() else indent + plain
-                out.append(ui.md(wrapped).replace("✔", ui.c("✔", ui.GREEN)).replace("✘", ui.c("✘", ui.RED)))
+                styled = ui.c(row.group(1), ui.BOLD) + row.group(2) + ui.emphasize(row.group(3), True) if row \
+                    else ui.emphasize(plain)
+                wrapped = ui.wrap_block(styled, indent=cont, first=indent) if len(indent + plain) > ui.width() \
+                    else indent + styled
+                out.append(ui.md(wrapped))
+        return "\n".join(out)
+
+    def _tasks_view(self) -> str:
+        """/tasks: recent tasks, number and state in colour, the title in full width."""
+        tasks = self.eng.store.all()[:12]
+        if not tasks:
+            return ui.bullet("No tasks yet.", ui.GREY)
+        out = [ui.c(ui.MARK, ui.ACCENT) + " " + ui.c("Recent tasks", ui.BOLD)]
+        for t in tasks:
+            state = t["status"].replace("_", " ")
+            asks = any(not q.get("answer") for q in t["questions"])
+            state = "waiting for you" if asks and t["status"] in ACTIVE else state
+            out.append("    " + ui.c(f"#{t['id']:<4}", ui.BOLD, ui.ACCENT) + " "
+                       + ui.emphasize(f"{state:<16}", True) + " " + short(t["title"], max(20, ui.width() - 30)))
+        out.append(ui.c("    → /show <number> for the full report", ui.GREY))
+        return "\n".join(out)
+
+    def _lifecycle_view(self) -> str:
+        """/lifecycle: each feature with its stage, state and date, what comes next, and the recommendation."""
+        data = self.eng.lifecycle_data(self.cwd)
+        if not data.get("project") or not data.get("features"):
+            return ui.bullet(self.eng.lifecycle_text(self.cwd))
+        modes = self.eng.modes(self.cwd)
+        title = lambda m: modes[m].title if m in modes else (m or "")  # noqa: E731
+        out = [ui.c(ui.MARK, ui.ACCENT) + " " + ui.c(f"Lifecycle of {data['project']}", ui.BOLD)]
+        for key, f in list(data["features"].items())[:8]:
+            out += ["", "    " + ui.c(key, ui.BOLD)]
+            out.append("      " + ui.c(title(f.get("stage")), ui.ACCENT, ui.BOLD) + ui.c(" · ", ui.GREY)
+                       + ui.emphasize(str(f.get("status", "")).replace("_", " "), True)
+                       + ui.c(f" · {str(f.get('updated', ''))[:10]}", ui.GREY))
+            if f.get("next") in modes:
+                out.append(ui.wrap_block(ui.c("→ next: ", ui.ACCENT) + ui.c(title(f["next"]), ui.BOLD)
+                                         + (f" — {f['next_reason']}" if f.get("next_reason") else ""),
+                                         indent="        ", first="      "))
+        rec = data.get("recommended")
+        if rec:
+            out += ["", "  " + ui.c("Recommended: ", ui.BOLD) + ui.c(title(rec["mode"]), ui.ACCENT, ui.BOLD)
+                    + f" for {rec['feature']}. Say " + ui.c('"next"', ui.BLUE) + " to start it, or pick another mode."]
+        if data.get("decisions"):
+            n = data["decisions"]
+            out.append(ui.c(f"  {n} confirmed decision{'s' if n != 1 else ''} on record (.foreman/decisions.md)", ui.GREY))
         return "\n".join(out)
 
     def _conversation(self) -> str:

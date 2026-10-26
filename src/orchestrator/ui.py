@@ -485,6 +485,55 @@ def md(text: str) -> str:
     return "\n".join(out)
 
 
+# Status words coloured wherever a state is shown (task lists, reports, lifecycle).
+STATUS_COLORS = [
+    (GREEN, r"done|answered|approved|approve|passed|ready|confirmed|ok|closed"),
+    (YELLOW, r"needs input|waiting for you|waiting|blocked|paused|partial|pending|planned|in progress|revise|skipped"),
+    (RED, r"failed|FAILED|stopped|interrupted|error|not installed|cancelled"),
+    (BLUE, r"running|planning|queued|started"),
+]
+_STATUS_RE = [(color, re.compile(rf"(?<![\w-])({words})(?![\w-])")) for color, words in STATUS_COLORS]
+
+
+def emphasize(text: str, statuses: bool = False) -> str:
+    """Inline highlights for plain text: task numbers (#12), short "quoted" commands, → arrows, ✔/✘ marks and dates;
+    with statuses=True also state words (done, failed, needs input…) in their colour. Text that already has colour
+    codes is left alone."""
+    if ANSI.search(text):
+        return text
+    text = re.sub(r"(?<![\w#])#\d+\b", lambda m: c(m.group(0), BOLD, ACCENT), text)
+    if not re.search(r'"\s*:\s*["{\[\d]', text):  # "commands" in prose; JSON keys and values stay plain
+        text = re.sub(r"\"([^\"\n]{1,30})\"", lambda m: c(f'"{m.group(1)}"', BLUE), text)
+    text = re.sub(r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?\b", lambda m: c(m.group(0), GREY), text)
+    text = text.replace("→", c("→", ACCENT)).replace("✔", c("✔", GREEN)).replace("✘", c("✘", RED))
+    if statuses:
+        for color, rx in _STATUS_RE:
+            text = rx.sub(lambda m, col=color: c(m.group(1), col), text)
+    return text
+
+
+def pretty(text: str) -> str:
+    """Plain text from a command, made readable: 'Heading:' lines bold, 'Label: …' labels bold, '  key   value' rows
+    with the key in grey, bullets/bold/code as Markdown, plus emphasize(). Already coloured lines stay as they are."""
+    out = []
+    for line in text.split("\n"):
+        if ANSI.search(line) or not line.strip():
+            out.append(line)
+            continue
+        head = re.match(r"^(\S[^:]{0,60}):$", line)
+        label = re.match(r"^(\s*)([A-Z][\w '/&-]{0,24}):(\s+)(.*)$", line)
+        row = re.match(r"^(\s{2,})(\S.{0,28}?)(\s{2,})(\S.*)$", line)
+        if head:
+            out.append(c(head.group(1), BOLD, ACCENT))
+        elif row and not re.match(r"^\s*([-•*]|\d+\.)\s", line):
+            out.append(row.group(1) + c(row.group(2), BOLD) + row.group(3) + md(emphasize(row.group(4), True)))
+        elif label:
+            out.append(label.group(1) + c(label.group(2) + ":", BOLD) + label.group(3) + md(emphasize(label.group(4))))
+        else:
+            out.append(md(emphasize(line)))
+    return "\n".join(out)
+
+
 def wrap_block(text: str, indent: str = "  ", first: str = "") -> str:
     """Wrap each line to the terminal by *visible* width (colour codes don't count), keeping bullet indents."""
     limit = width() - 1
@@ -520,7 +569,7 @@ def hint_line(left: str, right: str) -> str:
 def bullet(text: str, color: str = "") -> str:
     """'◆ text' message, continuation lines indented under the text."""
     dot = c(MARK, color or ACCENT)
-    return wrap_block(md(text), indent="  ", first=dot + " ") if not ANSI.search(text) else dot + " " + text
+    return wrap_block(pretty(text), indent="  ", first=dot + " ") if not ANSI.search(text) else dot + " " + text
 
 
 def tool(name: str, arg: str, meta: str = "", color: str = "") -> str:
