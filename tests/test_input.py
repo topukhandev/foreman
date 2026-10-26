@@ -1,6 +1,7 @@
 """The chat input: line-wise editing keys, paste-back, several lines, the grey suggestion, '@' files, dropped files."""
 
 import os
+import re
 import tempfile
 import unittest
 
@@ -101,6 +102,16 @@ class CommandMenuTest(unittest.TestCase):
         self.assertIn("/cmd00", e._hint_rows()[0])
         e._key("\x1b[A")
         self.assertIn("/cmd19", e._hint_rows()[-1], "↑ on the first wraps to the last, and it is shown")
+
+
+class HelpTest(unittest.TestCase):
+    def test_help_lists_every_command_in_aligned_sections(self):
+        from orchestrator.chat import COMMANDS, help_text
+        text = help_text()
+        for cmd, desc in COMMANDS:
+            self.assertRegex(text, rf"\n    {re.escape(cmd)} +{re.escape(desc[:20])}")
+        for title in ("Commands", "Typing", "Files and pastes", "While a task runs", "Screen"):
+            self.assertIn(f"\n  {title}\n", text)
 
 
 class SuggestionTest(unittest.TestCase):

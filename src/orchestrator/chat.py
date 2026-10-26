@@ -40,24 +40,45 @@ COMMANDS = [
     ("/doctor", "providers, health and setup"),
     ("/exit", "leave the chat (Ctrl+D)"),
 ]
-HELP = """\
-Just type what you need, for example:
-  • what's the current state of this project?
-  • add a currency to orders in the API and show it in the admin panel
-  • what's the status of my task? · continue the previous task · yes / no
-Long pastes show as [Pasted text #1 +545 lines] (up to 2000 lines per message) and are sent in full.
-Drag a file into the window ([File #1 notes.csv], images [Image #1]), press Ctrl+V with an image on the clipboard,
-or type @ to pick a file of this project. Paste the same thing again right after a chip to expand it.
-Typing: \ then Enter starts a new line · Ctrl+A/E start/end of line · Ctrl+U/K delete to start/end of line ·
-Ctrl+W delete a word · Ctrl+Y paste back what was deleted · Tab takes the grey suggestion.
-Shortcuts (optional):
-  /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)  /rename <name>  /btw <question>
-  /mode  /models  /config  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
-Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
-Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters).
-Esc interrupts a running task (say "continue" later) · Ctrl+O shows everything in full · ↑ edits a queued message;
-`foreman config copy-on-select off` gives selection back to the terminal (then hold Shift).
-While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
+# /help: sections of (key, what it does); the commands come from COMMANDS so the list never goes stale.
+HELP_EXAMPLES = ["what's the current state of this project?",
+                 "add a currency to orders in the API and show it in the admin panel",
+                 "what's the status of my task? · continue · yes / no"]
+HELP_SECTIONS = [
+    ("Typing", [("\\ then Enter", "new line"), ("Ctrl+A / Ctrl+E", "start / end of the line"),
+                ("Ctrl+U / Ctrl+K", "delete to the start / end of the line"), ("Ctrl+W", "delete a word"),
+                ("Ctrl+Y", "paste back what was deleted"), ("↑ / ↓", "earlier messages (or lines of this one)"),
+                ("Tab", "take the grey suggestion")]),
+    ("Files and pastes", [("@", "pick a file or folder of this project"),
+                          ("drag a file in", "attach it as [File #1 …] (images as [Image #1])"),
+                          ("Ctrl+V", "paste an image from the clipboard"),
+                          ("long paste", "shown as [Pasted text #1 +545 lines], sent in full (up to 2000 lines)"),
+                          ("paste again", "right after a chip: expand it")]),
+    ("While a task runs", [("Esc", "interrupt it (say \"continue\" later)"),
+                           ("Ctrl+C", "stop it, or keep it running in the background"),
+                           ("Ctrl+O", "everything so far, in full"), ("↑", "edit a message you queued"),
+                           ("/btw <question>", "a quick side question, answered right away")]),
+    ("Screen", [("wheel · PgUp/PgDn", "scroll the chat (Esc jumps back to the bottom)"),
+                ("select with the mouse", "copies to the clipboard (foreman config copy-on-select off: hold Shift)")]),
+]
+
+
+def help_text() -> str:
+    """The /help page: what to type, then each section as an aligned two-column list."""
+    sections = [("Commands", [(cmd, desc) for cmd, desc in COMMANDS])] + HELP_SECTIONS
+    width = max(len(k) for _, rows in sections for k, _ in rows) + 2
+    out = [ui.c(ui.MARK, ui.ACCENT) + " " + ui.c("Just type what you need, for example:", ui.BOLD)]
+    out += [f"    {ui.c('•', ui.ACCENT)} {ex}" for ex in HELP_EXAMPLES]
+    out.append(ui.c(ui.wrap_block("Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes "
+                                  "it; \"next\" starts the next step.", indent="    ", first="    "), ui.GREY))
+    for title, rows in sections:
+        out += ["", "  " + ui.c(title, ui.BOLD, ui.ACCENT)]
+        for key, desc in rows:
+            line = ui.wrap_block(desc, indent=" " * (width + 4), first=" " * (width + 4))
+            out.append("    " + ui.c(key.ljust(width), ui.BLUE) + line[width + 4:])
+    return "\n".join(out)
+
+
 ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2}  # not "one": "the second one"
 SECTION_TITLES = {"What changed", "Needs your decision", "Remaining", "Notes", "Worth considering (your call)",
                   "Next for you"}
@@ -415,7 +436,7 @@ class Chat:
         cmd, _, arg = text.partition(" ")
         arg = arg.strip()
         if cmd == "/help":
-            return HELP
+            return help_text()
         if cmd == "/status":
             return self._style(self.eng.status(arg or self.focus, self.cwd)["report"])
         if cmd == "/tasks":
