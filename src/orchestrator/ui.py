@@ -468,9 +468,9 @@ def md(text: str) -> str:
         if fenced:
             out.append(c("  " + line, GREY))
             continue
-        h = re.match(r"^\s*#{1,6}\s+(.*)", line)
+        h = re.match(r"^(\s*)#{1,6}\s+(.*)", line)
         if h:
-            out.append(c(h.group(1), BOLD, ACCENT))
+            out.append(h.group(1) + c(h.group(2), BOLD, ACCENT))
             continue
         quote = re.match(r"^\s*>\s?(.*)", line)
         if quote:

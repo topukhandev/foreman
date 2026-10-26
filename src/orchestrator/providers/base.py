@@ -99,7 +99,11 @@ TIMEOUT, LIMIT, TRANSIENT, AUTH, CONTEXT, OUTPUT, CRASH, STOPPED = (
     "timeout", "limit", "transient", "auth", "context", "output", "crash", "stopped")
 
 LIMIT_RE = re.compile(r"usage.?limit|session limit|rate.?limit|quota|resource.?exhausted|too many requests|\b429\b|"
-                      r"limit reached|out of (credits|requests)|credit balance|insufficient.?(credit|balance|quota)", re.I)
+                      r"limit reached|out of requests|insufficient.?quota", re.I)
+# Money, not time: an account that can't pay for the request does not recover by waiting (OpenRouter: "This request
+# requires more credits, or fewer max_tokens ... can only afford 3679"; Anthropic API: "credit balance is too low").
+BILLING_RE = re.compile(r"requires more credits|can only afford|out of credits|credit balance|insufficient.?(credit|balance|"
+                        r"funds)|payment required|\b402\b|billing", re.I)
 TRANSIENT_RE = re.compile(r"overloaded|\b(500|502|503|504|529)\b|internal server error|bad gateway|service unavailable|"
                           r"econnreset|econnrefused|etimedout|eai_again|enotfound|socket hang up|fetch failed|"
                           r"network (error|is unreachable)|connection (error|reset|refused|closed)|temporarily unavailable|"
@@ -119,6 +123,8 @@ def classify(error: str) -> str:
         return STOPPED
     if CONTEXT_RE.search(text):
         return CONTEXT
+    if BILLING_RE.search(text):
+        return AUTH  # an account problem the user has to fix: rested like a login problem
     if LIMIT_RE.search(text):
         return LIMIT
     if AUTH_RE.search(text):

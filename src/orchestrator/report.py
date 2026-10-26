@@ -277,8 +277,12 @@ def render_status(task: Dict[str, Any], changed_since: Dict[str, List[str]],
             checks[(e["project"], e["command"])] = e
     if checks:
         lines.append("  Checks    " + "  ".join(f"{'✔' if e['ok'] else '✘'} {e['project']}" for e in checks.values()))
-    if task.get("answer") and task["intent"] == "answer":
-        lines.append(f"  Answer    {short(task['answer'], 300)}")
+    if task.get("answer") and task["intent"] == "answer":  # in full, with its own lines (Markdown kept)
+        answer = [l.rstrip() for l in task["answer"].strip().splitlines()]
+        lines.append("  Answer")
+        lines += [f"    {l}" if l else "" for l in answer[:60]]
+        if len(answer) > 60:
+            lines.append(f"    … {len(answer) - 60} more lines (`foreman show {task['id']}`)")
     if task.get("waiting"):
         w = task["waiting"]
         lines.append(f"  Waiting   {w.get('reason', '')}; next try at {clock(w.get('until'))}"

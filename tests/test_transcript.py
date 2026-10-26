@@ -167,5 +167,28 @@ class PrettyTextTest(unittest.TestCase):
             ws.cleanup()
 
 
+class StatusAnswerTest(unittest.TestCase):
+    def test_status_shows_the_whole_answer_with_its_lines(self):
+        from orchestrator.report import render_status
+        ws = Workspace()
+        try:
+            eng = make_engine(ws, Script())
+            t = eng.store.new_task("check current status", ws.api)
+            answer = "Built and in QA.\n\n## Where things stand\n" + "\n".join(f"- point {i}" for i in range(12))
+            t.update(intent="answer", status="answered", answer=answer)
+            text = render_status(t, {})
+            self.assertIn("\n  Answer\n    Built and in QA.\n\n    ## Where things stand\n    - point 0\n", text)
+            self.assertIn("    - point 11", text, "nothing cut off")
+        finally:
+            ws.cleanup()
+
+    def test_a_credits_error_rests_the_provider_like_a_login_problem(self):
+        from orchestrator.providers.base import AUTH, LIMIT, classify
+        self.assertEqual(classify("This request requires more credits, or fewer max_tokens. You requested up to "
+                                  "32000 tokens, but can only afford 3679."), AUTH)
+        self.assertEqual(classify("Your credit balance is too low"), AUTH)
+        self.assertEqual(classify("You've hit your usage limit"), LIMIT)
+
+
 if __name__ == "__main__":
     unittest.main()

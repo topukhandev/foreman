@@ -779,6 +779,8 @@ class Chat:
                 out.append(ui.c("  " + line, ui.GREY))
             elif line in SECTION_TITLES:
                 out.append("  " + ui.c(line, ui.BOLD))
+            elif re.fullmatch(r"  [A-Z][a-z]+", line):  # a label above a block (the full answer in a status report)
+                out.append("    " + ui.c(line.strip(), ui.BOLD))
             elif not line.strip():
                 out.append("")
             else:

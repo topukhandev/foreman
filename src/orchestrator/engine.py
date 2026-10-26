@@ -52,7 +52,7 @@ BARE_YES_RE = re.compile(r"^\s*(y|yes|yeah|yep|ok|okay|sure|go|go ahead|proceed|
 NO_RE = re.compile(r"^\s*(n|no|nope|cancel|stop|abort|don'?t)\s*[.!]*\s*$", re.I)
 # Why an attempt stopped, as the next worker is told.
 STOP_REASONS = {TIMEOUT: "Foreman's time limit", LIMIT: "the provider's usage limit", TRANSIENT: "a network or API error",
-                AUTH: "a login problem", CONTEXT: "a full context window", OUTPUT: "a missing final report",
+                AUTH: "a login or billing problem", CONTEXT: "a full context window", OUTPUT: "a missing final report",
                 "crash": "the process stopping unexpectedly", "interrupted": "Foreman being stopped or closed",
                 STOPPED: "you stopping the task"}
 TRANSIENT_WAITS = (30, 120, 300)
@@ -1641,7 +1641,7 @@ class Engine:
         return bool(p and p.available()[0] and name not in self.unhealthy())
 
     def _provider_failed(self, name: str, kind: str, error: str, retry_at: Optional[float] = None) -> None:
-        """Rest a provider that can't work right now: a login problem for 6 h; a usage limit until its stated reset, or
+        """Rest a provider that can't work right now: a login or billing problem for 6 h; a usage limit until its stated reset, or
         until the next periodic check when it didn't say. Other failures don't make a provider unusable."""
         now = time.time()
         if kind == AUTH:
