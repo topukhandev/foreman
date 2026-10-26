@@ -63,11 +63,16 @@ This opens a chat like `claude` or `agy`. You type in plain language:
 - "what's the status of my task?"
 - "continue"
 
-Press Esc twice to stop a running task (Ctrl+C offers stop or keep running in the background).
+Press Esc to interrupt a running task ("Interrupted by user"; say "continue" later). Ctrl+C offers stop or keep it
+running in the background.
 
 While a task runs you see who is working (`◜ Working on orders-api with claude… (27s)`) and what it is doing
-live: `◆ Implement(orders-api) · claude` with `╰ Read(server.js)`, `╰ Edit(server.js)` underneath, then checks
-and review. Typing `/` opens a command menu (↑/↓, Tab or Enter). Providers that fail to log in (for example
+live: `◆ Implement(orders-api) · claude` with its tool calls lined up underneath (`╰ Read(server.js)`, then
+`Edit(server.js)` aligned under it), then checks and review. Output longer than three lines ends with
+`… +N lines (ctrl+o to expand)`; Ctrl+O shows the whole conversation with everything in full (q or Esc closes it).
+A failing check shows the start of its output. Messages you type meanwhile are queued (↑ takes the last one back to
+edit). `/btw <question>` asks a quick side question: it is answered on the spot, read-only, also while a task runs,
+and it isn't saved in the conversation. Typing `/` opens a command menu (↑/↓, Tab or Enter). Providers that fail to log in (for example
 an expired API key) are skipped for a few hours and shown in the welcome box. Ctrl+C lets you
 stop the task or keep it running in the background. Decisions such as approving a cross-project plan or
 answering a business question appear as an arrow-key menu. Press Esc to decide later by typing. Shortcuts
@@ -84,11 +89,25 @@ attach it as `[Image #1]`; the file path goes to the AI, which can open it. Clip
 `xclip` or `pngpaste` if installed, otherwise GTK through `python3-gi`. Requests too long for a command line
 (a very large paste) are handed to the AI as a file.
 
+Typing works like Claude Code: `\` then Enter starts a new line (each line gets its own row; ↑/↓ move between
+lines), Ctrl+A / Ctrl+E go to the start / end of the line, Ctrl+U / Ctrl+K delete to the start / end of the line,
+Ctrl+W deletes a word, and Ctrl+Y pastes back what those removed. Type `@` to pick a file or folder of this project
+from a list (the AI gets the path). Dragging in any other file adds it as `[File #1 notes.csv]`. After an answer, a
+suggested next message (the first "Next for you" item) waits in grey in the empty input: Tab or → takes it,
+typing ignores it (`ui.prompt_suggestions`). Questions from the planner or a worker appear as Claude Code-style
+panels: each option has a short label with a grey description under it, the recommendation first, and the last row
+takes your own answer as you type. Several questions show as chips across the top (←/→ between them) with a review
+step before they are sent together. A status line under the input shows the project, mode, the task in focus and
+each provider's model (`ui.status_line`).
+
 Conversations are saved per project. `/resume` (or `foreman -r`) lists earlier chats in the current project
 with ↑/↓ and restores the transcript and its context; `foreman -c` continues the latest one. The chat runs in
 its own screen like vim, so your terminal is restored as it was when you exit. The mouse wheel or PgUp/PgDn
 scroll the whole conversation (back to the welcome box) while the input box stays at the bottom; typing or Esc
-returns to the latest output, and ↑/↓ stay for your earlier messages. Select text with the mouse (press, drag,
+returns to the latest output, and ↑/↓ stay for your earlier messages. While you are scrolled up, the last message
+you sent above the view stays pinned on the top row (click it to go there) and a bar at the bottom reads
+"Jump to bottom · N new messages" (click it or press Esc). The terminal title shows `Foreman · <conversation>`;
+`/rename <name>` names the conversation. Select text with the mouse (press, drag,
 release), in the conversation or in what you are typing, and it is copied to the clipboard, with a "N characters copied to clipboard" note (needs `xclip`,
 `wl-clipboard` or `pbcopy`, or `python3-gi`; over SSH it uses the terminal's own clipboard escape). Turn this off with
 `foreman config copy-on-select off` (`ui.copy_on_select`), then hold Shift to select with the terminal itself.
@@ -227,7 +246,9 @@ its own default. The planner rates each step light or standard; **light steps an
 your choice** (when the model has a lower level), everything else, review included, runs exactly as chosen. Reports
 show what ran ("Models  claude sonnet (xhigh) ×3").
 
-`foreman config` lists these settings with their current values in a panel that leaves nothing in the chat; Enter flips a true/false setting on the spot and opens a sub-panel for the others, Esc closes:
+`foreman config` lists these settings with their current values in a panel that leaves nothing in the chat; typing
+filters the list, Enter flips a true/false setting on the spot and opens a sub-panel for the others, ←/→ switch to
+the Status tab (version, config file, projects, what each provider runs), Esc closes:
 
 | Setting | |
 |---|---|
@@ -235,6 +256,8 @@ show what ran ("Models  claude sonnet (xhigh) ×3").
 | Switch provider automatically at a limit | yes: another provider takes over the step; no: Foreman waits for that provider's reset and continues in the same session |
 | Models and effort | the menu above |
 | Planner · first worker | which provider plans and reviews · which one works first |
+| Output style | how answers and documents are written: Default, Concise, Explanatory (adds a ★ Insight), Learning (leaves small steps for you), Proactive (points out the next action or risk) |
+| Suggest your next message · status line | the grey suggestion in the input · the line under it |
 | Notification · recent sessions · copy on select | one desktop notification per task run · fork your recent sessions · copy selected text in the chat |
 
 The short forms still work (`foreman config display headless`, `foreman config auto-switch off`, ...).

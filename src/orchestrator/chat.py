@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,6 +29,7 @@ COMMANDS = [
     ("/resume", "pick up an earlier conversation in this project"),
     ("/new", "start a new conversation"),
     ("/rename", "name this conversation (shown in /resume and the terminal title)"),
+    ("/btw", "a quick side question, answered on the spot (not saved; works while a task runs)"),
     ("/display", "terminal | headless: show workers in windows or run under the hood"),
     ("/suggestions", "open suggestions"),
     ("/providers", "choose the planner (and first worker) with ↑/↓"),
@@ -49,7 +51,7 @@ or type @ to pick a file of this project. Paste the same thing again right after
 Typing: \ then Enter starts a new line · Ctrl+A/E start/end of line · Ctrl+U/K delete to start/end of line ·
 Ctrl+W delete a word · Ctrl+Y paste back what was deleted · Tab takes the grey suggestion.
 Shortcuts (optional):
-  /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)  /rename <name>
+  /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)  /rename <name>  /btw <question>
   /mode  /models  /config  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
 Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters).
@@ -134,7 +136,7 @@ class Chat:
         out = self.respond(line)
         if out:
             ui.out("\n" + out + "\n")
-        if not line.startswith(("/resume", "/new", "/rename")):
+        if not line.startswith(("/resume", "/new", "/rename", "/btw")):
             named = bool(self.history.data["title"])
             self.history.append(line, out or "", self.turns, self.focus, shown=shown)
             if not named and self.history.data["title"]:
@@ -428,6 +430,13 @@ class Chat:
             self.history.start_new()
             self._title()
             return ui.bullet("Started a new conversation. The previous one is in /resume.")
+        if cmd == "/btw":
+            if not arg:
+                return ui.bullet("Ask a quick side question: /btw <question>. It isn't saved in the conversation, "
+                                 "and it works while a task runs.", ui.GREY)
+            with ui.Spinner("Answering on the side", footer=False):
+                answer = self.eng.side_question(arg, self.cwd, self._conversation())
+            return btw_block(arg, answer)
         if cmd == "/rename":
             if not arg:
                 return ui.bullet(f"This conversation is \"{self.history.data['title'] or '(untitled)'}\". "
@@ -513,6 +522,20 @@ class Chat:
         keys = _KeyReader()
         spin.begin()
         stopping = False
+        side: List[Dict[str, Any]] = []  # /btw questions typed meanwhile: answered in the background, shown here
+
+        def ask_aside() -> None:
+            for q in [q for q in spin.queued if str(q).startswith("/btw ")]:
+                spin.queued.remove(q)
+                job: Dict[str, Any] = {"q": str(q)[5:].strip()}
+                job["thread"] = threading.Thread(target=lambda j=job: j.update(answer=self.eng.side_question(
+                    j["q"], self.cwd, self._conversation(), running=task_id)), daemon=True)
+                job["thread"].start()
+                side.append(job)
+                spin.say(ui.c(f"  ↳ by the way: {short(job['q'], 100)} · answering…", ui.GREY))
+            for job in [j for j in side if "answer" in j]:
+                side.remove(job)
+                spin.say(btw_block(job["q"], job["answer"]))
 
         def stop() -> None:
             nonlocal stopping
@@ -532,6 +555,7 @@ class Chat:
                             spin.say(ui.result("Interrupted by user · say \"continue\" to pick it up where it stopped",
                                                ui.RED))
                         return
+                    ask_aside()
                     data = keys.read(0.25)
                     if data == "\x0f":  # Ctrl+O: the details view, while the task carries on
                         spin.pause()
@@ -559,6 +583,11 @@ class Chat:
                     self.background.append(task_id)
                     return
         finally:
+            if side:  # side questions still being answered: their answers come before the result
+                spin.resume("Finishing your side question")
+                for job in side:
+                    job["thread"].join(self.eng.cfg.limits.brain_timeout_sec)
+                ask_aside()
             spin.end()
             keys.close()
             self.queue += spin.pending()
@@ -885,6 +914,12 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None, follows: boo
     if e == "plan_failed":
         return ui.result(f"planning failed: {ev.get('error', '')}", ui.RED)
     return None
+
+
+def btw_block(question: str, answer: str) -> str:
+    """A /btw answer: set apart from the conversation (it isn't saved in it)."""
+    return "\n" + ui.c(f"  ↳ by the way: {short(question, 100)}", ui.ACCENT, ui.BOLD) + "\n" + \
+        ui.wrap_block(ui.md(answer), indent="    ", first="    ")
 
 
 def _seconds(task: Dict[str, Any]) -> int:

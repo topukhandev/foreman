@@ -61,6 +61,8 @@ PLAN_SCHEMA = {
     "required": ["intent", "title", "projects", "steps", "questions"],
 }
 
+BTW_SCHEMA = {"type": "object", "properties": {"answer": _STR}, "required": ["answer"]}
+
 DOC_SCHEMA = {
     "type": "object",
     "properties": {"title": _STR, "document": _STR, "summary": _STR, "open_problems": _STRS, "next_for_you": _STRS},
@@ -273,6 +275,24 @@ class Brain:
         parts.append(PLANNING_RULES)
         parts.append(style_rule(style))
         return "\n\n".join(p for p in parts if p)
+
+    @staticmethod
+    def btw_prompt(question: str, cwd: str, registry_ctx: str, history: str, running: str = "",
+                   conversation: str = "") -> str:
+        """/btw: a quick side question, answered on the spot (read-only, no plan, nothing changed)."""
+        return "\n\n".join(x for x in [
+            "You are Foreman's assistant answering a quick side question while the user works (a 'by the way'). "
+            "Answer it directly and briefly from the context below, reading a file or two only if you must. You are "
+            "read-only: never change anything, plan work or start tasks. If it really needs real work, say so in one "
+            "line and suggest how to ask for it.",
+            f"RECENT CONVERSATION:\n{conversation}" if conversation else "",
+            f"TASK RUNNING RIGHT NOW (don't interfere with it):\n{running}" if running else "",
+            f"QUESTION:\n{question}",
+            f"CURRENT DIRECTORY: {cwd}",
+            f"PROJECT REGISTRY:\n{registry_ctx}",
+            f"RECENT TASKS:\n{history}" if history else "",
+            "Write the answer in short Markdown (a direct answer first, a few bullets at most) in 'answer'.",
+        ] if x)
 
     @staticmethod
     def document_prompt(task: Dict[str, Any], mode_title: str, output_spec: str, findings: str, checks: str,

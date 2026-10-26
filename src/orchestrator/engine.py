@@ -24,8 +24,8 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from orchestrator.brain import (DOC_SCHEMA, PLAN_SCHEMA, QUESTION_RULE, REVIEW_SCHEMA, STEP_SCHEMA, Brain,
-                                BrainError, task_context)
+from orchestrator.brain import (BTW_SCHEMA, DOC_SCHEMA, PLAN_SCHEMA, QUESTION_RULE, REVIEW_SCHEMA, STEP_SCHEMA,
+                                Brain, BrainError, task_context)
 from orchestrator.budget import Budget
 from orchestrator.clipboard import image_dirs
 from orchestrator.config import Choice, Config
@@ -651,6 +651,26 @@ class Engine:
             if task["status"] != "blocked":
                 task["status"] = "answered"
             return
+
+    def side_question(self, question: str, cwd: str, conversation: str = "", running: Optional[str] = None) -> str:
+        """/btw: answer a quick question on the side, read-only, without a task (nothing is recorded or changed, and a
+        running task is left alone). Returns the answer, or one line saying why there is none."""
+        sel = self.registry.select(question, cwd)
+        names = {p.name for p in sel.focus} | {p.name for _, p in sel.neighbors}
+        history = "\n".join(f"- #{t['id']} [{t['status']}] {t['title']}" for t in self.store.all()[:30]
+                            if names & set(t["projects"]))[:2000]
+        task = self.store.load(running) if running else None
+        now = f"#{task['id']} {task['title']} ({task['status']}): " + "; ".join(
+            f"[{s['status']}] {s['project']}: {short(s.get('summary') or s['instructions'], 100)}" for s in task["steps"]) \
+            if task else ""
+        anchor = sel.anchor.path if sel.anchor else (sel.focus[0].path if sel.focus else cwd)
+        try:
+            data = self._brain().call(Brain.btw_prompt(question, cwd, self.registry.render_context(sel), history, now,
+                                                       conversation), BTW_SCHEMA, anchor,
+                                      extra_dirs=[p.path for p in sel.focus if p.path != anchor][:4], purpose="plan")
+        except BrainError as e:
+            return f"I couldn't answer that on the side right now ({short(str(e), 160)})."
+        return clean_text(str(data.get("answer") or "").strip()) or "No answer came back."
 
     # ------------------------------------------------------------------ planning
     def _plan(self, task: Dict[str, Any]) -> bool:

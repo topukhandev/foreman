@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from orchestrator.brain import DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA  # noqa: E402
+from orchestrator.brain import BTW_SCHEMA, DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA  # noqa: E402
 from orchestrator.config import load_config  # noqa: E402
 from orchestrator.engine import Engine  # noqa: E402
 from orchestrator.providers.base import RunRequest, RunResult  # noqa: E402
@@ -94,6 +94,7 @@ class Script:
         self.review: Callable[[RunRequest], Dict] = lambda req: {"verdict": "approve", "summary": "looks right", "issues": []}
         self.document: Callable[[RunRequest], Dict] = lambda req: {"title": "Doc", "document": "# Doc\n\nBody.",
                                                                    "summary": "Wrote the document."}
+        self.btw: Callable[[RunRequest], Dict] = lambda req: {"answer": "**42** rows."}
         self.fail_steps = False
         self.delay = 0.0
         self.log: List[str] = []
@@ -110,6 +111,9 @@ class Script:
             if req.schema is REVIEW_SCHEMA:
                 self.log.append(f"{provider_name}:review")
                 return RunResult(True, "", session_id=f"{provider_name}-rev", data=self.review(req))
+            if req.schema is BTW_SCHEMA:
+                self.log.append(f"{provider_name}:btw")
+                return RunResult(True, "", data=self.btw(req))
             assert req.schema is STEP_SCHEMA
             self.log.append(f"{provider_name}:step:{os.path.basename(req.cwd)}")
             if self.delay:
