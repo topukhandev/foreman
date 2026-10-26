@@ -273,13 +273,25 @@ class MenuTest(Base):
         self.assertEqual(self.asked[1][0], "opencode: backend")
         self.assertEqual(self.eng.cfg.providers["opencode"].chosen(), Choice("opencode/beam-free", "medium"))
         self.asked.clear()
-        text = self.run_menu(menus.models_menu, ["opencode", "openrouter", "m3", "openrouter/m3", "high"])
+        text = self.run_menu(menus.models_menu, ["opencode", "openrouter", "M[3]$", "openrouter/m3", "high"])
         titles = [t for t, _, _ in self.asked]
         self.assertEqual(titles, ["Provider", "opencode: backend", "Find a model", "opencode: model",
                                   "opencode: effort for openrouter/m3"])
         self.assertTrue(self.asked[3][1][1].startswith("openrouter/m3"), self.asked[3][1])
         self.assertIn("opencode: openrouter/m3 · effort high", text)
         self.assertEqual(self.eng.cfg.providers["opencode"].effort_levels(), ["low", "high"])
+
+    def test_the_model_search_is_a_regex(self):
+        ms = [ModelInfo("openrouter/deepseek/deepseek-v4:free", "DeepSeek V4 (free)"),
+              ModelInfo("openrouter/deepseek/deepseek-r2", "DeepSeek R2"),
+              ModelInfo("openrouter/meta/llama-4-free", "Llama 4 Free")]
+        ids = lambda found: [m.id.split("/")[-1] for m in found]  # noqa: E731
+        self.assertEqual(ids(menus.search(ms, "deepseek.*free")), ["deepseek-v4:free"])
+        self.assertEqual(ids(menus.search(ms, "DEEPSEEK")), ["deepseek-v4:free", "deepseek-r2"], "not case sensitive")
+        self.assertEqual(ids(menus.search(ms, "(llama|r2)")), ["deepseek-r2", "llama-4-free"])
+        self.assertEqual(ids(menus.search(ms, "^openrouter/meta")), ["llama-4-free"])
+        self.assertEqual(menus.search(ms, "nothing"), [])
+        self.assertIsNone(menus.search(ms, "(unclosed"), "an invalid regex is reported, not a crash")
 
     def test_cli_default_and_cancelling(self):
         text = self.run_menu(menus.models_menu, ["claude", "CLI default"])

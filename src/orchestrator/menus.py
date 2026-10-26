@@ -5,6 +5,7 @@ themselves (Provider.list_models), so a new model or level shows up without a Fo
 a short text for the caller to show ("" / None when nothing changed). Needs a terminal: callers print a plain summary
 instead when there isn't one."""
 
+import re
 from typing import List, Optional
 
 from orchestrator import ui
@@ -97,14 +98,17 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
             return None
         pool = [m for m in models if m.group == groups[glabels.index(g)]]
     while len(pool) > MANY:
-        term = ui.choose("Find a model", [f"{len(pool)} models. Type part of a name to narrow the list."],
+        term = ui.choose("Find a model", [f"{len(pool)} models. Type a regex to narrow the list, e.g. deepseek.*free "
+                                          "(not case sensitive; matches the id and the name)."],
                          [f"Show all {len(pool)}"], color=ui.FRAME, esc="cancel")
         if term is None:
             return None
         if term.startswith("Show all") or not term:
             break
-        hits = [m for m in pool if term.lower() in (m.id + " " + m.name).lower()]
-        if hits:
+        hits = search(pool, term)
+        if hits is None:
+            ui.out(ui.c(f"  '{term}' is not a valid regex.", ui.YELLOW))
+        elif hits:
             pool = hits
         else:
             ui.out(ui.c(f"  No model matches '{term}'.", ui.YELLOW))
@@ -122,6 +126,15 @@ def _pick_model(eng, name: str, models: List[ModelInfo]):
         i = labels.index(pick)
         return ("default", None) if i == 0 else (pool[i - 1].id, pool[i - 1])
     return ("default", None) if not pick else (pick, next((m for m in models if m.id == pick), None))
+
+
+def search(models: List[ModelInfo], pattern: str) -> Optional[List[ModelInfo]]:
+    """Models whose id or name match a regex (not case sensitive); None when the pattern isn't a valid regex."""
+    try:
+        rx = re.compile(pattern.strip(), re.I)
+    except re.error:
+        return None
+    return [m for m in models if rx.search(m.id) or rx.search(m.name)]
 
 
 def _levels_for_typed(models: List[ModelInfo]) -> List[str]:
