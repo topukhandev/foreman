@@ -51,7 +51,8 @@ Shortcuts (optional):
   /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
   /mode  /models  /config  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
-Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters). Esc twice stops a running task;
+Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters).
+Esc interrupts a running task (say "continue" later) · Ctrl+O shows everything in full · ↑ edits a queued message;
 `foreman config copy-on-select off` gives selection back to the terminal (then hold Shift).
 While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
 ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2}  # not "one": "the second one"
@@ -69,6 +70,7 @@ class Chat:
         self.background: List[str] = []      # tasks left running with Ctrl+C
         self._last_ctrl_c = 0.0
         self._last_where: Optional[str] = None
+        self._last_event: Optional[str] = None  # the last event shown: a worker's tool calls line up under the first
         self.queue: List[str] = []           # messages typed while a task was running
         self.history = ChatHistory(self.eng.cfg.home, self._project_key)
         self.last_providers: Optional[str] = None
@@ -467,27 +469,36 @@ class Chat:
                                                  f"{'terminal' if self._visual() else 'headless'}")
         keys = _KeyReader()
         spin.begin()
-        stopping, esc = False, ui.DoubleEsc()
+        stopping = False
+
+        def stop() -> None:
+            nonlocal stopping
+            stopping = True
+            try:
+                os.kill(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            spin.resume("Stopping")
         try:
             while True:
                 try:
                     pos = self._drain(events, pos, spin, phase)
                     if proc.poll() is not None:
                         self._drain(events, pos, spin, phase)
+                        if stopping:
+                            spin.say(ui.result("Interrupted by user · say \"continue\" to pick it up where it stopped",
+                                               ui.RED))
                         return
                     data = keys.read(0.25)
-                    if data:
+                    if data == "\x0f":  # Ctrl+O: the details view, while the task carries on
+                        spin.pause()
+                        ui.details()
+                        spin.resume()
+                    elif data:
+                        scrolled = ui.SCROLL.offset > 0
                         spin.key(data)
-                        pressed = esc.feed(data)
-                        if pressed == "first" and not stopping:
-                            spin.notice = "Press Esc again to stop this task (you can continue it later)"
-                        elif pressed == "second" and not stopping:
-                            stopping = True
-                            try:
-                                os.kill(proc.pid, signal.SIGTERM)
-                            except OSError:
-                                pass
-                            spin.resume("Stopping")
+                        if data == "\x1b" and not scrolled and not stopping:  # Esc (not an arrow key): interrupt
+                            stop()
                 except KeyboardInterrupt:
                     if stopping:
                         continue
@@ -497,12 +508,7 @@ class Chat:
                                        ["Keep it running in the background", "Stop it (you can continue it later)"],
                                        allow_text=False, color=ui.FRAME, esc="keep watching")
                     if choice and choice.startswith("Stop"):
-                        stopping = True
-                        try:
-                            os.kill(proc.pid, signal.SIGTERM)
-                        except OSError:
-                            pass
-                        spin.resume("Stopping")
+                        stop()
                         continue
                     if choice is None:  # Esc: keep watching
                         spin.resume()
@@ -524,9 +530,11 @@ class Chat:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                msg = format_event(ev, self._last_where)
+                msg = format_event(ev, self._last_where, follows=self._last_event == "activity")
                 if ev.get("event") in ("thinking", "step_start"):
                     self._last_where = ev.get("purpose") or ev.get("project")
+                if msg:
+                    self._last_event = ev.get("event")
                 if msg:
                     spin.say(msg)
                 if phase.update(ev):
@@ -718,8 +726,9 @@ class Phase:
         return line + (f" in {where}" if in_project else "")
 
 
-def format_event(ev: Dict[str, Any], current: Optional[str] = None) -> Optional[str]:
-    """Progress blocks: '◆ Name(arg) · provider' headers with '╰' lines under them. None = quiet."""
+def format_event(ev: Dict[str, Any], current: Optional[str] = None, follows: bool = False) -> Optional[str]:
+    """Progress blocks: '◆ Name(arg) · provider' headers with '╰' lines under them. None = quiet.
+    follows: the previous line shown was a tool call too (this one lines up under it, without a second '╰')."""
     e = ev.get("event")
     if e == "thinking":
         name = PURPOSE.get(ev.get("purpose"), ("Think", ""))[0]
@@ -728,8 +737,7 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None) -> Optional[
     if e == "activity":
         text = ev.get("text", "")
         prefix = f"[{ev['where']}] " if ev.get("where") and ev.get("where") != current else ""
-        style = (ui.GREY, ui.ITAL) if text.startswith("· ") else (ui.GREY,)
-        return ui.result(prefix + text, *style)
+        return ui.call(text, first=not follows, where=prefix)
     if e == "plan":
         steps = (ev.get("plan") or {}).get("steps") or []
         if not steps:
@@ -766,8 +774,10 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None) -> Optional[
         return ui.tool("Wait", short(ev.get("reason", ""), 90), f"next try at {clock(ev.get('until'))}", color=ui.YELLOW)
     if e == "check":
         ok = ev.get("ok")
-        return ui.tool("Check", f"{ev.get('project')}: {ev.get('command')}", color=ui.GREEN if ok else ui.RED) + "\n" + \
-            ui.result("passed" if ok else "failed", ui.GREEN if ok else ui.RED)
+        head = ui.tool("Check", f"{ev.get('project')}: {ev.get('command')}", color=ui.GREEN if ok else ui.RED)
+        if ok or not ev.get("tail"):
+            return head + "\n" + ui.result("passed" if ok else "failed", ui.GREEN if ok else ui.RED)
+        return ui.join(head, ui.result("failed", ui.RED), ui.result(ev["tail"], ui.GREY))
     if e == "review":
         r = ev.get("review") or {}
         return ui.result(f"{r.get('verdict')}: {r.get('summary', '')}", ui.GREEN if r.get("verdict") == "approve" else ui.YELLOW)

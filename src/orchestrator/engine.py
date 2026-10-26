@@ -276,7 +276,7 @@ class Engine:
         task = cands[0]
         lock = self.store.path(task["id"], "lock")
         if os.path.exists(lock) and _pid_alive(_read_int(lock)):
-            return {"task": task, "report": f"#{task['id']} is running; stop it first (Esc twice in the chat)."}
+            return {"task": task, "report": f"#{task['id']} is running; stop it first (Esc in the chat)."}
         if task["status"] in FINAL:
             return {"task": task, "report": f"#{task['id']} is already {task['status']}."}
         how = "cancelled by you" if cancel else "closed by you"
@@ -1423,7 +1423,8 @@ class Engine:
             summary = f"`{c['command']}` {'passed' if ok else 'FAILED'}" + (" (timed out)" if res.timed_out else "")
             task["evidence"].append({"kind": "check", "project": c["project"], "command": c["command"], "ok": ok,
                                      "summary": summary, "at": now_iso(), "log": log})
-            self.store.event(task["id"], "check", project=c["project"], command=c["command"], ok=ok)
+            self.store.event(task["id"], "check", project=c["project"], command=c["command"], ok=ok,
+                             **({} if ok else {"tail": "\n".join(tail.splitlines()[-40:])}))
             results.append({**c, "ok": ok, "tail": tail})
         return results
 

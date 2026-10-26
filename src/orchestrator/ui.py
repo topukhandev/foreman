@@ -209,6 +209,7 @@ class Scrollback:
 
     def __init__(self):
         self.lines: List[str] = []
+        self.details: List[str] = []  # the same transcript with shortened outputs in full (the Ctrl+O view)
         self.offset = 0          # rows scrolled up from the bottom; 0 = following the output
         self.enabled = False     # only inside FullScreen (mouse reporting on)
         self._live: List[object] = []
@@ -224,13 +225,15 @@ class Scrollback:
         with OUTPUT_LOCK:
             before = len(self.rows()) if self.offset else 0
             self.lines.extend(text.split("\n"))
+            self.details.extend((getattr(text, "full", "") or text).split("\n"))
+            del self.details[:-20000]
             self.sel = self._anchor = None  # the rows moved
             if self.offset:  # keep the view where the user scrolled it
                 self.offset += len(self.rows()) - before
                 self.render()
 
     def clear(self) -> None:
-        self.lines, self.offset, self._cache = [], 0, (0, 0, [], [])
+        self.lines, self.details, self.offset, self._cache = [], [], 0, (0, 0, [], [])
         self.sel = self._anchor = None
 
     def rows(self) -> List[str]:
@@ -488,10 +491,39 @@ def tool(name: str, arg: str, meta: str = "", color: str = "") -> str:
     return "\n" + head + (c(f" · {meta}", GREY) if meta else "")
 
 
-def result(text: str, *codes: str) -> str:
-    lines = textwrap.wrap(ANSI.sub("", text), width() - 6) or [""]
+class Expandable(str):
+    """Transcript text shown shortened; `.full` is the whole of it, for the details view (Ctrl+O)."""
+    full = ""
+
+
+def join(*parts: str) -> str:
+    """Lines joined, keeping the full form of any shortened part."""
+    text = Expandable("\n".join(parts))
+    text.full = "\n".join(getattr(p, "full", "") or p for p in parts)
+    return text
+
+
+def result(text: str, *codes: str, limit: int = 3) -> str:
+    """'╰ text' under a block, wrapped; past `limit` rows it ends with '… +N lines (ctrl+o to expand)'."""
+    lines = [w for part in ANSI.sub("", text).splitlines() or [""] for w in textwrap.wrap(part, width() - 6) or [""]]
     codes = codes or (GREY,)
-    return "\n".join(c(f"  {LINK} " if i == 0 else "    ", FRAME) + c(l, *codes) for i, l in enumerate(lines[:3]))
+
+    def show(rows: List[str]) -> str:
+        return "\n".join(c(f"  {LINK} " if i == 0 else "    ", FRAME) + c(l, *codes) for i, l in enumerate(rows))
+    if len(lines) <= limit:
+        return show(lines)
+    out = Expandable(show(lines[:limit]) + "\n" + c(f"    … +{len(lines) - limit} lines (ctrl+o to expand)", GREY))
+    out.full = show(lines)
+    return out
+
+
+def call(text: str, first: bool = True, where: str = "") -> str:
+    """A worker's tool call under its step, Claude Code-style: '╰ Read(src/app.py)' for the first one, the following
+    ones aligned under it; the tool name stands out, its argument is grey. Text starting with '· ' is the model's
+    own words between calls (grey italic). where: a '[project] ' tag when several steps run at once."""
+    m = re.match(r"(\w+)\((.*)\)$", text, re.S)
+    body = c(m.group(1), BOLD) + c(f"({m.group(2)})", GREY) if m else c(text.lstrip("· "), GREY, ITAL)
+    return clip(c(f"  {LINK} " if first else "    ", FRAME) + (c(where, GREY) if where else "") + body, width())
 
 
 def user_echo(text: str) -> str:
@@ -786,7 +818,9 @@ class LineEditor:
                 return rest, EOFError
             self._delete_forward()
             return rest, None
-        if ch == "\x16":  # Ctrl+V: an image on the clipboard (text is pasted by the terminal itself)
+        if ch == "\x0f":  # Ctrl+O: everything so far, with shortened outputs in full
+            details()
+        elif ch == "\x16":  # Ctrl+V: an image on the clipboard (text is pasted by the terminal itself)
             self._paste_clipboard_image()
         elif ch in ("\x7f", "\x08"):
             if self.cur:
@@ -1156,6 +1190,60 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
     return typed[0].strip() if is_text(sel) else items[sel]
 
 
+def details() -> None:
+    """Ctrl+O: the whole conversation with every shortened output in full, on its own screen (it opens at the end;
+    ↑/↓, PgUp/PgDn or the wheel scroll; q, Esc or Ctrl+O close it and the chat is back as it was)."""
+    if not (TTY and sys.stdin.isatty()):
+        return
+    import termios
+    import tty as _tty
+    own = not SCROLL.enabled  # outside the full-screen chat it opens (and closes) a screen of its own
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    decode = codecs.getincrementaldecoder("utf-8")("ignore").decode
+    with OUTPUT_LOCK:
+        cols = width()
+        rows = [r for line in SCROLL.details or [""] for r in hard_wrap(line, cols)]
+    height = lambda: max(1, shutil.get_terminal_size((100, 24)).lines - 1)  # noqa: E731
+    top = max(0, len(rows) - height())
+    try:
+        if own:
+            write("\033[?1049h")
+        _tty.setcbreak(fd)
+        pending = ""
+        while True:
+            h = height()
+            top = max(0, min(top, len(rows) - h))
+            foot = c(f"  Details · {min(len(rows), top + h)}/{len(rows)} · ↑/↓ PgUp/PgDn to scroll · q or Esc to close", GREY)
+            with OUTPUT_LOCK:
+                frame("\033[H" + "".join(eol(r + RESET, cols) + "\r\n" for r in rows[top:top + h])
+                      + "\033[J" * (len(rows) - top < h) + clip(foot, cols), show_cursor=False)
+            keys, pending = split_keys(pending + decode(os.read(fd, 1024)))
+            for key in keys:
+                amount = scroll_amount(key)
+                if key in ("q", "\x1b", "\x0f", "\x03"):
+                    return
+                if amount:
+                    top -= h - 1 if amount >= PAGE else -(h - 1) if amount <= -PAGE else amount
+                elif key in ("\x1b[A", "\x1bOA", "k"):
+                    top -= 1
+                elif key in ("\x1b[B", "\x1bOB", "j"):
+                    top += 1
+                elif key in ("g", "\x1b[H"):
+                    top = 0
+                elif key in ("G", "\x1b[F"):
+                    top = len(rows)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        with OUTPUT_LOCK:
+            if own:
+                write("\033[?1049l")
+            else:
+                write("\033[H\033[2J")
+                SCROLL.dirty = True
+                SCROLL.flush()
+
+
 # ---------------------------------------------------------------------- spinner
 
 def shimmer(text: str, tick: int) -> str:
@@ -1262,7 +1350,7 @@ class Spinner:
 
     def _lines(self) -> List[str]:
         secs, w = int(time.time() - self.start), width()
-        meta = (f"{self.who} · " if self.who else "") + f"{secs}s · esc esc to stop"
+        meta = (f"{self.who} · " if self.who else "") + f"{secs}s · esc to interrupt · ctrl+o details"
         if len(self.verb) + len(meta) + 6 > w:  # one row, always: a wrapped status line makes the box jump
             meta = (f"{self.who} · " if self.who else "") + f"{secs}s"
         verb = self.verb if len(self.verb) + len(meta) + 6 <= w else self.verb[: max(4, w - len(meta) - 8)] + "…"

@@ -60,13 +60,22 @@ class ChatTest(unittest.TestCase):
             self.chat._watch(task["id"], Watched())
         return proc
 
-    def test_double_escape_stops_a_running_task(self):
-        proc = self._watch_with_keys(["", "\x1b", "\x1b"])
+    def test_escape_interrupts_a_running_task_and_says_so(self):
+        said = []
+        from unittest import mock
+        with mock.patch("orchestrator.ui.Spinner.say", lambda _s, msg: said.append(msg)):
+            proc = self._watch_with_keys(["", "\x1b"])
         proc.wait(timeout=5)
         self.assertEqual(proc.returncode, -15, "the task process got SIGTERM")
+        self.assertTrue(any("Interrupted by user" in m for m in said))
 
-    def test_single_escape_or_arrow_keys_do_not_stop_it(self):
-        proc = self._watch_with_keys(["\x1b", "", "\x1b[A", "\x1b[B"])
+    def test_arrow_keys_or_esc_while_scrolled_up_do_not_stop_it(self):
+        from unittest import mock
+        from orchestrator import ui
+        proc = self._watch_with_keys(["\x1b[A", "", "\x1b[B"])
+        self.assertIsNone(proc.poll())
+        with mock.patch.object(ui.SCROLL, "offset", 5):  # Esc first brings the view back down
+            proc = self._watch_with_keys(["\x1b"])
         self.assertIsNone(proc.poll())
 
     def test_accepting_a_git_init_suggestion_makes_foreman_run_it_without_any_ai_or_commit(self):
