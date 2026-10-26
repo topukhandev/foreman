@@ -180,6 +180,9 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
         lines += ["", "Next step", f"  {nxt.get('title') or nxt['mode']}: {nxt.get('reason', '')}",
                   "  → say \"next\" to start it, or ask for something else" if chat else "  → foreman next"]
 
+    if task.get("next_for_you") and not open_q:
+        lines += ["", "Next for you"] + [f"  - {x}" for x in task["next_for_you"]]
+
     new_sugg = [s for s in (all_suggestions or []) if s["id"] in task.get("suggestions", [])]
     if new_sugg:
         lines += ["", "Worth considering (your call)"]
@@ -247,6 +250,7 @@ def task_summary(task: Dict[str, Any]) -> Dict[str, Any]:
                    for e in task["evidence"] if e["kind"] == "check"],
         "questions": [q["text"] for q in task["questions"] if not q.get("answer")],
         "remaining": task["remaining"], "next": task.get("next"), "answer": task.get("answer"),
+        "next_for_you": task.get("next_for_you") or [],
     }
 
 

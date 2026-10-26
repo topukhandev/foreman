@@ -33,6 +33,7 @@ PLAN_SCHEMA = {
         "feature": _STR,
         "title": _STR,
         "answer": _STR,
+        "next_for_you": _STRS,
         "projects": {"type": "array", "items": {"type": "object", "properties": {
             "name": _STR, "role": {"type": "string", "enum": ["modify", "inspect", "test"]}, "why": _STR},
             "required": ["name", "role", "why"]}},
@@ -57,7 +58,7 @@ PLAN_SCHEMA = {
 
 DOC_SCHEMA = {
     "type": "object",
-    "properties": {"title": _STR, "document": _STR, "summary": _STR, "open_problems": _STRS},
+    "properties": {"title": _STR, "document": _STR, "summary": _STR, "open_problems": _STRS, "next_for_you": _STRS},
     "required": ["title", "document", "summary"],
 }
 
@@ -72,6 +73,7 @@ STEP_SCHEMA = {
             "project": _STR, "type": _STR, "evidence": _STR}, "required": ["project", "type", "evidence"]}},
         "questions": QUESTIONS,
         "suggestions": SUGGESTIONS,
+        "next_for_you": _STRS,
     },
     "required": ["status", "summary"],
 }
@@ -126,6 +128,12 @@ Project names in steps/checks/projects must be registry names.
 Images the user attached appear in the request as [Image #n: /path/file.png]. Look at them (read-only) when they
 matter, and repeat the path in the instructions of every step whose worker needs to see the image.
 When answering, talk about the work itself; don't mention internal task numbers (like #12) unless the user did.
+Write "answer" in Markdown so it is easy to scan: a one-line direct answer first, then short paragraphs or bullet
+lists (never one long block); **bold** the key terms and numbers; put identifiers, paths and commands in `code`;
+a short heading only when there are several parts. Plain facts, no filler.
+When you answer directly (no steps), add "next_for_you": 1-3 short, concrete things the user could do or ask next, in
+the user's words, given where the project stands and what they were after (e.g. "Ask me to run QA on the dataset",
+"Review the 3 ABO gap records"). Leave it empty when nothing useful follows.
 You are read-only and nobody can approve tool permissions for you. Never ask the user to approve commands; if
 something must be run to answer, add an investigate step or say what you could not verify.
 """ + SUGGESTION_RULE
@@ -229,7 +237,8 @@ class Brain:
         return "\n\n".join(x for x in [
             f"You are writing the {mode_title} document for Foreman, from work that AI sessions already did. "
             "Use only the findings below (you may read code to confirm a detail). Be concrete: file references, "
-            "sources, commands. No filler. Markdown.",
+            "sources, commands. No filler. Markdown. Also give \"next_for_you\": 1-3 short, concrete things the user "
+            "could do or ask next given this result.",
             f"REQUEST:\n{task['request']}",
             f"THE DOCUMENT MUST CONTAIN:\n{output_spec}" if output_spec else "",
             "CONFIRMED DECISIONS:\n" + "\n".join(f"- {d['text']}" for d in task["decisions"][-12:])

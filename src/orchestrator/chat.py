@@ -53,7 +53,8 @@ Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also 
 `foreman config copy-on-select off` gives selection back to the terminal (then hold Shift).
 While a task runs, Ctrl+C lets you stop it or keep it running in the background."""
 ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2}  # not "one": "the second one"
-SECTION_TITLES = {"What changed", "Needs your decision", "Remaining", "Notes", "Worth considering (your call)"}
+SECTION_TITLES = {"What changed", "Needs your decision", "Remaining", "Notes", "Worth considering (your call)",
+                  "Next for you"}
 
 
 class Chat:

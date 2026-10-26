@@ -414,16 +414,27 @@ def _wrap_ansi(line: str, w: int) -> List[str]:
 
 def md(text: str) -> str:
     """Tiny markdown: headings, **bold**, `code`, bullets."""
-    out = []
+    out, fenced = [], False
     for line in text.splitlines():
+        if line.strip().startswith("```"):  # a code block: dim, without the fences
+            fenced = not fenced
+            continue
+        if fenced:
+            out.append(c("  " + line, GREY))
+            continue
         h = re.match(r"^\s*#{1,6}\s+(.*)", line)
         if h:
-            out.append(c(h.group(1), BOLD))
+            out.append(c(h.group(1), BOLD, ACCENT))
+            continue
+        quote = re.match(r"^\s*>\s?(.*)", line)
+        if quote:
+            out.append(c("│ " + quote.group(1), GREY))
             continue
         line = re.sub(r"\[`?([^\]`]+)`?\]\((?:file://)?[^)]*\)", lambda m: c(m.group(1), BLUE), line)  # [x](url) -> x
         line = re.sub(r"\*\*(.+?)\*\*", lambda m: c(m.group(1), BOLD), line)
         line = re.sub(r"`([^`]+)`", lambda m: c(m.group(1), BLUE), line)
-        line = re.sub(r"^(\s*)[-*] ", r"\1• ", line)
+        line = re.sub(r"^(\s*)[-*] ", lambda m: m.group(1) + c("•", ACCENT) + " ", line)
+        line = re.sub(r"^(\s*)(\d+\.) ", lambda m: m.group(1) + c(m.group(2), ACCENT) + " ", line)
         out.append(line)
     return "\n".join(out)
 

@@ -538,6 +538,7 @@ class Engine:
         task["previous_remaining"], task["remaining"] = task["remaining"] or task.get("previous_remaining", []), []
         task.pop("waiting", None)
         task.pop("paused", None)
+        task["next_buffer"] = []
         for s in task["steps"]:
             if s["status"] in ("running", "paused"):  # an interrupted run, or one that waited out provider limits
                 s["status"] = "pending"
@@ -702,6 +703,8 @@ class Engine:
             task["title"] = short(plan.get("title") or task["title"], 80)
             task["answer"] = clean_text(plan.get("answer") or "") or None
             task["answered_by"] = plan.get("_provider")
+            if plan.get("intent") == "answer":
+                task["next_buffer"] = list(plan.get("next_for_you") or [])
             task["steps"] = [s for s in task["steps"] if s["status"] == "done"]
             task["checks"] = []
             if not task.get("mode"):  # decided once per task; moving on to another mode is the user's "next"
@@ -1214,6 +1217,8 @@ class Engine:
                 task.setdefault("discoveries", []).append(
                     f"{proj.name} {dep.get('type', 'relates to')} {other.name}: {dep.get('evidence', '')}")
         task.setdefault("suggestion_buffer", []).extend(data.get("suggestions", []) or [])
+        if step["status"] == "done":
+            task.setdefault("next_buffer", []).extend(data.get("next_for_you") or [])
 
     def _rested_for_limit(self, name: str) -> bool:
         h = self._health().get(name) or {}
@@ -1323,7 +1328,8 @@ class Engine:
             "with evidence (project name or absolute path).\n"
             "- Fix small related problems yourself instead of suggesting them. Suggestions are only for major, "
             "out-of-scope things the user must decide; usually none.\n"
-            "- Keep the summary short and factual.",
+            "- Keep the summary short and factual. In 'next_for_you' put 0-3 short, concrete things the user could do or "
+            "ask next, given what you did and the project's state (leave it empty if nothing useful follows).",
         ] if x)
 
     # ------------------------------------------------------------------ validation
@@ -1487,6 +1493,7 @@ class Engine:
                 self._provider_errors(task, data)
                 text, summary = clean_text(data.get("document", "")), clean_text(data.get("summary", ""))
                 task["remaining"] += [short(p, 200) for p in data.get("open_problems") or [] if p.strip()][:8]
+                task.setdefault("next_buffer", []).extend(data.get("next_for_you") or [])
             except BrainError as e:
                 self._notice(task, f"Could not write the {mode.title} document with an AI provider ({short(str(e), 120)}); "
                                    "saved the raw findings instead.")
@@ -1517,6 +1524,9 @@ class Engine:
         for name, entry in task["projects"].items():
             if os.path.isdir(entry["path"]):
                 entry["after"] = snapshot(entry["path"])
+        mine = [" ".join(str(x).split()) for x in task.pop("next_buffer", []) if str(x).strip()]
+        task["next_for_you"] = [short(x, 120) for x in dict.fromkeys(mine)][:3] \
+            if task["status"] in ("done", "answered", "partial") else []
         added = self.store.add_suggestions(task["id"], task.pop("suggestion_buffer", []), limit=3)
         task["suggestions"] = [s["id"] for s in added]
         task["outcome"] = {"done": "achieved", "answered": "achieved", "partial": "partially achieved",

@@ -190,10 +190,15 @@ Reports are short, with separate sections. Only non-empty sections are shown:
   Review    approve by antigravity (different provider): …
   Sessions  claude ×3 (1 forked from your existing sessions)
 
-What changed / Needs your decision / Remaining / Notes / Worth considering (your call)
+What changed / Needs your decision / Remaining / Notes / Next for you / Worth considering (your call)
 
 Details: foreman show 2
 ```
+
+Answers are written by the provider in Markdown (bold key terms, bullets, `code`), shown formatted in the chat.
+"Next for you" lists up to three concrete things to do or ask next, written by the provider that did the work (the
+planner for an answer, the workers for a change), from where the project stands and what you were after; it is
+left out when a decision is waiting or the work stopped.
 
 "Worth considering" lists at most three *major* items you probably forgot, such as a consumer that will break or
 a missing migration. Minor issues are fixed by the workers instead. Dismissed items are never shown again.
