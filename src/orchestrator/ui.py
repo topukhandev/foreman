@@ -72,6 +72,12 @@ def out(text: str = "") -> None:
         SCROLL.add(text)
 
 
+def set_title(text: str) -> None:
+    """The terminal window/tab title (FullScreen saves the previous one and puts it back on exit)."""
+    if TTY:
+        write("\033]0;" + re.sub(r"[\x00-\x1f\x7f]", " ", text)[:120] + "\007")
+
+
 def clear_screen() -> None:
     with OUTPUT_LOCK:
         if TTY:
@@ -211,6 +217,8 @@ class Scrollback:
         self.lines: List[str] = []
         self.details: List[str] = []  # the same transcript with shortened outputs in full (the Ctrl+O view)
         self.offset = 0          # rows scrolled up from the bottom; 0 = following the output
+        self.unseen = 0          # messages that arrived while scrolled up
+        self._sticky: Optional[int] = None  # row of the prompt shown pinned at the top while scrolled up
         self.enabled = False     # only inside FullScreen (mouse reporting on)
         self._live: List[object] = []
         self._cache = (0, 0, [], [])  # (logical lines wrapped, columns, rows, row continues the previous one)
@@ -223,6 +231,8 @@ class Scrollback:
 
     def add(self, text: str) -> None:
         with OUTPUT_LOCK:
+            if self.offset and text.strip():
+                self.unseen += 1  # counted for the "N new messages" bar
             before = len(self.rows()) if self.offset else 0
             self.lines.extend(text.split("\n"))
             self.details.extend((getattr(text, "full", "") or text).split("\n"))
@@ -278,7 +288,7 @@ class Scrollback:
         if self.sel:  # any key ends the highlight
             self.sel, self.dirty = None, True
         if self.offset:
-            self.offset, self.dirty = 0, True
+            self.offset, self.dirty, self.unseen = 0, True, 0
 
     def flush(self) -> bool:
         """Repaint once after a batch of keys (a fast wheel sends many events); True if it repainted."""
@@ -290,14 +300,35 @@ class Scrollback:
     def _visible(self) -> List[str]:
         """Transcript rows that are on screen, top to bottom (also remembered for mouse selection)."""
         rows, region, conts = self.rows(), self._region(), self._cache[3]
+        self._sticky = None
         if self.offset:
             end = len(rows) - self.offset
             first = max(0, end - (region - 1))
-            rows, conts = rows[first:end], conts[first:end]
+            prompt = self._prompt_above(first, rows, conts)
+            if prompt is not None and end - first > 1:  # the top row pins the message you were reading about
+                self._sticky = prompt
+                pinned = c("↑ " + ANSI.sub("", rows[prompt])[:width() - 3], GREY, ITAL)
+                rows, conts = [pinned] + rows[first + 1:end], [False] + conts[first + 1:end]
+            else:
+                rows, conts = rows[first:end], conts[first:end]
         else:
             rows, conts = rows[-region:], conts[-region:]
         self._shown, self._shown_cont = list(rows), list(conts)
         return list(rows)
+
+    @staticmethod
+    def _prompt_above(first: int, rows: List[str], conts: List[bool]) -> Optional[int]:
+        """Row of the last message you sent that starts above row `first` (your messages are the '> ' lines)."""
+        for i in range(first - 1, -1, -1):
+            if not conts[i] and ANSI.sub("", rows[i]).startswith("> "):
+                return i
+        return None
+
+    def jump_bar(self) -> str:
+        """The bar under the transcript while scrolled up."""
+        new = f" · {self.unseen} new message{'s' if self.unseen != 1 else ''}" if self.unseen else ""
+        return c(f"  ↓ Jump to bottom (Esc or click){new} · {self.offset} line{'s' if self.offset != 1 else ''} below",
+                 BOLD, ACCENT)
 
     def render(self) -> None:
         self.dirty = False
@@ -306,8 +337,7 @@ class Scrollback:
         with OUTPUT_LOCK:
             body = self._visible()
             if self.offset:
-                body.append(c(f"  ↓ {self.offset} more line{'s' if self.offset != 1 else ''} below · "
-                              f"scroll or PgDn to go down · Esc to jump back", GREY))
+                body.append(self.jump_bar())
             if self.sel:
                 body = [self._highlighted(i, r) for i, r in enumerate(body)]
             cols = max(10, shutil.get_terminal_size((100, 24)).columns)
@@ -345,10 +375,21 @@ class Scrollback:
         """Left-button press / drag / release over the transcript selects text; releasing copies it. False for
         everything else (the wheel scrolls through scroll())."""
         m = MOUSE_FULL_RE.fullmatch(key)
-        if not (m and self.select_enabled and self._live):
+        if not (m and self._live):
             return False
         button, x, y, kind = int(m.group(1)), int(m.group(2)) - 1, int(m.group(3)) - 1, m.group(4)
         if button >= 64:
+            return False
+        if kind == "M" and not button & 35 and self.offset:  # a click on the jump bar or the pinned message
+            self._visible()
+            if y == len(self._shown):
+                self.bottom()
+                return True
+            if y == 0 and self._sticky is not None:  # scroll so that message is at the top
+                self.offset = max(1, len(self.rows()) - self._sticky - (self._region() - 1))
+                self.dirty, self.sel, self._anchor = True, None, None
+                return True
+        if not self.select_enabled:
             return False
         if button & 3 != 0:
             return True  # other buttons are ignored
@@ -1272,13 +1313,13 @@ class FullScreen:
             SCROLL.enabled = True
             SCROLL.select_enabled = self.select
             # alt screen; the wheel (and, to select text, button presses and drags) arrive as mouse events
-            write("\033[?1049h\033[H\033[2J\033[?1000h" + ("\033[?1002h" if self.select else "") + "\033[?1006h")
+            write("\033[22;0t\033[?1049h\033[H\033[2J\033[?1000h" + ("\033[?1002h" if self.select else "") + "\033[?1006h")
         return self
 
     def __exit__(self, *exc):
         if self.enabled:
             SCROLL.enabled = SCROLL.select_enabled = False
-            write("\033[?1002l\033[?1000l\033[?1006l\033[?25h\033[?2004l\033[?1049l")
+            write("\033[?1002l\033[?1000l\033[?1006l\033[?25h\033[?2004l\033[?1049l\033[23;0t")  # title back too
         return False
 
 

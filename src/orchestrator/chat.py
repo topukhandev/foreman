@@ -27,6 +27,7 @@ COMMANDS = [
     ("/show", "full report of a task, e.g. /show 12"),
     ("/resume", "pick up an earlier conversation in this project"),
     ("/new", "start a new conversation"),
+    ("/rename", "name this conversation (shown in /resume and the terminal title)"),
     ("/display", "terminal | headless: show workers in windows or run under the hood"),
     ("/suggestions", "open suggestions"),
     ("/providers", "choose the planner (and first worker) with ↑/↓"),
@@ -48,7 +49,7 @@ or type @ to pick a file of this project. Paste the same thing again right after
 Typing: \ then Enter starts a new line · Ctrl+A/E start/end of line · Ctrl+U/K delete to start/end of line ·
 Ctrl+W delete a word · Ctrl+Y paste back what was deleted · Tab takes the grey suggestion.
 Shortcuts (optional):
-  /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)
+  /status [task]  /tasks  /show <task>  /new (fresh topic)  /resume (old chats)  /rename <name>
   /mode  /models  /config  /lifecycle  /providers  /display terminal|headless  /suggestions  /exit
 Modes: I recommend one (R&D, planning, development, QA, deployment); /mode fixes it. "next" starts the next step.
 Wheel or PgUp/PgDn scroll the chat. Select text with the mouse to copy it, also what you typed (it says how many characters).
@@ -88,6 +89,7 @@ class Chat:
                 with ui.Spinner("Indexing your projects", footer=False):
                     self.eng.registry.ensure_scanned()
             self.eng.registry.adopt(self.cwd)
+            self._title()
             ui.out(self.banner())
             if resume == "last":
                 chats = self.history.list()
@@ -130,9 +132,18 @@ class Chat:
         out = self.respond(line)
         if out:
             ui.out("\n" + out + "\n")
-        if not line.startswith(("/resume", "/new")):
+        if not line.startswith(("/resume", "/new", "/rename")):
+            named = bool(self.history.data["title"])
             self.history.append(line, out or "", self.turns, self.focus, shown=shown)
+            if not named and self.history.data["title"]:
+                self._title()
         self._offer_choices()
+
+    def _title(self) -> None:
+        """Terminal title: Foreman · this conversation's name (or the project until it has one)."""
+        proj = self.eng.registry.project_for_path(self.cwd)
+        name = self.history.data.get("title") or (proj.name if proj else os.path.basename(self.cwd))
+        ui.set_title(f"Foreman · {short(name, 60)}")
 
     def banner(self) -> str:
         proj = self.eng.registry.project_for_path(self.cwd)
@@ -206,6 +217,7 @@ class Chat:
                 ui.out("\n" + ui.user_echo(e.get("shown") or e["user"]))
             if e["output"]:
                 ui.out("\n" + e["output"] + "\n")
+        self._title()
         return ui.bullet(f"Resumed \"{short(data.get('title', ''), 60)}\". Carry on where you left off.", ui.ACCENT)
 
     def _providers_menu(self, arg: str) -> str:
@@ -392,7 +404,15 @@ class Chat:
         if cmd == "/new":
             self.focus, self.turns = None, []
             self.history.start_new()
+            self._title()
             return ui.bullet("Started a new conversation. The previous one is in /resume.")
+        if cmd == "/rename":
+            if not arg:
+                return ui.bullet(f"This conversation is \"{self.history.data['title'] or '(untitled)'}\". "
+                                 "Name it with /rename <name>.", ui.GREY)
+            self.history.rename(arg)
+            self._title()
+            return ui.bullet(f"Renamed to \"{short(arg, 80)}\".", ui.GREEN)
         if cmd == "/resume":
             return self._resume_menu()
         if cmd == "/display":
@@ -858,6 +878,13 @@ class ChatHistory:
         self.data["entries"] = self.data["entries"][-200:]
         self.data.update(turns=[list(t) for t in turns][-12:], focus=focus, updated_at=time.time())
         write_json(os.path.join(self.dir, self.chat_id + ".json"), self.data)
+
+    def rename(self, name: str) -> None:
+        """Name the conversation; saved now when it has messages, else with its first one."""
+        from orchestrator.util import write_json
+        self.data["title"], self.data["named"] = short(" ".join(name.split()), 80), True
+        if self.data["entries"]:
+            write_json(os.path.join(self.dir, self.chat_id + ".json"), self.data)
 
     def load(self, chat_id: str) -> Optional[Dict[str, Any]]:
         from orchestrator.util import read_json

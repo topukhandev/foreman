@@ -56,5 +56,65 @@ class TranscriptTest(unittest.TestCase):
             ws.cleanup()
 
 
+class ScrolledViewTest(unittest.TestCase):
+    """Scrolled up in the full-screen chat: the last message you sent above the view stays pinned at the top, and a
+    bar at the bottom jumps back and counts what arrived meanwhile."""
+
+    class Live:
+        notice = ""
+
+        def live_height(self):
+            return 3
+
+        def frame(self):
+            return ""
+
+    def scroll(self):
+        s = ui.Scrollback()
+        s.enabled = True
+        s.push(self.Live())
+        s.add("> how do the totals work?")
+        for i in range(40):
+            s.add(f"answer line {i}")
+        return s
+
+    def test_prompt_pinned_and_jump_bar(self):
+        s = self.scroll()
+        with mock.patch("shutil.get_terminal_size", return_value=__import__("os").terminal_size((80, 13))):
+            s.scroll(10)
+            shown = s._visible()
+            self.assertIn("↑ > how do the totals work?", shown[0])
+            s.add("◆ new result")
+            s.add("more")
+            self.assertIn("2 new messages", s.jump_bar())
+            s.mouse(f"\x1b[<0;5;{len(s._shown) + 1}M")  # a click on the bar
+            self.assertEqual((s.offset, s.unseen), (0, 0))
+            s.scroll(10)
+            s._visible()
+            s.mouse("\x1b[<0;5;1M")  # a click on the pinned message scrolls to it
+            self.assertIn("> how do the totals work?", s._visible()[0])
+
+    def test_nothing_pinned_while_following_the_output(self):
+        s = self.scroll()
+        with mock.patch("shutil.get_terminal_size", return_value=__import__("os").terminal_size((80, 13))):
+            self.assertNotIn("↑", s._visible()[0])
+
+
+class RenameTest(unittest.TestCase):
+    def test_rename_names_the_conversation_and_the_terminal_title(self):
+        from orchestrator.chat import Chat
+        ws = Workspace()
+        try:
+            chat = Chat(ws.api, engine=make_engine(ws, Script()))
+            titles = []
+            with mock.patch("orchestrator.ui.set_title", side_effect=titles.append):
+                out = chat.respond("/rename Dataset merge")
+            self.assertIn("Renamed", out)
+            self.assertEqual(chat.history.data["title"], "Dataset merge")
+            self.assertEqual(titles[-1], "Foreman · Dataset merge")
+        finally:
+            ws.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

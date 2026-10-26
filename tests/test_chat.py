@@ -333,8 +333,8 @@ class ChatHistoryTest(unittest.TestCase):
                     raise RuntimeError("boom")
             except RuntimeError:
                 pass
-        self.assertTrue(buf.getvalue().startswith("\x1b[?1049h"))
-        self.assertTrue(buf.getvalue().endswith("\x1b[?1049l"))
+        self.assertTrue(buf.getvalue().startswith("\x1b[22;0t\x1b[?1049h"), "title saved, then the own screen")
+        self.assertTrue(buf.getvalue().endswith("\x1b[?1049l\x1b[23;0t"), "screen and title given back")
 
 
 class PhaseTest(unittest.TestCase):

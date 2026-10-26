@@ -267,7 +267,8 @@ class ScrollbackTest(unittest.TestCase):
         self.sb.flush()
         self.assertEqual(self.sb.offset, 3)
         self.assertEqual(self.shown()[-2], "line 17")
-        self.assertIn("3 more lines below", self.shown()[-1])
+        self.assertIn("Jump to bottom", self.shown()[-1])
+        self.assertIn("3 lines below", self.shown()[-1])
         for _ in range(10):
             self.sb.scroll(ui.PAGE)
         self.sb.flush()
