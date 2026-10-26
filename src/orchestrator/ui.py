@@ -607,6 +607,7 @@ class LineEditor:
         self.attach = Attachments()
         self.killed = ""                    # text removed by Ctrl+K / Ctrl+U / Ctrl+W, back with Ctrl+Y
         self.suggestion = ""                # grey suggested message in the empty input (Tab or → takes it)
+        self.status = ""                    # the status line under the hint ("" = off)
         self.notice = ""                    # one-line message in place of the hint until the next key
         self.span: Optional[tuple] = None   # (start, end) of the part of the input selected with the mouse; end exclusive
         self._anchor: Optional[int] = None
@@ -703,7 +704,7 @@ class LineEditor:
             self.cur = min(nxt + col, self._line_end(nxt))
         return True
 
-    def read(self, hint_left: str = "", hint_right: str = "", suggestion: str = "") -> str:
+    def read(self, hint_left: str = "", hint_right: str = "", suggestion: str = "", status: str = "") -> str:
         if not (TTY and sys.stdin.isatty()):
             return input("> ")
         import codecs
@@ -720,6 +721,7 @@ class LineEditor:
         self.hist_i = len(self.history)
         self.hints = (hint_left, hint_right)
         self.suggestion = " ".join(suggestion.split())
+        self.status = status
         self._files = None  # files may have changed since the last message
         write(c("─" * width(), ACCENT_DEEP) + "\n\033[?2004h")
         termios.tcsetattr(fd, termios.TCSADRAIN, new)
@@ -1022,6 +1024,9 @@ class LineEditor:
             self.notice = why
 
     def _below(self) -> List[str]:
+        return self._hint_rows() + ([status_row(self.status)] if self.status else [])
+
+    def _hint_rows(self) -> List[str]:
         if self.notice:
             return [c("  " + self.notice[: width() - 4], YELLOW)]
         menu = self._menu()
@@ -1081,21 +1086,27 @@ def set_editor(editor: LineEditor) -> None:
     _EDITOR = editor
 
 
-def read_input(hint_left: str = "", hint_right: str = "", suggestion: str = "") -> str:
+def read_input(hint_left: str = "", hint_right: str = "", suggestion: str = "", status: str = "") -> str:
     """Read one message with the shared editor (plain input() when not interactive)."""
     editor = _EDITOR or LineEditor([])
-    return editor.read(hint_left, hint_right, suggestion)
+    return editor.read(hint_left, hint_right, suggestion, status)
 
 
-PREV, NEXT = "\x00prev", "\x00next"  # what choose(nav=True) returns for ← / →
+def status_row(text: str) -> str:
+    """The status line under the input: '◈ project · mode · task · models', cut to one row."""
+    return clip("  " + c("◈ ", ACCENT) + c(text, GREY), width())
 
 
-def chips(labels: List[str], current: int) -> str:
-    """'← ☐ Scope  ✔ Titles  ☐ Submit →': one chip per question (✔ = answered), the current one highlighted."""
+PREV, NEXT = "\x00prev", "\x00next"  # what choose(nav=...) returns for ← / →
+
+
+def chips(labels: List[str], current: int, boxes: bool = True) -> str:
+    """'← ☐ Scope  ✔ Titles  ☐ Submit →': one chip per question (✔ = answered), the current one highlighted.
+    boxes=False: plain tabs ('← Settings  Status →')."""
     out = []
     for i, label in enumerate(labels):
         done = label.startswith("✔ ")
-        text = f" {label if done else '☐ ' + label} "
+        text = f" {label if done or not boxes else '☐ ' + label} "
         out.append(c(text, BOLD, "\033[7m") if i == current else c(text, GREEN if done else GREY))
     return clip(c("← ", GREY) + " ".join(out) + c(" →", GREY), width())
 
@@ -1103,13 +1114,14 @@ def chips(labels: List[str], current: int) -> str:
 def choose(title: str, body: List[str], options: List[str], allow_text: bool = True, start: int = 0,
            color: str = YELLOW, esc: str = "decide later", transient: bool = False,
            enter: str = "choose", descriptions: Optional[List[str]] = None, tabs: str = "",
-           nav: bool = False, typed_text: str = "") -> Optional[str]:
+           nav: str = "", typed_text: str = "", search: str = "") -> Optional[str]:
     """Arrow-key / number menu. Returns the chosen option, typed text ("" when skipped), or None on Esc.
     transient: a panel at the bottom (title and text included) that disappears when it closes and leaves nothing in
     the transcript, for settings and questions; otherwise the question and the answer stay in the transcript.
     descriptions: a grey line (or more) under each option, like Claude Code's questions. tabs: a row above the
-    panel (see chips()). nav: ← / → return PREV / NEXT, to move between questions. typed_text: what the
-    "Type something else…" row already holds."""
+    panel (see chips()). nav: what ← / → move between ("questions", "tabs"); they return PREV / NEXT. typed_text: what the
+    "Type something else…" row already holds. search: a placeholder such as "Search settings…": typing filters the
+    options (like Claude Code's /config)."""
     if not TTY or not sys.stdin.isatty():
         return None
     import termios
@@ -1122,6 +1134,8 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
 
     typed = [typed_text]  # the answer typed into the "Type something else…" row itself (no separate input box)
     notes = list(descriptions or [])
+    base, base_notes, query = list(items), list(notes), [""]  # search: items/notes hold the matching options
+    extra = 1 if search else 0  # the search row under the panel's head
 
     def is_text(i: int) -> bool:
         return allow_text and i == len(items) - 1
@@ -1154,10 +1168,14 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
         """Rows for the options: all of them, or as many as fit the terminal (a menu taller than the screen can't
         be redrawn in place). It only grows while the menu is open (typing a long answer), never shrinks."""
         peak[0] = max(peak[0], sum(len(item_rows(i, width())) for i in range(len(items))))
-        return max(1, min(peak[0], shutil.get_terminal_size((100, 24)).lines - 2 - len(head)))
+        return max(1, min(peak[0], shutil.get_terminal_size((100, 24)).lines - 2 - len(head) - extra))
 
     def lines() -> List[str]:
         cols, n = width(), room()
+        find = [clip("  " + c("⌕ ", ACCENT) + (query[0] if query[0] else c(search, GREY)) + "\033[7m \033[27m", cols)] \
+            if search else []
+        if not items:
+            return head + find + [c("   No setting matches", GREY)] + [""] * (n - 1) + [c(f"   Esc to {esc}", GREY)]
         rows = {i: item_rows(i, cols) for i in range(len(items))}
         top = bottom = sel  # grow a window around the selection until it is full
         used = len(rows[sel])
@@ -1174,8 +1192,9 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
         more = f"{sel + 1}/{len(items)} · " if top > 0 or bottom < len(items) - 1 else ""
         keys = "type your answer, Enter to send" if is_text(sel) else \
             f"↑/↓ · Enter to {enter}" if nav else f"↑/↓ or number, Enter to {enter}"
-        keys += " · ←/→ questions" if nav and not (is_text(sel) and typed[0]) else ""
-        return head + shown + [clip(c(f"   {more}{keys} · Esc to {esc}", GREY), cols)]
+        keys += (f" · ←/→ {nav}" if nav and not (is_text(sel) and typed[0]) else "") + \
+            (" · type to search" if search else "")
+        return head + find + shown + [clip(c(f"   {more}{keys} · Esc to {esc}", GREY), cols)]
 
     def body() -> str:
         return "".join("\r" + eol(l, width()) + "\n" for l in lines())
@@ -1185,13 +1204,13 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
     def draw(first=False):
         with OUTPUT_LOCK:
             up = "" if first else f"\033[{drawn[0]}A"
-            drawn[0] = len(head) + room() + 1
+            drawn[0] = len(head) + extra + room() + 1
             frame(up + body())
 
     closed = [False]
 
     class _Live:  # the menu stays at the bottom while the transcript above scrolls
-        live_height = staticmethod(lambda: 0 if closed[0] else len(head) + room() + 1)
+        live_height = staticmethod(lambda: 0 if closed[0] else len(head) + extra + room() + 1)
         frame = staticmethod(lambda: "" if closed[0] else body())
 
     fd = sys.stdin.fileno()
@@ -1220,6 +1239,18 @@ def choose(title: str, body: List[str], options: List[str], allow_text: bool = T
                     moved = PREV if key in ("\x1b[D", "\x1bOD") else NEXT
                     done = True
                     break
+                if search and (key in ("\x7f", "\b") or len(key) == 1 and key.isprintable()):  # typing filters
+                    query[0] = query[0][:-1] if key in ("\x7f", "\b") else query[0] + key
+                    hits = [i for i, label in enumerate(base) if query[0].lower() in label.lower()]
+                    items[:] = [base[i] for i in hits]
+                    notes[:] = [base_notes[i] for i in hits if i < len(base_notes)]
+                    sel = 0
+                    continue
+                if not items:
+                    if key in ("\x1b", "\x03"):
+                        cancelled = done = True
+                        break
+                    continue
                 if is_text(sel) and key not in ("\r", "\n", "\x1b", "\x03") and not key.startswith("\x1b"):
                     if key in ("\x7f", "\b"):
                         typed[0] = typed[0][:-1]
@@ -1385,6 +1416,7 @@ class Spinner:
         self.queued: List[str] = []
         self.attach = _EDITOR.attach if _EDITOR else Attachments()  # chips stay valid across the editor and the spinner
         self.notice = ""
+        self.status = ""  # the status line under the hint ("" = off)
         self._pasting: Optional[str] = None  # text of a bracketed paste still arriving
         self._lock = OUTPUT_LOCK
         self._stop = threading.Event()
@@ -1438,7 +1470,7 @@ class Spinner:
         else:
             left = "type your next message; it's sent when this finishes"
         return [status, "", c("─" * w, ACCENT_DEEP), c(">", BOLD, ACCENT) + " " + shown + "\033[7m \033[0m",
-                c("─" * w, ACCENT_DEEP), hint_line(left, self.hint_right)]
+                c("─" * w, ACCENT_DEEP), hint_line(left, self.hint_right)] + ([status_row(self.status)] if self.status else [])
 
     def _clear(self):
         if self._height:

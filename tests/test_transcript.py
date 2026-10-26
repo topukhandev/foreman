@@ -116,5 +116,23 @@ class RenameTest(unittest.TestCase):
             ws.cleanup()
 
 
+class StatusLineTest(unittest.TestCase):
+    def test_status_line_under_the_input_and_off_switch(self):
+        from orchestrator.chat import Chat
+        ws = Workspace()
+        try:
+            chat = Chat(ws.api, engine=make_engine(ws, Script()))
+            line = chat._status_line()
+            self.assertTrue(line.startswith("orders-api · auto mode"), line)
+            e = ui.LineEditor([])
+            e.buf, e.cur, e.sel, e.row, e.hints, e.status = "", 0, 0, 0, ("", ""), line
+            self.assertIn("◈ orders-api", e._below()[-1])
+            chat.eng.cfg.status_line = False
+            self.assertEqual(chat._status_line(), "")
+            self.assertIn("orders-api", chat._hints()[1], "without it, the hint shows the project again")
+        finally:
+            ws.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

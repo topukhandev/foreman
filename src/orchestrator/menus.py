@@ -9,6 +9,7 @@ import re
 from typing import Dict, List, Optional
 
 from orchestrator import ui
+from orchestrator.brain import OUTPUT_STYLES
 from orchestrator.config import set_first_provider, set_option
 from orchestrator.providers.base import ModelInfo
 from orchestrator.util import short
@@ -176,7 +177,9 @@ def snapshot(eng) -> Dict[str, str]:
     on = lambda v: "on" if v else "off"  # noqa: E731
     out = {"terminal windows": on(cfg.display == "terminal"), "auto-switch at limits": on(cfg.auto_switch),
            "notifications": on(cfg.notify), "session reuse": on(cfg.reuse_sessions == "fork"),
-           "copy on select": on(cfg.copy_on_select), "prompt suggestions": on(cfg.prompt_suggestions), "planner": cfg.brain, "first worker": next(iter(eng.providers), "?")}
+           "copy on select": on(cfg.copy_on_select), "prompt suggestions": on(cfg.prompt_suggestions),
+           "status line": on(cfg.status_line), "output style": STYLE_NAMES.get(cfg.output_style, cfg.output_style),
+           "planner": cfg.brain, "first worker": next(iter(eng.providers), "?")}
     for n, p in cfg.providers.items():
         if p.enabled:
             c = p.chosen()
@@ -214,19 +217,31 @@ def _toggle(eng, key: str) -> None:
         set_option(cfg.home, "sessions.reuse", "off" if cfg.reuse_sessions == "fork" else "fork")
     elif key == "suggest":
         set_option(cfg.home, "ui.prompt_suggestions", not cfg.prompt_suggestions)
+    elif key == "status":
+        set_option(cfg.home, "ui.status_line", not cfg.status_line)
     else:  # "copy": applies the next time the chat opens
         set_option(cfg.home, "ui.copy_on_select", not cfg.copy_on_select)
 
 
-TOGGLES = ("display", "switch", "notify", "reuse", "copy", "suggest")
+TOGGLES = ("display", "switch", "notify", "reuse", "copy", "suggest", "status")
+STYLE_NAMES = {k: v[0] for k, v in OUTPUT_STYLES.items()}
+TABS = ["Settings", "Status"]
 
 
 def config_menu(eng) -> Optional[str]:
-    """A list of settings with their current values. Enter flips a yes/no setting on the spot and opens a panel for the
-    others; Esc closes. Nothing is left in the chat while it is open. Returns what changed (one line each)."""
-    before, at, problems = snapshot(eng), 0, []
+    """Claude Code-style settings panel with two tabs (←/→): Settings, a list with the current values where typing
+    filters the rows, Enter flips a yes/no setting on the spot and opens a panel for the others; Status, what Foreman
+    runs with. Esc closes; nothing is left in the chat. Returns what changed (one line each)."""
+    before, at, tab, problems = snapshot(eng), 0, 0, []
     while True:
         cfg = eng.cfg
+        if tab == 1:
+            pick = _panel("Status", status_rows(eng), ["Close"], allow_text=False, color=ui.FRAME, esc="close",
+                          enter="close", tabs=ui.chips(TABS, 1, boxes=False), nav="tabs")
+            if pick in (ui.PREV, ui.NEXT):
+                tab = 0
+                continue
+            return "\n".join(changes(before, snapshot(eng)) + problems) or None
         first = next(iter(eng.providers), "?")
         yes = lambda v: "true" if v else "false"  # noqa: E731
         rows = [
@@ -236,15 +251,21 @@ def config_menu(eng) -> Optional[str]:
                                                       if cfg.providers[n].enabled)),
             ("planner", "Planner (plans and reviews)", cfg.brain),
             ("first", "First worker", first),
+            ("style", "Output style (how answers are written)", STYLE_NAMES.get(cfg.output_style, cfg.output_style)),
+            ("suggest", "Suggest your next message (Tab takes it)", yes(cfg.prompt_suggestions)),
+            ("status", "Status line under the input", yes(cfg.status_line)),
             ("notify", "Desktop notification when a task finishes", yes(cfg.notify)),
             ("reuse", "Start from your recent sessions", yes(cfg.reuse_sessions == "fork")),
             ("copy", "Copy selected text in the chat", yes(cfg.copy_on_select)),
-            ("suggest", "Suggest your next message (Tab takes it)", yes(cfg.prompt_suggestions)),
         ]
         labels = [ui.clip(f"{name:<42} {value}", ui.width() - 8) for _, name, value in rows]
         pick = _panel("Settings", ["Enter changes the selected setting (yes/no ones flip right away). Saved to "
-                                   "~/.foreman/config.yaml.", "Esc closes this menu."], labels, allow_text=False,
-                      start=at, color=ui.FRAME, esc="close", enter="change")
+                                   "~/.foreman/config.yaml."], labels, allow_text=False, start=at, color=ui.FRAME,
+                      esc="close", enter="change", tabs=ui.chips(TABS, 0, boxes=False), nav="tabs",
+                      search="Search settings…")
+        if pick in (ui.PREV, ui.NEXT):
+            tab = 1
+            continue
         if not pick:
             return "\n".join(changes(before, snapshot(eng)) + problems) or None
         at = labels.index(pick)
@@ -258,10 +279,35 @@ def config_menu(eng) -> Optional[str]:
         eng.reload_config()
 
 
+def status_rows(eng) -> List[str]:
+    """The Status tab: version, where things live, providers and what each runs."""
+    from orchestrator import __version__
+    cfg = eng.cfg
+    rows = [f"Version      Foreman {__version__}", f"Config       {cfg.home}/config.yaml",
+            f"Projects     {len(eng.registry.projects)} known (roots: {', '.join(cfg.roots) or 'none'})",
+            f"Planner      {cfg.brain}", ""]
+    for n, p in eng.providers.items():
+        ok, info = p.available()
+        bad = eng.unhealthy().get(n)
+        state = "ready" if ok and not bad else f"skipped: {bad}" if bad else info
+        rows.append(f"{n:<12} {state if not ok or bad else current_text(eng, n)}")
+    return rows
+
+
 def _change(eng, key: str) -> Optional[str]:
     cfg, home = eng.cfg, eng.cfg.home
     if key == "models":
         models_loop(eng)
+        return None
+    if key == "style":
+        names = list(OUTPUT_STYLES)
+        labels = [OUTPUT_STYLES[n][0] for n in names]
+        pick = _panel("Output style", ["How answers and documents are written for you. Applies from your next "
+                                       "request."], labels, allow_text=False, color=ui.FRAME, esc="cancel",
+                      descriptions=[OUTPUT_STYLES[n][1] for n in names],
+                      start=names.index(cfg.output_style) if cfg.output_style in names else 0)
+        if pick:
+            set_option(home, "ui.output_style", names[labels.index(pick)])
         return None
     if key in ("planner", "first"):
         names = [n for n in eng.providers if cfg.providers[n].enabled]

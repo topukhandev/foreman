@@ -70,6 +70,8 @@ ui:
   alt_screen: true         # chat uses its own screen; your terminal is restored as it was on exit
   copy_on_select: true     # selecting text with the mouse in the chat copies it to the clipboard
   prompt_suggestions: true # a suggested next message waits in grey in the empty input (Tab takes it)
+  status_line: true        # a line under the input: project, mode, current task, models
+  output_style: default    # default | concise | explanatory | learning | proactive (how answers are written)
 
 sessions:
   reuse: fork              # fork | off  - continue context from your recent sessions
@@ -164,6 +166,8 @@ class Config:
     alt_screen: bool = True
     copy_on_select: bool = True
     prompt_suggestions: bool = True
+    status_line: bool = True
+    output_style: str = "default"
     auto_switch: bool = True  # a provider that hits its usage limit hands its step to another one (off: wait for it)
 
     @property
@@ -231,6 +235,8 @@ def load_config(home: Optional[str] = None) -> Config:
         alt_screen=bool(ui.get("alt_screen", True)),
         copy_on_select=bool(ui.get("copy_on_select", True)),
         prompt_suggestions=bool(ui.get("prompt_suggestions", True)),
+        status_line=bool(ui.get("status_line", True)),
+        output_style=str(ui.get("output_style") or "default").lower(),
         auto_switch=bool(data.get("auto_switch", True)),
     )
 

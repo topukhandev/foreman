@@ -107,7 +107,7 @@ class Chat:
                 self._exchange(queued, getattr(queued, "shown", "").strip())
                 continue
             try:
-                typed = ui.read_input(*self._hints(), suggestion=self.suggestion)
+                typed = ui.read_input(*self._hints(), suggestion=self.suggestion, status=self._status_line())
                 line, shown = typed.strip(), getattr(typed, "shown", typed).strip()
             except EOFError:
                 return
@@ -184,9 +184,29 @@ class Chat:
         proj = self.eng.registry.project_for_path(self.cwd)
         who = self.last_providers or f"planner: {self._planner()}"
         mode = self.eng.modes(self.cwd).get(self.mode) if self.mode else None
-        right = f"{proj.name if proj else os.path.basename(self.cwd)} · " + (f"mode: {mode.title} · " if mode else "") \
-                + f"{who} · {'terminal' if self._visual() else 'headless'}"
+        right = ("" if self.eng.cfg.status_line else  # the status line shows the project and mode already
+                 f"{proj.name if proj else os.path.basename(self.cwd)} · " + (f"mode: {mode.title} · " if mode else "")) \
+            + f"{who} · {'terminal' if self._visual() else 'headless'}"
         return left, right
+
+    def _status_line(self, running: Optional[str] = None) -> str:
+        """The line under the input (ui.status_line): project · mode · the task in focus · each provider's model."""
+        if not self.eng.cfg.status_line:
+            return ""
+        proj = self.eng.registry.project_for_path(self.cwd)
+        mode = self.eng.modes(self.cwd).get(self.mode) if self.mode else None
+        parts = [proj.name if proj else os.path.basename(self.cwd), mode.title if mode else "auto mode"]
+        task = self.eng.store.load(running or self.focus) if (running or self.focus) else None
+        if task:
+            asks = any(not q.get("answer") for q in task["questions"])
+            state = "running" if running else "waiting for you" if asks else task["status"].replace("_", " ")
+            parts.append(f"#{task['id']} {state}")
+        names = {"antigravity": "agy"}
+        for n in [n for n in self.eng.providers if self.eng._usable(n)][:3]:
+            c = self.eng.cfg.providers[n].chosen()
+            model = (c.model or "default").replace("claude-", "")
+            parts.append(f"{names.get(n, n)} {model}" + (f" {c.effort}" if c.effort else ""))
+        return " · ".join(parts)
 
     def _resume_menu(self) -> str:
         chats = [c for c in self.history.list() if c["id"] != self.history.chat_id and c["entries"]]
@@ -489,6 +509,7 @@ class Chat:
         phase = Phase(self.eng.store.load(task_id) or {})
         spin = ui.Spinner(phase.verb, hint_right=f"{proj.name if proj else os.path.basename(self.cwd)} · "
                                                  f"{'terminal' if self._visual() else 'headless'}")
+        spin.status = self._status_line(task_id)
         keys = _KeyReader()
         spin.begin()
         stopping = False
@@ -624,7 +645,7 @@ class Chat:
                         + (answers[k] if k in answers else ui.c("not answered yet", ui.YELLOW))
                         for k, q in enumerate(questions)]
                 choice = ui.choose("Review your answers", body, ["Submit answers", "Cancel"], allow_text=False,
-                                   transient=True, tabs=tabs, nav=True, esc="decide later")
+                                   transient=True, tabs=tabs, nav="questions", esc="decide later")
                 if choice == ui.PREV:
                     i = len(questions) - 1
                 elif choice == "Submit answers" and missing:
@@ -641,7 +662,8 @@ class Chat:
                 len(labels) if i in typed else 0
             body = [ui.md(l) for l in q["text"].splitlines()]
             title = q.get("header") or "Needs your decision"
-            choice = ui.choose(title, body, labels, transient=True, descriptions=notes, tabs=tabs, nav=multi,
+            choice = ui.choose(title, body, labels, transient=True, descriptions=notes, tabs=tabs,
+                               nav="questions" if multi else "",
                                typed_text=typed.get(i, ""), start=start)
             if choice is None:
                 return None

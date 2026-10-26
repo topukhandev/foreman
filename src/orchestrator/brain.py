@@ -105,6 +105,31 @@ label in "default". Before asking, read the conversation and the answered
 questions: if the user already said what they want, even loosely or in other words, follow it and do not ask again.
 If they said they did not understand, ask again far more simply."""
 
+# How answers and documents are written for the user (config ui.output_style; chosen in /config).
+OUTPUT_STYLES = {
+    "default": ("Default", "Clear answers in short Markdown; what you have now"),
+    "concise": ("Concise", "As short as possible: the answer and only the facts needed"),
+    "explanatory": ("Explanatory", "Adds a short ★ Insight on why things work the way they do"),
+    "learning": ("Learning", "Explains the reasoning and leaves small steps for you to try"),
+    "proactive": ("Proactive", "Also points out the next action or risk you did not ask about"),
+}
+STYLE_RULES = {
+    "concise": "OUTPUT STYLE: Concise. Answer in as few words as possible: the direct answer and only the facts needed, "
+               "no headings unless there are several parts, no restating the question.",
+    "explanatory": "OUTPUT STYLE: Explanatory. After the answer, add a short block headed '★ Insight' with 2-3 bullets "
+                   "on why the code or data works the way it does here (patterns, trade-offs), in plain words.",
+    "learning": "OUTPUT STYLE: Learning. Explain the reasoning briefly as you answer, and where the user could do a "
+                "small part themselves (a command to run, a file to look at, a value to check), give it as a "
+                "'Try it yourself' step instead of doing everything for them.",
+    "proactive": "OUTPUT STYLE: Proactive. After the answer, point out in one or two lines the obvious next action or a "
+                 "risk the user did not ask about, if there is one.",
+}
+
+
+def style_rule(style: str) -> str:
+    return STYLE_RULES.get(style or "default", "")
+
+
 PLANNING_RULES = """\
 Speed matters. If the request is conversational or answerable from the context above, answer right away in
 "answer" without using any tools. Never read Foreman's own files (~/.foreman) or this prompt's sources.
@@ -223,7 +248,7 @@ class Brain:
     @staticmethod
     def plan_prompt(request: str, cwd: str, registry_ctx: str, history: str, suggestions_seen: str,
                     task_ctx: str = "", conversation: str = "", modes_ctx: str = "", fixed_mode: str = "",
-                    knowledge_ctx: str = "") -> str:
+                    knowledge_ctx: str = "", style: str = "") -> str:
         parts = [
             "You are the planning layer of Foreman, an orchestrator that coordinates AI coding sessions across "
             "related projects. You decide scope and steps; worker sessions do the work; Foreman runs validation "
@@ -246,10 +271,12 @@ class Brain:
             parts.append(MODE_RULES_FIXED.format(mode=fixed_mode) if fixed_mode else MODE_RULES)
             parts.append(f"MODES:\n{modes_ctx}")
         parts.append(PLANNING_RULES)
+        parts.append(style_rule(style))
         return "\n\n".join(p for p in parts if p)
 
     @staticmethod
-    def document_prompt(task: Dict[str, Any], mode_title: str, output_spec: str, findings: str, checks: str) -> str:
+    def document_prompt(task: Dict[str, Any], mode_title: str, output_spec: str, findings: str, checks: str,
+                        style: str = "") -> str:
         return "\n\n".join(x for x in [
             f"You are writing the {mode_title} document for Foreman, from work that AI sessions already did. "
             "Use only the findings below (you may read code to confirm a detail). Be concrete: file references, "
@@ -267,6 +294,7 @@ class Brain:
             "Return the full document in 'document', a title, and a two-sentence summary for the user. In "
             "'open_problems', list each defect, failed criterion or blocker that must be fixed or decided before "
             "moving on to the next stage (one line each; empty if none).",
+            style_rule(style),
         ] if x)
 
     @staticmethod

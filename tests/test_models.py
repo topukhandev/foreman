@@ -233,8 +233,8 @@ class MenuTest(Base):
         def choose(title, body, options, allow_text=True, start=0, **kw):
             self.asked.append((title, list(options), start))
             want = script.pop(0)
-            if want is None:
-                return None
+            if want is None or want.startswith("\x00"):  # Esc, or ←/→ (ui.PREV / ui.NEXT)
+                return want
             for o in options:
                 if o.startswith(want):
                     return o
@@ -300,6 +300,16 @@ class MenuTest(Base):
         self.assertIsNone(self.run_menu(menus.models_menu, [None]))
         self.assertEqual(self.saved(), before, "cancelling writes nothing")
 
+    def test_settings_tabs_status_and_output_style(self):
+        from orchestrator import ui
+        text = self.run_menu(menus.config_menu, [ui.NEXT, ui.PREV, "Output style", "Concise", None])
+        self.assertEqual([t for t, _, _ in self.asked], ["Settings", "Status", "Settings", "Output style", "Settings"])
+        self.assertEqual(self.asked[1][1], ["Close"])
+        self.assertIn("Version", "\n".join(menus.status_rows(self.eng)))
+        self.assertEqual(text, "Set output style to Concise")
+        self.assertEqual(self.saved()["ui"]["output_style"], "concise")
+        self.assertEqual(self.eng.cfg.output_style, "concise")
+
     def test_a_typed_model_name_gets_claudes_levels(self):
         self.run_menu(menus.models_menu, ["claude", "claude-opus-5-5", "high"])
         self.assertEqual(self.eng.cfg.providers["claude"].chosen(), Choice("claude-opus-5-5", "high"))
@@ -315,8 +325,9 @@ class MenuTest(Base):
         self.assertEqual((self.eng.cfg.display, self.eng.cfg.auto_switch, self.eng.visual), ("terminal", False, True))
         first, last = self.asked[0][1], self.asked[-1][1]
         self.assertTrue(first[0].startswith("Show workers in terminal windows") and first[0].endswith("false"), first[0])
-        self.assertTrue(last[0].endswith("true") and last[1].endswith("false") and last[5].endswith("false"), last)
-        self.assertEqual([s for _, _, s in self.asked], [0, 0, 1, 5], "the selection stays on the row you changed")
+        notify = next(i for i, row in enumerate(last) if row.startswith("Desktop notification"))
+        self.assertTrue(last[0].endswith("true") and last[1].endswith("false") and last[notify].endswith("false"), last)
+        self.assertEqual([s for _, _, s in self.asked], [0, 0, 1, notify], "the selection stays on the row you changed")
         self.assertEqual(self.run_menu(menus.config_menu, ["Show workers", None]), "Set terminal windows to off")
         self.assertIsNone(self.run_menu(menus.config_menu, ["Show workers", "Show workers", None]),
                           "flipped back: nothing changed, nothing said")

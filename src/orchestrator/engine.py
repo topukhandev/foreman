@@ -671,7 +671,7 @@ class Engine:
         prompt = Brain.plan_prompt(task["request"], task["cwd"], ctx, history, seen,
                                    task_context(task, changes) if resume else "", task.get("conversation", ""),
                                    modes_ctx=catalog(modes, only=fixed or None), fixed_mode=fixed or "",
-                                   knowledge_ctx=knowledge)
+                                   knowledge_ctx=knowledge, style=self.cfg.output_style)
         cwd = sel.anchor.path if sel.anchor else (sel.focus[0].path if sel.focus else task["cwd"])
         extra = [p.path for p in sel.focus if p.path != cwd][:6] + image_dirs(task["request"])
         self._say(task, "planning…")
@@ -1506,7 +1506,8 @@ class Engine:
         else:
             try:
                 data = self._think(task, lambda: self._brain(task).call(
-                    Brain.document_prompt(task, mode.title, mode.section("output"), findings or "(none)", checks),
+                    Brain.document_prompt(task, mode.title, mode.section("output"), findings or "(none)", checks,
+                                         self.cfg.output_style),
                     DOC_SCHEMA, home.path, [e["path"] for n, e in task["projects"].items() if n != home.name][:5],
                     purpose="document"))
                 self._provider_errors(task, data)

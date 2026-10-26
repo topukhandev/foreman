@@ -82,7 +82,7 @@ class AskFlowTest(unittest.TestCase):
         answers, seen = self.run_flow([self.q("Titles", "Translate", "Keep")], ["Translate (Recommended)"])
         self.assertEqual(answers, ["Translate"])
         title, options, kw = seen[0]
-        self.assertEqual((title, kw["descriptions"], kw["nav"]), ("Titles", ["about Translate", "about Keep"], False))
+        self.assertEqual((title, kw["descriptions"], kw["nav"]), ("Titles", ["about Translate", "about Keep"], ""))
 
     def test_several_questions_have_chips_arrows_and_a_review_step(self):
         qs = [self.q("Titles", "Translate", "Keep"), self.q("File", "One file", "Two files")]

@@ -322,7 +322,7 @@ class ChatModeTest(unittest.TestCase):
                     self.eng.execute(task)
             chat = InProcess(ws.api, engine=eng)
             self.assertIn("Mode: QA", chat.respond("/mode qa"))
-            self.assertIn("mode: QA", chat._hints()[1])
+            self.assertIn("QA", chat._status_line(), "the status line shows the mode")
             s.plan = lambda req: plan([("orders-api", "test")], [step("1", "orders-api", kind="investigate")])
             chat.respond("check the discount rules")
             task = eng.store.load(chat.focus)
