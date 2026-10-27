@@ -63,7 +63,7 @@ class ProviderHealthTest(unittest.TestCase):
             eng.handle("add a footer", ws.ui)
             self.assertIn("opencode", eng.unhealthy())
             events = [e["event"] for e in eng.store.events("1")]
-            self.assertIn("thinking_failed", events)
+            self.assertIn("step_failed", events)  # QA's run on opencode failed and was recorded
             calls = len(eng.providers["opencode"].calls)
             eng.handle("add a header", ws.ui)
             self.assertEqual(len(eng.providers["opencode"].calls), calls, "skipped while its login is broken")

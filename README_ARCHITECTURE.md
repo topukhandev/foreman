@@ -10,11 +10,15 @@
                                    │   risky change or consumers left out ─► impact investigation first
                                    │
                                    ▼
-                       steps DAG ─ parallel across projects, one session per step
+                       steps DAG ─ parallel across projects, one session per step, one writer per project
+                                   │   roles by step kind: implement = Developer, investigate = Researcher
                                    │   new dependency reported ─► learn relation, re-plan (bounded)
                                    ▼
-                       validate: checks run by Foreman + diffs + independent review
-                                   │   problems ─► fix rounds in the same sessions (bounded)
+                       gate: Foreman runs the checks; tier from predicted risk + actual diff
+                             tier 0 checks only · tier 1 QA verify step · tier 2 QA + risk checklist
+                                   │   new dependency in a manifest ─► ask the user (answer goes to that worker)
+                                   │   QA's verified problems ─► fix in the developer's session ─► QA re-checks
+                                   │   in its own session (bounded); verification level kept apart from status
                                    ▼
                        document modes ─► research brief / plan / QA report / release doc in the project
                        finalize: state, lifecycle + next step, relations verified, suggestions, report, notification
@@ -36,8 +40,11 @@
 |---|---|---|
 | `registry.py` | deterministic | Find projects under `roots`; detect stack and test command; discover relations from paths, module/package names and distinctive name mentions; record evidence plus the git HEADs at verification; select a compact context (focus projects, one-hop neighbours, names only for the rest). |
 | `store.py` | deterministic | Task records, append-only event log, raw logs, task lookup (`#7`, words, or most recent in context), suggestions with dedup and dismissal. |
-| `brain.py` | AI | Prompts and JSON schemas for planning, re-planning and review. Read-only, schema-validated, with fallback across providers. |
-| `engine.py` | both | Orchestration loop: scheduling, provider/session choice, budget, check-command allow-list, git guards (HEAD moved = violation; read-only steps that edit are flagged), change detection, fix loop, finalize. |
+| `brain.py` | AI | Prompts for planning, re-planning and documents, and the JSON schemas of every AI result: the plan, the worker result contract (versioned, `PROTOCOL_VERSION`) and the QA verifier's result. Read-only, schema-validated, with fallback across providers. |
+| `engine.py` | both | Orchestration loop: scheduling, provider/session choice, project locks, budget, check commands (trusted vs AI-proposed), git guards (HEAD moved or remote refs changed = violation; read-only steps that edit are flagged), change detection, result validation, the verification gate (tiers, QA steps, fix rounds, claim checks, verification level), approvals (high impact, dependencies), finalize. |
+| `roles.py` + `roles/*.md` | deterministic + data | The three roles (Developer, Researcher, QA verifier) by step kind; permissions in code narrowed by the mode; guidance text overridable, never widening permissions. |
+| `deps.py` | deterministic | Dependencies a manifest declares, to find the ones a task added. |
+| `metrics.py` | deterministic | Per-task metrics (calls, retries, handoffs, time, tokens and cost where the CLI reports them) and `foreman stats`. |
 | `providers/*` | adapter | One small module per CLI. Builds commands, parses output, discovers sessions. Nothing provider-specific leaks out. |
 | `terminal.py` | adapter | Optional visible terminal windows. Same capture and exit semantics as headless runs. |
 | `report.py` | deterministic | Short reports and status built from the task record, plus the single desktop notification. |
@@ -56,8 +63,20 @@
 - **Session reuse.** Continuity first (same session for fixes), then forking your most recent session in that
   project (≤ `reuse_max_age_hours`, providers that can fork). Then a new session. Foreman's own planning and
   review sessions are never mistaken for yours. Providers without fork (agy) only resume sessions Foreman created.
-- **Independent review.** The reviewer is a different provider than the implementer when one is available,
-  otherwise a fresh session.
+- **Independent verification, proportional to risk.** QA is a step like any other (journaled, resumable, handed
+  over), in its own session on a different provider than the developer's when there is one. It reviews the diff,
+  Foreman's own check results and the developers' reports as claims; it can't run commands, so Foreman runs the
+  tests it asks for (under the AI-proposed command rules). A small, low-risk change whose checks pass needs no QA;
+  sensitive files raise the tier whatever the planner predicted.
+- **Honest outcomes.** Every AI result is validated against its schema; a malformed one is a failure, never a
+  success. `task.verification.level` (tool_verified / reviewed / unverified / failed, with gaps) is separate from
+  the status, and acceptance criteria record the basis of each rating (worker's word < evidence < QA).
+- **Structured hand-offs.** A step's assignment (role, permissions, criteria, context references) is persisted;
+  agents return the result contract and recommend, the engine decides and owns all state.
+- **Least privilege by mechanism.** Workers get no secret-looking environment variables but the exact names their
+  CLI needs; stored records are redacted; Claude's read-only runs are confined to the project folders; AI-proposed
+  check commands run without a shell; one task at a time writes to a project (file lock across processes).
+  Not enforced: what a writing worker reads outside the project (no OS sandbox available here, see claude.py).
 - **Validation is Foreman's.** Test commands run as subprocesses with a timeout. Only recognised test/build
   commands run; destructive patterns are refused and reported.
 - **Git policy.** Workers never commit, push, reset or switch branches (tool-level deny for Claude, prompt

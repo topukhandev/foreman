@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from orchestrator.config import ProviderSettings
 from orchestrator.finder import find_executable
-from orchestrator.util import extract_json, run_process, run_streaming
+from orchestrator.util import extract_json, run_process, run_streaming, worker_env
 
 # Opening lines of prompts Foreman sends; sessions starting with these are Foreman's, never the user's.
 # "Switchyard" was the project's name for a while: sessions created under it are ours too.
@@ -180,12 +180,20 @@ class RunResult:
     kind: str = ""                         # failure kind (TIMEOUT, LIMIT, ...); "" when ok
     retry_at: Optional[float] = None       # LIMIT: when the provider can be used again, if it said so
     usage: Optional[Dict[str, Any]] = None  # how close the provider is to its limit: {"utilization", "resets_at"}
+    tokens: Optional[Dict[str, int]] = None  # what the run used, where the CLI reports it: input/output/cache_read/...
 
     def __post_init__(self):
         if not self.ok and not self.kind:
             self.kind = classify(self.error or "")
         if self.kind == LIMIT and self.retry_at is None:
             self.retry_at = reset_time(self.error or "")
+
+
+def token_counts(**counts: Any) -> Optional[Dict[str, int]]:
+    """Token usage in one shape for every provider (input, output, reasoning, cache_read, cache_write); None when the
+    CLI reported nothing."""
+    out = {k: int(v) for k, v in counts.items() if isinstance(v, (int, float)) and v}
+    return out or None
 
 
 def tool_line(name: str, arg: Any, cwd: str) -> str:
@@ -227,6 +235,9 @@ class SessionInfo:
 class Provider:
     name = "base"
     capabilities = Capabilities()
+    # Secret-looking environment variables this CLI needs to log in, by exact name; every other secret-looking
+    # variable is withheld from its runs (util.worker_env). Users add more with providers.<name>.env_keep.
+    env_keep: Tuple[str, ...] = ()
 
     def __init__(self, settings: ProviderSettings):
         self.settings = settings
@@ -251,17 +262,22 @@ class Provider:
 
     # Shared helpers --------------------------------------------------------------
 
+    def keep_env(self) -> List[str]:
+        return list(self.env_keep) + [str(k) for k in self.settings.extra.get("env_keep") or []]
+
     def _exec(self, cmd: List[str], req: RunRequest) -> Tuple[int, str, str, float, bool]:
         on_line = self._line_handler(req)
         if req.visual:
             from orchestrator.terminal import run_in_terminal
-            res = run_in_terminal(cmd, cwd=req.cwd, timeout=req.timeout, title=req.title or self.name, on_line=on_line)
+            res = run_in_terminal(cmd, cwd=req.cwd, timeout=req.timeout, title=req.title or self.name, on_line=on_line,
+                                  keep_env=self.keep_env())
             if res is not None:
                 return res.code, res.out, res.err, res.duration, res.timed_out
+        env = worker_env(self.keep_env())
         if on_line:
-            res = run_streaming(cmd, cwd=req.cwd, timeout=req.timeout, on_line=on_line, env=dict(os.environ))
+            res = run_streaming(cmd, cwd=req.cwd, timeout=req.timeout, on_line=on_line, env=env)
         else:
-            res = run_process(cmd, cwd=req.cwd, timeout=req.timeout, env=dict(os.environ))
+            res = run_process(cmd, cwd=req.cwd, timeout=req.timeout, env=env)
         return res.code, res.out, res.err, res.duration, res.timed_out
 
     def _line_handler(self, req: RunRequest):

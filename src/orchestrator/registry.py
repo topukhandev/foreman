@@ -156,16 +156,22 @@ class Registry:
             self.save()
             return sorted(self.projects)
 
-    def add_project(self, path: str, name: Optional[str] = None) -> Project:
+    def add_project(self, path: str, name: Optional[str] = None, source: str = "declared") -> Project:
         path = os.path.abspath(os.path.expanduser(path))
         with self._lock:
             name = name or os.path.basename(path.rstrip("/"))
             proj = self._describe(name, path, self.projects.get(name))
-            proj.source = "declared"
+            proj.source = source
             self.projects[name] = proj
             self._discover_relations()
             self.save()
             return proj
+
+    def under_roots(self, path: str) -> bool:
+        """Inside one of the configured roots (where projects may be found without the user adding them)."""
+        real = os.path.realpath(os.path.expanduser(path))
+        return any(real.startswith(r.rstrip(os.sep) + os.sep)  # inside a root, never a root itself
+                   for r in (os.path.realpath(os.path.expanduser(x)) for x in self.roots))
 
     def refresh(self, names: List[str]) -> List[str]:
         """Re-describe projects whose HEAD moved since the last scan. Returns names that changed."""

@@ -13,6 +13,41 @@ ICON = {"done": "✔", "answered": "✔", "partial": "◐", "needs_input": "?", 
         "paused": "‖"}
 
 
+# How far a task's result is verified (engine._verification), kept apart from its status.
+LEVEL_TEXT = {"tool_verified": "verified by tests", "reviewed": "approved by QA (AI), not verified by tests",
+              "unverified": "NOT verified", "failed": "verification failed"}
+
+
+# What supports an acceptance criterion's rating (engine.LEVEL_RANK).
+CRITERION_BASIS = {"claimed": "worker's word", "evidenced": "worker, with evidence", "reviewed": "checked by QA"}
+CRITERION_MARK = {"pass": "✔", "fail": "✘"}
+
+
+def acceptance_lines(task: Dict[str, Any]) -> List[str]:
+    out = []
+    for c in task.get("acceptance") or []:
+        basis = CRITERION_BASIS.get(c.get("level") or "", "not rated")
+        status = c.get("status") if c.get("status") in ("pass", "fail", "untested") else "not rated"
+        out.append(f"  {CRITERION_MARK.get(c.get('status'), '·')} {c['id']} {short(c['text'], 110)} ({status}"
+                   + (f"; {basis})" if c.get("level") else ")"))
+    return out
+
+
+def verified_line(v: Dict[str, Any]) -> str:
+    """'verified by tests (orders-api)' / 'NOT verified: the independent review could not run; …'"""
+    text = LEVEL_TEXT.get(v.get("level"), v.get("level") or "?")
+    if v.get("tested"):
+        text += f" ({', '.join(v['tested'])} passed)"
+    if v.get("failed"):
+        text += f"; checks failing in {', '.join(v['failed'])}"
+    review = {"approved": "QA approved", "revise": "QA found problems", "concerns": "QA raised unconfirmed concerns",
+              "skipped": "no QA needed (small change, checks passed)"}.get(v.get("review") or "")
+    if review:
+        text += f"; {review}"
+    gaps = v.get("gaps") or []
+    return text + (": " + "; ".join(gaps[:3]) if gaps else "")
+
+
 def clock(ts: Optional[float]) -> str:
     """Epoch seconds as local time: "19:10" today, "Tue 19:10" within a week, else "2026-11-03 19:10"."""
     if not ts:
@@ -43,7 +78,8 @@ def notify(title: str, body: str) -> None:
 def stopped_at(task: Dict[str, Any]) -> str:
     """Where an unfinished task stopped, from its step journal: "step s1 in api (claude: usage limit, its session
     is resumed)", or "" when no step is unfinished."""
-    left = [s for s in task.get("steps") or [] if s["status"] != "done" and not s.get("skipped_by_user")]
+    left = [s for s in task.get("steps") or [] if s["status"] != "done" and not s.get("skipped_by_user")
+            and not (s.get("gate") and s["status"] == "failed")]
     if not left:
         return ""
     first = next((s for s in left if s["status"] != "pending" or s.get("history")), left[0])
@@ -84,7 +120,9 @@ def _projects_line(task: Dict[str, Any]) -> str:
 def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str, Any]]] = None,
                   questions: bool = True, chat: bool = False) -> str:
     st = task["status"]
-    lines = [f"{ICON.get(st, '•')} #{task['id']} {task['title']} — {task.get('outcome') or st}"]
+    v = task.get("verification") or {}
+    lines = [f"{ICON.get(st, '•')} #{task['id']} {task['title']} — {task.get('outcome') or st}"
+             + (f" · {LEVEL_TEXT.get(v['level'], v['level'])}" if v.get("level") else "")]
     if task.get("closed"):
         c = task["closed"]
         lines += ["", f"{c['how'].capitalize()} on {c['at'][:10]}" + (f": {c['note'].rstrip('.')}" if c.get("note") else "") + "."]
@@ -128,6 +166,15 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
     reviews = [e for e in task["evidence"] if e["kind"] == "review"]
     if reviews:
         rows.append(("Review", short(reviews[-1]["summary"], 160)))
+    if v.get("level"):
+        rows.append(("Verified", short(verified_line(v), 300)))
+    rv = task.get("review")
+    if rv:
+        rows.append(("Reviewed", f"your {rv['target']} ({rv['files']} file{'s' if rv['files'] != 1 else ''}): "
+                     + {"approved": "QA found no problems", "revise": "QA found problems (under Remaining)",
+                        "concerns": "QA raised unconfirmed concerns", "unavailable": "QA could not run"}
+                     .get(rv["state"], rv["state"]) + (f"; failing checks: {', '.join(rv['checks_failed'][:3])}"
+                                                       if rv.get("checks_failed") else "")))
     if task.get("fix_rounds"):
         rows.append(("Fixes", f"{task['fix_rounds']} automatic fix round(s) after validation"))
     used: Dict[str, int] = {}
@@ -158,6 +205,21 @@ def render_report(task: Dict[str, Any], all_suggestions: Optional[List[Dict[str,
         for s in changed:
             latest.setdefault(s["project"], s["summary"])  # first (main) implement step per project
         lines += [f"  - {p}: {short(text, 150)}" for p, text in latest.items()]
+
+    if task.get("acceptance") and task["intent"] != "answer":
+        lines += ["", "Acceptance"] + acceptance_lines(task)
+    contradicted = [c for c in task.get("claims") or [] if c.get("state") == "contradicted"]
+    if contradicted:
+        lines += ["", "Unverified claims"] + [f"  - {c['project']}: worker said `{short(c['command'], 80)}` passed; "
+                                              "Foreman's check there failed" for c in contradicted[:4]]
+    risks = list(dict.fromkeys(r for s in task["steps"] if s["status"] == "done"
+                               for r in (s.get("result") or {}).get("risks") or [] if str(r).strip()))
+    if risks and task["intent"] != "answer":
+        lines += ["", "Risks"] + [f"  - {short(r, 200)}" for r in risks[:4]]
+    qa = task.get("qa") or {}
+    if qa.get("suspected") and task["intent"] != "answer":
+        lines += ["", "QA notes (suspected, not confirmed; not fixed automatically)"] + \
+            [f"  - {short(x, 200)}" for x in qa["suspected"][:4]]
 
     open_q = [q for q in task["questions"] if not q.get("answer")]
     if open_q and questions:
@@ -253,6 +315,9 @@ def task_summary(task: Dict[str, Any]) -> Dict[str, Any]:
         "questions": [q["text"] for q in task["questions"] if not q.get("answer")],
         "remaining": task["remaining"], "next": task.get("next"), "answer": task.get("answer"),
         "next_for_you": task.get("next_for_you") or [],
+        "verification": task.get("verification"),
+        "acceptance": [{k: c.get(k) for k in ("id", "text", "status", "level", "evidence")}
+                       for c in task.get("acceptance") or []],
     }
 
 
@@ -277,6 +342,12 @@ def render_status(task: Dict[str, Any], changed_since: Dict[str, List[str]],
             checks[(e["project"], e["command"])] = e
     if checks:
         lines.append("  Checks    " + "  ".join(f"{'✔' if e['ok'] else '✘'} {e['project']}" for e in checks.values()))
+    if (task.get("verification") or {}).get("level"):
+        lines.append(f"  Verified  {short(verified_line(task['verification']), 300)}")
+    if task.get("acceptance"):
+        crit = task["acceptance"]
+        lines.append(f"  Accept    {sum(1 for c in crit if c.get('status') == 'pass')}/{len(crit)} criteria pass"
+                     + "".join(f"; {c['id']} {c['status']}" for c in crit if c.get("status") == "fail"))
     if task.get("answer") and task["intent"] == "answer":  # in full, with its own lines (Markdown kept)
         answer = [l.rstrip() for l in task["answer"].strip().splitlines()]
         lines.append("  Answer")

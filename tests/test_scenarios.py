@@ -63,7 +63,7 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual([(c["project"], c["command"], c["ok"]) for c in checks], [("admin-ui", "npm test", True)])
         self.assertEqual(task["projects"]["admin-ui"]["changed_files"], ["src/change.js"])
         # Independent review by a different provider than the implementer.
-        self.assertIn("opencode:review", self.s.log)
+        self.assertIn("opencode:verify", self.s.log)
         self.assertLess(len(res["report"].splitlines()), 20)
         self.assertEqual(len(self.notes), 1, "exactly one notification, at the end")
 
@@ -144,7 +144,7 @@ class ScenarioTest(unittest.TestCase):
         task = self.eng.handle("Add request logging to the orders API and the admin UI", self.ws.ui)["task"]
         self.assertEqual(self.eng.providers["claude"].max_active, 2)
         self.assertLess(time.time() - start, 0.4 * 2 + 3.0)
-        self.assertEqual(len({s["session_id"] for s in task["sessions"]}), 2)
+        self.assertEqual(len({s["session_id"] for s in task["sessions"] if not s.get("reviewer")}), 2)
 
     # 7 ---------------------------------------------------------------------------------------
     def test_reuses_existing_session_by_forking_and_continues_it_for_fixes(self):
@@ -261,7 +261,7 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(task["steps"][0]["provider"], "opencode")
         self.assertIn("claude failed on admin-ui", res["report"])
         # Review must then come from a provider other than the implementer (opencode) -> claude.
-        self.assertIn("claude:review", self.s.log)
+        self.assertIn("claude:verify", self.s.log)
 
     def test_all_providers_failing_blocks_with_clear_report(self):
         self.s.plan = lambda req: plan([("admin-ui", "modify")], [step("1", "admin-ui")])

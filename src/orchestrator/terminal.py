@@ -16,7 +16,7 @@ import tempfile
 import time
 from typing import List, Optional
 
-from orchestrator.util import STOPPING, ProcResult, read_text, register_kill, unregister_kill
+from orchestrator.util import STOPPING, ProcResult, read_text, register_kill, unregister_kill, worker_env
 
 _TERMINALS = [
     ("gnome-terminal", lambda title, script: ["gnome-terminal", f"--title={title}", "--", "bash", script]),
@@ -37,7 +37,8 @@ def terminal_available() -> Optional[str]:
     return None
 
 
-def run_in_terminal(cmd: List[str], cwd: str, timeout: int, title: str, on_line=None) -> Optional[ProcResult]:
+def run_in_terminal(cmd: List[str], cwd: str, timeout: int, title: str, on_line=None,
+                    keep_env: Optional[List[str]] = None) -> Optional[ProcResult]:
     if STOPPING.is_set():
         return ProcResult(-1, "", "stopped by user", False, 0.0)
     term = terminal_available()
@@ -46,8 +47,8 @@ def run_in_terminal(cmd: List[str], cwd: str, timeout: int, title: str, on_line=
     work = tempfile.mkdtemp(prefix="foreman_term_")
     out_f, err_f, code_f, pid_f = (os.path.join(work, n) for n in ("out", "err", "code", "pid"))
     cmd_f = os.path.join(work, "cmd.json")
-    with open(cmd_f, "w", encoding="utf-8") as f:
-        json.dump(cmd, f)
+    with open(cmd_f, "w", encoding="utf-8") as f:  # the window filters its own environment the same way (worker_env)
+        json.dump({"cmd": cmd, "keep_env": list(keep_env or [])}, f)
     pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     script = os.path.join(work, "run.sh")
     with open(script, "w", encoding="utf-8") as f:
@@ -147,13 +148,14 @@ def _main() -> None:
         ap.add_argument(f"--{a}")
     args = ap.parse_args()
     with open(args.cmd, encoding="utf-8") as f:
-        cmd = json.load(f)
+        spec = json.load(f)
+    cmd, keep = (spec["cmd"], spec.get("keep_env") or []) if isinstance(spec, dict) else (spec, [])
     print(f"\033[1m{args.title}\033[0m  ({os.getcwd()})\n")
     code = 1
     with open(args.out, "w", encoding="utf-8") as out, open(args.err, "w", encoding="utf-8") as err:
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL,
-                                    text=True, errors="replace", start_new_session=True)
+                                    text=True, errors="replace", start_new_session=True, env=worker_env(keep))
             with open(args.pid, "w") as pf:
                 pf.write(str(proc.pid))
             for line in proc.stdout:

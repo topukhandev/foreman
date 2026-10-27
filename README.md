@@ -10,7 +10,9 @@ The AI providers supply the intelligence; Foreman supplies the coordination, con
   tests, shared modules). Relations carry evidence and are re-verified when code changes.
 - **Scales effort to the request.** "What's the state of my task?" is answered instantly from its records, with no
   AI call. A question gets one planning call. A cross-project change gets a full plan, parallel workers,
-  checks and review.
+  checks and an independent QA pass.
+- **Says what was actually verified.** Foreman runs the tests itself and keeps "done" apart from "verified": a
+  report says *verified by tests*, *approved by QA*, or *NOT verified* and why. See [Roles and verification](#roles-and-verification).
 - **Remembers tasks.** Every task records its request, projects, decisions, evidence, sessions and what remains,
   so "continue the previous task" just works, after re-checking what changed since.
 - **Survives cut-offs.** A worker that hits a usage limit, a network error, a timeout or a crash doesn't lose its
@@ -126,6 +128,7 @@ foreman answer 3 "10% off above $500"   # answer a question a task is waiting on
 foreman close 3 "done by hand"      # a task finished another way (--cancel: not wanted); "close #3" in the chat
 foreman accept s2 | dismiss s2      # act on, or silence, a suggestion
 foreman tasks | show 3 [--events]   # history, full record, audit log
+foreman stats [--since 2026-10-01]  # outcomes, verification, model calls, retries, time, reported cost (no AI)
 foreman projects [scan|show X|link A B tests "note"|test X "cmd"]
 foreman sessions admin-ui           # existing Claude/OpenCode/Antigravity sessions for a project
 foreman config                      # interactive settings; `foreman models` for model and effort
@@ -156,7 +159,7 @@ Foreman's `orchestrate`, `task_status`, `resume_task`, `answer_question` and `su
 |---|---|---|---|
 | R&D | domain, existing solutions, options, pain points, opportunities | read, search the web | `.foreman/research/<feature>.md` |
 | Planning | maps what already exists, assesses impact, produces an actionable plan | read, search the web | `.foreman/plans/<feature>.md` |
-| Development | implements across projects; impact check first when risky | change code | code changes + checks + review |
+| Development | implements across projects; impact check first when risky | change code | code changes + checks + QA |
 | QA | tests against requirements, regressions in related projects, lint/type/e2e checks | change **tests** only | `.foreman/qa/<feature>.md` |
 | Deployment | release checklist, config/migrations, deploy order, rollback, post-deploy verification | read | `.foreman/releases/<feature>.md` |
 
@@ -168,6 +171,69 @@ stands without an AI call. **Deployment never deploys**: it prepares and verifie
 
 Templates are plain markdown files (`foreman modes` lists them). Copy one to `~/.foreman/modes/<name>.md`
 (personal) or `<project>/.foreman/modes/<name>.md` (shared with your team) to change it, or add your own mode.
+
+## Roles and verification
+
+Workers take one of three roles, set by the step: a **Developer** implements, a **Researcher** investigates (read-only),
+and a **QA verifier** checks the result independently (read-only, in its own session, on a different provider than the
+developer's when there is one). What a role may change is fixed in code and narrowed by the mode; the guidance text of
+a role can be replaced with `~/.foreman/roles/<role>.md` or `<project>/.foreman/roles/<role>.md`, which never grants
+more. Every step keeps its structured assignment (role, permissions, criteria, context) for the audit trail.
+
+The planner states 2-6 **acceptance criteria** for a change. Workers report a versioned result (tests they ran,
+issues with severity and evidence, criteria ratings, risks, assumptions); Foreman checks it against its schema (a
+malformed or unknown-version result is a failure, never a success) and compares what workers say about their tests
+with its own runs ("Unverified claims" in the report).
+
+After the work, Foreman runs the checks itself and decides how much verification the change needs, from the
+planner's prediction **and** the actual diff:
+
+| Change | Verification |
+|---|---|
+| light, low risk, one project, ≤ 3 files, its checks pass | Foreman's checks only |
+| anything else | checks + one QA verify step |
+| high risk, or migrations, auth, payments, secrets, CI, deploy files or dependency manifests changed | checks + QA with a risk checklist |
+
+QA's verified problems (medium or worse) and failed criteria go back to **the developer's session**; QA re-checks in
+**its own session**, at most `max_fix_rounds` times. Suspected problems are listed as QA notes, not fixed. QA can't
+run commands, so it names the tests it wants and Foreman runs them. The report's first line and its `Verified` row
+say how far the result is verified: *verified by tests*, *approved by QA (AI), not verified by tests*, *NOT verified*
+(with the reason: no test command, QA couldn't run, not a git repository, …) or *verification failed*.
+
+You are asked before:
+- **High-impact changes**: when the planner flags a significant security, money, data-integrity, destructive or
+  production impact, nothing changes until you approve the plan (in every interface, not just the chat).
+- **New dependencies**: a dependency the work added (package.json, requirements, pyproject, composer, go.mod,
+  Cargo.toml, Gemfile) needs your OK; "Remove it" sends that back to the same worker, who continues without it.
+
+A question your project already decided (`.foreman/decisions.md`) is answered from there instead of being asked
+again; a new answer to the same question supersedes the old one, which stays in the file marked as such.
+
+**Reviewing your own work.** "QA my changes" or "review the feature branch" in QA mode reviews changes Foreman didn't
+make (your uncommitted ones, or a branch against its base): Foreman runs the checks, QA reviews the diff, and the
+problems are reported, not fixed.
+
+### Safety
+
+- Workers don't get secret-looking environment variables (`*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, the ssh agent,
+  …) except the exact names their own CLI needs to log in (e.g. `ANTHROPIC_API_KEY` for Claude only); add one with
+  `providers.<name>.env_keep` in `config.yaml`. Secret values are redacted from task records, events, logs and reports.
+- Claude's read-only runs (planning, investigation, QA) are confined to the project folders (`--restricted`).
+- Check commands from the registry or `.foreman/checks.yaml` run as written; ones the planner or QA propose run only
+  if they are a known test, lint or type-check runner with plain arguments (no shell syntax, no flags that run other
+  code, nothing outside the project), without a shell. Only test runs count as "verified by tests". Check output is
+  redacted before it goes into a prompt.
+- One task at a time changes a project, across chat, MCP and CLI processes (an OS file lock held for the whole run,
+  checks and QA included; released by the OS if Foreman dies); others wait for it.
+- A worker that changes the project's `.foreman/` files (check commands, decisions, templates) is reported, and those
+  files are ignored for the rest of that task.
+- Commits (HEAD moved) and pushes (remote branches changed) during a step are reported; files that already had your
+  uncommitted edits and were changed by the task are named.
+- Limits: workers that write can still read files outside the project, and a provider's own key is readable by its
+  worker. Checks Foreman runs itself keep your full environment (tests may need it), so tests a worker wrote can
+  read it too. Claude Code's bubblewrap sandbox would close that, but on Ubuntu it needs AppArmor to allow unprivileged
+  user namespaces (see the Claude Code sandboxing docs); without that Claude runs unsandboxed, so Foreman doesn't
+  rely on it.
 
 ### The `.foreman/` folder in each project
 
@@ -202,14 +268,16 @@ providers:
 Reports are short, with separate sections. Only non-empty sections are shown:
 
 ```
-✔ #2 Add currency code to orders API and show it on the Orders page — achieved
+✔ #2 Add currency code to orders API and show it on the Orders page — achieved · verified by tests
 
   Projects  orders-api (changed 3 files) · admin-ui (changed 2 files) · e2e-tests (changed 1 file)
   Checks    ✔ orders-api: npm test  ✔ admin-ui: npm test  ✔ e2e-tests: npm test
-  Review    approve by antigravity (different provider): …
+  Review    approved by QA on antigravity (different provider): …
+  Verified  verified by tests (admin-ui, e2e-tests, orders-api passed); QA approved
   Sessions  claude ×3 (1 forked from your existing sessions)
 
-What changed / Needs your decision / Remaining / Notes / Next for you / Worth considering (your call)
+What changed / Acceptance / Unverified claims / Risks / QA notes / Needs your decision / Remaining / Notes /
+Next for you / Worth considering (your call)
 
 Details: foreman show 2
 ```

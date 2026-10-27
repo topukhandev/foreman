@@ -1,5 +1,6 @@
-"""AI reasoning used by the orchestrator itself: planning (mode, scope, steps), re-planning, independent review, and
-turning a mode's findings into its document (research brief, plan, QA report, release document).
+"""AI reasoning used by the orchestrator itself: planning (mode, scope, steps), re-planning, and turning a mode's
+findings into its document (research brief, plan, QA report, release document); plus the schemas of worker and QA
+verifier results (the engine runs those as steps).
 
 Everything here returns validated JSON. The brain runs read-only; it may look at code to settle scope,
 but is told to stop as soon as scope is clear (progressive context expansion).
@@ -8,7 +9,8 @@ but is told to stop as soon as scope is clear (progressive context expansion).
 import json
 from typing import Any, Callable, Dict, List, Optional
 
-from orchestrator.providers.base import Provider, RunRequest, RunResult
+from orchestrator.providers.base import OUTPUT, Provider, RunRequest, RunResult
+from orchestrator.util import check_result
 
 _STR = {"type": "string"}
 _STRS = {"type": "array", "items": _STR}
@@ -28,6 +30,24 @@ QUESTIONS = {"type": "array", "items": {"type": "object", "properties": {
         "description": {"type": "string", "description": "one plain sentence: what this choice means for the user"}},
         "required": ["label"]}},
     "default": {"type": "string", "description": "the label of the recommended option"}}, "required": ["text", "kind"]}}
+
+# Worker results follow a versioned contract. Version 1 adds structured issues, the tests a worker ran, acceptance
+# criteria results, risks and assumptions to the original fields; every field but status and summary is optional, so
+# older results stay valid. A result with a newer "v" than Foreman knows is rejected as malformed.
+PROTOCOL_VERSION = 1
+ISSUES = {"type": "array", "items": {"type": "object", "properties": {
+    "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+    "title": _STR, "evidence": {"type": "string", "description": "file:line, command output or observation"},
+    "files": _STRS, "repro": {"type": "string", "description": "how to reproduce it"}, "project": _STR,
+    "criterion": {"type": "string", "description": "the acceptance criterion id it breaks, if any"},
+    "verified": {"type": "boolean", "description": "true only if you reproduced it or saw it fail; false if suspected"}},
+    "required": ["severity", "title"]}}
+TESTS_RUN = {"type": "array", "items": {"type": "object", "properties": {
+    "command": _STR, "outcome": {"type": "string", "enum": ["passed", "failed", "not_run"]}, "note": _STR},
+    "required": ["command", "outcome"]}}
+ACCEPTANCE_RESULTS = {"type": "array", "items": {"type": "object", "properties": {
+    "id": _STR, "status": {"type": "string", "enum": ["pass", "fail", "untested"]}, "evidence": _STR},
+    "required": ["id", "status"]}}
 
 PLAN_SCHEMA = {
     "type": "object",
@@ -50,12 +70,20 @@ PLAN_SCHEMA = {
             "required": ["id", "project", "kind", "instructions"]}},
         "checks": {"type": "array", "items": {"type": "object", "properties": {
             "project": _STR, "command": _STR, "why": _STR}, "required": ["project", "command"]}},
+        "acceptance": {"type": "array", "items": _STR,
+                       "description": "for a change: 2-6 short, testable criteria of the observable result"},
+        "review_target": {"type": "object", "description": "set only to review changes that already exist",
+                          "properties": {"kind": {"type": "string", "enum": ["uncommitted", "branch"]},
+                                         "base": {"type": "string", "description": "branch: compared with (main)"}},
+                          "required": ["kind"]},
         "questions": QUESTIONS,
         "decisions": _STRS,
         "suggestions": SUGGESTIONS,
         "impact": {"type": "object", "properties": {
             "summary": _STR, "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-            "consumers": _STRS, "tests": _STRS, "business_rules": _STRS, "interface_change": {"type": "boolean"}},
+            "consumers": _STRS, "tests": _STRS, "business_rules": _STRS, "interface_change": {"type": "boolean"},
+            "needs_approval": {"type": "boolean", "description": "true only when the change has a significant security, "
+                               "money, data-integrity, destructive or production impact; the user approves the plan first"}},
             "required": ["summary", "risk"]},
     },
     "required": ["intent", "title", "projects", "steps", "questions"],
@@ -81,20 +109,29 @@ STEP_SCHEMA = {
         "questions": QUESTIONS,
         "suggestions": SUGGESTIONS,
         "next_for_you": _STRS,
+        "v": {"type": "integer", "description": "result contract version (1)"},
+        "issues": ISSUES,
+        "tests": TESTS_RUN,
+        "acceptance": ACCEPTANCE_RESULTS,
+        "risks": _STRS,
+        "assumptions": _STRS,
+        "next_action": {"type": "string", "description": "what you recommend should happen next (advice only)"},
     },
     "required": ["status", "summary"],
 }
 
-REVIEW_SCHEMA = {
+# The QA verifier's result: the step contract plus a verdict and the tests it wants Foreman to run (it can't run them).
+VERIFY_SCHEMA = {
     "type": "object",
     "properties": {
-        "verdict": {"type": "string", "enum": ["approve", "revise"]},
-        "summary": _STR,
-        "issues": {"type": "array", "items": {"type": "object", "properties": {
-            "project": _STR, "problem": _STR, "fix": _STR}, "required": ["project", "problem"]}},
-        "suggestions": SUGGESTIONS,
+        **STEP_SCHEMA["properties"],
+        "verdict": {"type": "string", "enum": ["approve", "revise"],
+                    "description": "revise only for verified problems that must be fixed now"},
+        "tests_requested": {"type": "array", "items": {"type": "object", "properties": {
+            "project": _STR, "command": _STR, "why": _STR}, "required": ["project", "command"]},
+            "description": "plain test commands (a test file or filter) for Foreman to run and report back"},
     },
-    "required": ["verdict", "summary", "issues"],
+    "required": ["status", "summary", "verdict"],
 }
 
 QUESTION_RULE = """\
@@ -162,10 +199,18 @@ How to plan (be proportional - most requests are small):
 7. Questions: only when a business/product rule cannot be inferred from code, docs or conventions and a wrong
    guess would be costly (kind "business"). Make technical decisions yourself and list them in "decisions".
 8. Suggestions: at most 2. See the suggestion rule below; small in-scope fixes belong in the steps.
-9. Impact (whenever steps change code): what existing behaviour, consumers, tests and confirmed business
+9. Reviewing existing work: when the user asks to review, QA or check changes that already exist (their
+   uncommitted work, "my changes", a branch), set "review_target" (kind "uncommitted", or "branch" with "base",
+   default main), list the projects to review, and plan no implement steps: Foreman's QA verifier reviews the diff
+   and Foreman runs the checks. Nothing is fixed; problems are reported.
+   Acceptance: for a change, put 2-6 short, testable criteria in "acceptance": the observable result the user asked
+   for (behaviour, output, error handling), not implementation steps. None for answers.
+10. Impact (whenever steps change code): what existing behaviour, consumers, tests and confirmed business
    decisions the change touches, and the risk: low = local and covered by tests; medium = shared code, an
    interface, or business logic; high = money, data, auth, migrations, or several consumers. Foreman adds an
    impact investigation before the edits when the risk is medium or high, or when known consumers are left out.
+   Set "needs_approval" only for significant security, money, data-integrity, destructive or production impact:
+   the user then approves the plan before anything changes. Ordinary complex changes don't need it.
 Project names in steps/checks/projects must be registry names.
 Images and files the user attached appear in the request as [Image #n: /path/file.png] or [File #n: /path], and
 `@path` names a file or folder relative to the current directory. Look at them (read-only) when they matter, and
@@ -207,7 +252,8 @@ class Brain:
                  choice_for: Optional[Callable[[str, str], Any]] = None,
                  on_call: Optional[Callable[[str], bool]] = None, on_start: Optional[Callable[[str, str], None]] = None,
                  on_activity: Optional[Callable[[str, str, str], None]] = None,
-                 on_fail: Optional[Callable[[str, RunResult], None]] = None, stop_on_limit: bool = False):
+                 on_fail: Optional[Callable[[str, RunResult], None]] = None, stop_on_limit: bool = False,
+                 on_result: Optional[Callable[[str, str, RunResult], None]] = None):
         self.providers = providers  # preference order; first that succeeds wins
         self.timeout = timeout
         self.choice_for = choice_for or (lambda provider, purpose: None)  # -> Choice(model, effort) or None
@@ -216,6 +262,7 @@ class Brain:
         self.on_activity = on_activity
         self.on_fail = on_fail or (lambda name, result: None)
         self.stop_on_limit = stop_on_limit  # automatic switching is off: a usage limit ends the call (the caller waits)
+        self.on_result = on_result or (lambda name, purpose, result: None)  # every run, for metrics
 
     def call(self, prompt: str, schema: Dict[str, Any], cwd: str, extra_dirs: Optional[List[str]] = None,
              exclude: Optional[List[str]] = None, purpose: str = "plan", web: bool = False) -> Dict[str, Any]:
@@ -235,10 +282,15 @@ class Brain:
             res = p.run(RunRequest(prompt=prompt, cwd=cwd, mode="read", extra_dirs=extra_dirs or [], persist=False,
                                    schema=schema, timeout=self.timeout, model=pick.model if pick else None,
                                    effort=pick.effort if pick else None, on_activity=act, web=web))
-            if res.ok and isinstance(res.data, dict):
-                res.data["_provider"] = p.name
-                res.data["_errors"] = errors
-                return res.data
+            self.on_result(p.name, purpose, res)
+            if res.ok:  # a result that doesn't match its schema is a failure, never a partial success
+                data, problems = check_result(res.data, schema)
+                if data is not None:
+                    data["_provider"] = p.name
+                    data["_errors"] = errors
+                    return data
+                res = RunResult(False, res.text, res.session_id, error="its result didn't match the required format: "
+                                + "; ".join(problems[:3]), duration=res.duration, raw=res.raw, kind=OUTPUT)
             errors.append(f"{p.name}: {res.error or 'no structured output'}")
             kinds.append(res.kind)
             self.on_fail(p.name, res)
@@ -331,27 +383,6 @@ class Brain:
             f"PROJECT REGISTRY:\n{registry_ctx}",
             PLANNING_RULES,
         ])
-
-    @staticmethod
-    def review_prompt(task: Dict[str, Any], diffs: Dict[str, str], checks: List[Dict[str, Any]],
-                      knowledge: str = "") -> str:
-        diff_txt = "\n\n".join(f"### {p}\n{d or '(no changes)'}" for p, d in diffs.items())
-        check_txt = "\n".join(f"- {c['project']}: `{c['command']}` -> {'PASS' if c['ok'] else 'FAIL'}"
-                              + ("" if c["ok"] else f"\n  {c.get('tail', '')[-600:]}") for c in checks) or "(none run)"
-        steps = "\n".join(f"- {s['project']}: {s.get('summary', '')}" for s in task["steps"] if s["kind"] == "implement")
-        return "\n\n".join(x for x in [
-            "You are an independent reviewer for Foreman. You did not write this change. Judge whether the request "
-            "is fully and correctly achieved across all projects. Focus on correctness, consistency of interfaces "
-            "between projects, missing pieces, and adequate tests. Ignore style nits. Use read-only tools to inspect "
-            "code if the diff is not enough. Verdict 'revise' only for real problems, each with a concrete fix.",
-            f"REQUEST:\n{task['request']}",
-            "DECISIONS:\n" + ("\n".join(f"- {d['text']}" for d in task["decisions"]) or "(none)"),
-            f"PROJECT KNOWLEDGE (confirmed business decisions must hold):\n{knowledge}" if knowledge else "",
-            f"WORKER SUMMARIES:\n{steps or '(none)'}",
-            f"VALIDATION RESULTS (run by Foreman):\n{check_txt}",
-            f"DIFFS (uncommitted changes made by this task):\n{diff_txt}",
-            "Small problems worth fixing now are issues (verdict revise), not suggestions. " + SUGGESTION_RULE,
-        ] if x)
 
 
 def task_context(task: Dict[str, Any], changes_since: Dict[str, List[str]]) -> str:

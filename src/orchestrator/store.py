@@ -11,7 +11,7 @@ import re
 import threading
 from typing import Any, Dict, List, Optional
 
-from orchestrator.util import now_iso, read_json, short, write_json
+from orchestrator.util import atomic_write, now_iso, read_json, redact, secret_values, short, write_json
 
 ACTIVE = {"planning", "planned", "running", "needs_input", "blocked", "partial", "queued", "interrupted", "paused"}
 FINAL = {"done", "failed", "answered", "cancelled"}
@@ -23,12 +23,24 @@ class Store:
         self.tasks_dir = os.path.join(home, "tasks")
         os.makedirs(self.tasks_dir, exist_ok=True)
         self._lock = threading.RLock()
+        # Values of secret-looking environment variables never reach task records, events or logs.
+        self._secrets = secret_values()
+
+    def clean(self, text: str) -> str:
+        return redact(text, self._secrets) if self._secrets else text
 
     # ------------------------------------------------------------------ tasks
     def new_task(self, request: str, cwd: str) -> Dict[str, Any]:
         with self._lock:
+            # The task folder is the id's claim: creating it fails if another Foreman process took that number.
             counter = os.path.join(self.tasks_dir, ".counter")
             n = (read_json(counter, 0) or 0) + 1
+            while True:
+                try:
+                    os.mkdir(self.path(str(n)))
+                    break
+                except FileExistsError:
+                    n += 1
             write_json(counter, n)
             task = {
                 "id": str(n), "title": short(request, 70), "request": request, "cwd": cwd,
@@ -48,7 +60,7 @@ class Store:
     def save(self, task: Dict[str, Any]) -> None:
         with self._lock:
             task["updated_at"] = now_iso()
-            write_json(self.path(task["id"], "task.json"), task)
+            atomic_write(self.path(task["id"], "task.json"), self.clean(json.dumps(task, indent=2, ensure_ascii=False)))
 
     def load(self, task_id: str) -> Optional[Dict[str, Any]]:
         return read_json(self.path(str(task_id), "task.json"))
@@ -65,7 +77,7 @@ class Store:
         with self._lock:
             os.makedirs(self.path(task_id), exist_ok=True)
             with open(self.path(task_id, "events.jsonl"), "a", encoding="utf-8") as f:
-                f.write(json.dumps({"at": now_iso(), "event": kind, **data}, ensure_ascii=False) + "\n")
+                f.write(self.clean(json.dumps({"at": now_iso(), "event": kind, **data}, ensure_ascii=False)) + "\n")
 
     def events(self, task_id: str) -> List[Dict[str, Any]]:
         try:
@@ -78,8 +90,11 @@ class Store:
         p = self.path(task_id, "logs", re.sub(r"[^\w.-]", "_", name) + ".txt")
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "a", encoding="utf-8") as f:
-            f.write(f"===== {now_iso()}\n{text}\n")
+            f.write(f"===== {now_iso()}\n{self.clean(text)}\n")
         return p
+
+    def write_report(self, task_id: str, text: str) -> None:
+        atomic_write(self.path(task_id, "report.md"), self.clean(text))
 
     # ------------------------------------------------------------------ lookup
     def resolve(self, ref: Optional[str], cwd: Optional[str] = None, project_names: Optional[List[str]] = None,

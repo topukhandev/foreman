@@ -3,7 +3,15 @@ Web research (verified 2026-10-25): read steps with `web` add WebSearch/WebFetch
 they are not allowed, so web access is enforced at the tool level.
 Cut-offs (verified 2026-10-26): with stream-json the session id arrives in the first line, within a second (so it
 is saved before the run can be cut off); a usage limit ends with is_error, api_error "usage_limit_reached" and
-status 429; rate_limit_event lines carry resetsAt and, near the limit, utilization."""
+status 429; rate_limit_event lines carry resetsAt and, near the limit, utilization.
+Usage (verified 2026-10-27 from a logged run): the result line has total_cost_usd and usage.input_tokens /
+output_tokens / cache_read_input_tokens / cache_creation_input_tokens.
+Isolation (verified 2026-10-27 with 2.1.311): `--restricted` with `--tools` confines Read and the allowed Bash read
+commands to the working directory and --add-dir folders (a Read or `cat` outside is refused), so read-only runs use it.
+Write runs don't: --restricted also needs a person to approve edits to tool-configuration files. The bubblewrap
+sandbox (`--settings '{"sandbox":{"enabled":true}}'`) does NOT start on this Ubuntu machine (AppArmor blocks
+unprivileged user namespaces); Claude then runs commands unsandboxed with only a warning, so Foreman doesn't use it.
+Auth: OAuth login in ~/.claude, or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN (env_keep)."""
 
 import json
 import os
@@ -12,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from orchestrator.providers.base import (GIT_POLICY, LIMIT, OUTPUT, TRANSIENT, Capabilities, ModelInfo, Provider,
                                          RunRequest, RunResult, SessionInfo, fit_prompt, sort_levels,
-                                         stream_session_id, tool_line)
+                                         stream_session_id, token_counts, tool_line)
 from orchestrator.util import run_process
 
 READ_TOOLS = ["Read", "Grep", "Glob", "LS",
@@ -36,6 +44,7 @@ def encode_cwd(path: str) -> str:
 
 class ClaudeProvider(Provider):
     name = "claude"
+    env_keep = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     capabilities = Capabilities(resume=True, fork=True, structured_output=True,
                                 session_discovery=True, enforced_read_only=True, web=True,
                                 writes_extra_dirs=True)
@@ -61,9 +70,10 @@ class ClaudeProvider(Provider):
         if req.mode == "write":
             cmd += ["--permission-mode", "acceptEdits", "--allowedTools", "Bash", "Edit", "Write",
                     "--disallowedTools", *WRITE_DENY]
-        else:
-            cmd += ["--allowedTools", *READ_TOOLS, *(["WebSearch", "WebFetch"] if req.web else []),
-                    "--disallowedTools", "Edit", "Write", "NotebookEdit"]
+        else:  # read-only: file access confined to the project and its --add-dir folders (see the docstring)
+            web = ["WebSearch", "WebFetch"] if req.web else []
+            cmd += ["--restricted", "--tools", "Read", "Grep", "Glob", "Bash", *web,
+                    "--allowedTools", *READ_TOOLS, *web, "--disallowedTools", "Edit", "Write", "NotebookEdit"]
         if req.schema:
             cmd += ["--json-schema", json.dumps(req.schema)]
         # Prompt is passed after `--` so it can never be parsed as a flag (variadic tool lists above).
@@ -119,6 +129,7 @@ class ClaudeProvider(Provider):
             kind=kind,
             retry_at=retry_at,
             usage=usage,
+            tokens=_tokens(payload.get("usage")),
         )
 
     def activity(self, ev, cwd):
@@ -178,6 +189,12 @@ def _usage(out: str) -> Optional[Dict[str, Any]]:
             return {"utilization": float(info.get("utilization") or (1.0 if info.get("status") == "rejected" else 0.0)),
                     "resets_at": float(info["resetsAt"]), "window": info.get("rateLimitType", "")}
     return None
+
+
+def _tokens(u: Any) -> Optional[Dict[str, int]]:
+    u = u if isinstance(u, dict) else {}
+    return token_counts(input=u.get("input_tokens"), output=u.get("output_tokens"),
+                        cache_read=u.get("cache_read_input_tokens"), cache_write=u.get("cache_creation_input_tokens"))
 
 
 def _first_prompt(path: str) -> str:

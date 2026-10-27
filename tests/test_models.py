@@ -12,7 +12,7 @@ from helpers import Script, Workspace, make_engine
 from test_scenarios import editing_worker, plan, step
 
 from orchestrator import menus
-from orchestrator.brain import PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA
+from orchestrator.brain import PLAN_SCHEMA, STEP_SCHEMA, VERIFY_SCHEMA
 from orchestrator.config import Choice, load_config
 from orchestrator.providers.antigravity import AntigravityProvider
 from orchestrator.providers.base import LIMIT, ModelInfo, RunRequest, RunResult
@@ -98,7 +98,7 @@ class RunTest(Base):
 
     def recorder(self, name, inner):
         def run(req):
-            kind = "plan" if req.schema is PLAN_SCHEMA else "review" if req.schema is REVIEW_SCHEMA else \
+            kind = "plan" if req.schema is PLAN_SCHEMA else "review" if req.schema is VERIFY_SCHEMA else \
                 "step" if req.schema is STEP_SCHEMA else "other"
             self.seen.append((name, kind, req.model, req.effort))
             return inner(req)

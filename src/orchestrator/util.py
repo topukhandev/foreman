@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def now_iso() -> str:
@@ -209,7 +209,43 @@ def git_head(path: str) -> Optional[str]:
     return out.strip() if out else None
 
 
-def _file_hash(path: str) -> Optional[str]:
+def review_files(path: str, kind: str, base: str = "main") -> Tuple[List[str], Optional[str]]:
+    """Files to review that Foreman didn't change: your uncommitted ones, or everything on this branch since it left
+    `base` (committed or not). Returns (files, the commit to diff against; None means HEAD)."""
+    snap = snapshot(path)
+    dirty = sorted(snap.get("dirty") or {})
+    if kind != "branch":
+        return dirty, None
+    mb = (_git(path, "merge-base", base, "HEAD") or "").strip()
+    if not mb:
+        return dirty, None
+    committed = [f for f in (_git(path, "diff", "--name-only", mb) or "").splitlines() if f and not f.startswith(".foreman/")]
+    return sorted(set(committed) | set(dirty)), mb
+
+
+# Files in a project's .foreman folder that steer Foreman (trusted check commands, decisions, mode and role files).
+TRUST_FILES_RE = re.compile(r"^(checks\.yaml|decisions\.md|knowledge\.md|modes/.*|roles/.*)$")
+
+
+def trust_files(path: str) -> Dict[str, Optional[str]]:
+    """Hashes of the .foreman files Foreman trusts. Only Foreman writes there; a worker changing them is a violation."""
+    root = os.path.join(path, ".foreman")
+    out: Dict[str, Optional[str]] = {}
+    for d, _, files in os.walk(root):
+        for f in files:
+            rel = os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/")
+            if TRUST_FILES_RE.match(rel):
+                out[rel] = file_hash(os.path.join(d, f))
+    return out
+
+
+def remote_refs(path: str) -> Dict[str, str]:
+    """Remote-tracking branches and their commits. A push (or fetch) during a step changes them."""
+    out = _git(path, "for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes") or ""
+    return dict(line.split(" ", 1) for line in out.splitlines() if " " in line)
+
+
+def file_hash(path: str) -> Optional[str]:
     try:
         h = hashlib.sha1()
         with open(path, "rb") as f:
@@ -230,7 +266,7 @@ def snapshot(path: str) -> Dict[str, Any]:
         rel = line[3:].split(" -> ")[-1].strip().strip('"')
         if rel.startswith(".foreman/"):  # Foreman's own project knowledge, never a worker's change
             continue
-        files[rel] = _file_hash(os.path.join(path, rel))
+        files[rel] = file_hash(os.path.join(path, rel))
     return {"git": True, "head": git_head(path), "dirty": files}
 
 
@@ -248,12 +284,13 @@ def changed_since(path: str, base: Dict[str, Any]) -> List[str]:
     return sorted(set(changed))
 
 
-def diff_text(path: str, files: List[str], limit: int = 15000) -> str:
-    """Unified diff of the given files against HEAD, including untracked files, truncated."""
+def diff_text(path: str, files: List[str], limit: int = 15000, base: Optional[str] = None) -> str:
+    """Unified diff of the given files against HEAD (or against `base`, a commit), including untracked files,
+    truncated."""
     if not files:
         return ""
     parts = []
-    tracked = _git(path, "diff", "HEAD", "--", *files) or ""
+    tracked = _git(path, "diff", base or "HEAD", "--", *files) or ""
     parts.append(tracked)
     untracked = set((_git(path, "ls-files", "--others", "--exclude-standard") or "").splitlines())
     for f in files:
@@ -261,3 +298,83 @@ def diff_text(path: str, files: List[str], limit: int = 15000) -> str:
             parts.append(f"--- /dev/null\n+++ b/{f}\n" + "".join("+" + l for l in read_text(os.path.join(path, f), 8000).splitlines(True)))
     text = "\n".join(p for p in parts if p)
     return text if len(text) <= limit else text[:limit] + f"\n… [diff truncated at {limit} chars]"
+
+
+_TYPES = {"string": str, "array": list, "object": dict, "boolean": bool, "integer": int, "number": (int, float)}
+
+
+def check_result(data: Any, schema: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """Validate an AI result against its JSON schema (the subset Foreman's schemas use: type, properties, required,
+    items, enum). A wrong top level (not an object, a required field missing, a field of the wrong type, a value
+    outside its enum) is fatal: returns (None, problems). Inside lists, items of the wrong type (or with a field of the
+    wrong type) are dropped and named in the problems; missing item fields get the callers' defaults, and fields the
+    schema doesn't know are kept."""
+    if not isinstance(data, dict):
+        return None, ["the result is not a JSON object"]
+    fatal = [f"'{k}' is missing" for k in schema.get("required", []) if k not in data or data[k] is None]
+    clean, notes = dict(data), []
+    for key, sub in (schema.get("properties") or {}).items():
+        if key not in data or data[key] is None:
+            continue
+        problem = _type_problem(data[key], sub)
+        if problem:
+            fatal.append(f"'{key}' {problem}")
+        elif sub.get("type") == "array" and isinstance(sub.get("items"), dict):
+            kept = [x for x in data[key] if not _item_problem(x, sub["items"])]
+            if len(kept) != len(data[key]):
+                notes.append(f"dropped {len(data[key]) - len(kept)} malformed item(s) in '{key}'")
+            clean[key] = kept
+    if fatal:
+        return None, fatal
+    return clean, notes
+
+
+def _type_problem(value: Any, sub: Dict[str, Any]) -> str:
+    want = _TYPES.get(sub.get("type", ""))
+    if want and (not isinstance(value, want) or (sub.get("type") in ("integer", "number") and isinstance(value, bool))):
+        return f"should be {sub['type']}"
+    if sub.get("enum") and value not in sub["enum"]:
+        return f"is {value!r}, not one of {', '.join(map(str, sub['enum']))}"
+    return ""
+
+
+def _item_problem(item: Any, sub: Dict[str, Any]) -> str:
+    problem = _type_problem(item, sub)
+    if problem or sub.get("type") != "object":
+        return problem
+    for k, s in (sub.get("properties") or {}).items():  # nested values: types only (an odd enum value is tolerated)
+        if item.get(k) is not None and s.get("type") in ("string", "boolean", "integer", "number") and \
+                _type_problem(item[k], {"type": s["type"]}):
+            return f"'{k}' should be {s['type']}"
+    return ""
+
+
+# Environment variables AI workers don't get: anything that looks like a secret, plus access the worker has no use
+# for (the ssh agent, which would let it push; the parent Claude Code session's messaging channel). A provider keeps
+# only the exact names its CLI needs to log in (Provider.env_keep, plus providers.<name>.env_keep in config.yaml).
+SECRET_ENV_RE = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|_PAT$|PRIVATE|COOKIE|AUTH|MESSAGING|_PWD$|DATABASE_URL|"
+                           r"_DSN$|_URI$|CONNECTION_STRING", re.I)
+
+
+def worker_env(keep: Any = (), environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    env = dict(os.environ if environ is None else environ)
+    keep = set(keep or ())
+    return {k: v for k, v in env.items() if k in keep or not SECRET_ENV_RE.search(k)}
+
+
+def secret_values(environ: Optional[Dict[str, str]] = None) -> List[Tuple[str, str]]:
+    """(name, value) of the secret-looking variables in the environment, longest value first (for redaction)."""
+    env = os.environ if environ is None else environ
+    found = [(k, v) for k, v in env.items() if SECRET_ENV_RE.search(k) and len(v or "") >= 8]
+    return sorted(found, key=lambda kv: -len(kv[1]))
+
+
+def redact(text: str, secrets: List[Tuple[str, str]]) -> str:
+    """Replace secret values (as they are, and as they look inside JSON strings) before text is stored."""
+    for name, value in secrets:
+        if value in text:
+            text = text.replace(value, f"[redacted {name}]")
+        escaped = json.dumps(value)[1:-1]
+        if escaped != value and escaped in text:
+            text = text.replace(escaped, f"[redacted {name}]")
+    return text

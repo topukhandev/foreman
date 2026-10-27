@@ -14,7 +14,7 @@ from orchestrator.config import load_config, set_option
 from orchestrator.report import task_summary
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
-               "accept", "dismiss", "close", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version"}
+               "accept", "dismiss", "close", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version", "stats"}
 
 
 def _progress(msg: str) -> None:
@@ -141,6 +141,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--json", action="store_true", help="print the current choices as JSON")
     p = sub.add_parser("tasks", help="list tasks")
     p.add_argument("-n", type=int, default=15)
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("stats", help="totals across tasks: outcomes, model calls, retries, time, cost (no AI)")
+    p.add_argument("--since", help="only tasks created on or after this date (YYYY-MM-DD)")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("show", help="task details")
     p.add_argument("task")
@@ -307,6 +310,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         for t in eng.store.all()[: args.n]:
             print(f"#{t['id']:<4} {t['status']:<12} {t['title']}  ({t['updated_at'][:16]})")
+        return 0
+    if cmd == "stats":
+        from orchestrator.metrics import render_stats, stats
+        s = stats(eng.store.all(), args.since)
+        if args.json:
+            _dump(s)
+        else:
+            print(render_stats(s))
         return 0
     if cmd == "show":
         cands = eng.store.resolve(args.task, fallback=False)
@@ -527,6 +538,7 @@ Foreman
   foreman answer <task> <text>     answer a task's open question
   foreman close <task> [note]      mark a task finished another way (--cancel: not wanted); "close #N" in chat
   foreman tasks | show <task>      history and details (show --events for the audit log)
+  foreman stats [--since DATE]     totals across tasks: outcomes, model calls, retries, time, cost (no AI)
   foreman suggestions | accept <id> | dismiss <id>
   foreman projects [list|scan|show|add|link|unlink|test]
   foreman sessions [project]       existing Claude/OpenCode/Antigravity sessions for a project

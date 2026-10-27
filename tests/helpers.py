@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from orchestrator.brain import BTW_SCHEMA, DOC_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA, STEP_SCHEMA  # noqa: E402
+from orchestrator.brain import BTW_SCHEMA, DOC_SCHEMA, PLAN_SCHEMA, STEP_SCHEMA, VERIFY_SCHEMA  # noqa: E402
 from orchestrator.config import load_config  # noqa: E402
 from orchestrator.engine import Engine  # noqa: E402
 from orchestrator.providers.base import RunRequest, RunResult  # noqa: E402
@@ -91,7 +91,10 @@ class Script:
         self.plan: Callable[[RunRequest], Dict] = lambda req: {"intent": "change", "title": "t", "projects": [],
                                                                "steps": [], "questions": []}
         self.step: Callable[[RunRequest], Dict] = lambda req: {"status": "done", "summary": "did it"}
+        # QA verification. `review` is the short form: a verdict and issues {project, problem, fix}, turned into a QA
+        # result with verified, high-severity issues; set `verify` to script the full QA result instead.
         self.review: Callable[[RunRequest], Dict] = lambda req: {"verdict": "approve", "summary": "looks right", "issues": []}
+        self.verify: Optional[Callable[[RunRequest], Dict]] = None
         self.document: Callable[[RunRequest], Dict] = lambda req: {"title": "Doc", "document": "# Doc\n\nBody.",
                                                                    "summary": "Wrote the document."}
         self.btw: Callable[[RunRequest], Dict] = lambda req: {"answer": "**42** rows."}
@@ -108,9 +111,11 @@ class Script:
             if req.schema is DOC_SCHEMA:
                 self.log.append(f"{provider_name}:document")
                 return RunResult(True, "", session_id=f"{provider_name}-doc", data=self.document(req))
-            if req.schema is REVIEW_SCHEMA:
-                self.log.append(f"{provider_name}:review")
-                return RunResult(True, "", session_id=f"{provider_name}-rev", data=self.review(req))
+            if req.schema is VERIFY_SCHEMA:
+                self.log.append(f"{provider_name}:verify")
+                data = self.verify(req) if self.verify else qa_result(self.review(req))
+                sid = req.session_id if (req.session_id and not req.fork) else f"{provider_name}-qa{next(self._ids)}"
+                return RunResult(True, data.get("summary", ""), session_id=sid, data=data)
             if req.schema is BTW_SCHEMA:
                 self.log.append(f"{provider_name}:btw")
                 return RunResult(True, "", data=self.btw(req))
@@ -124,6 +129,15 @@ class Script:
             sid = req.session_id if (req.session_id and not req.fork) else f"{provider_name}-s{next(self._ids)}"
             return RunResult(True, data.get("summary", ""), session_id=sid, data=data)
         return run
+
+
+def qa_result(review: Dict) -> Dict:
+    """A short review ({verdict, summary, issues: [{project, problem, fix}]}) as a QA verifier's result."""
+    if "status" in review:
+        return review
+    return {"status": "done", "summary": review.get("summary", ""), "verdict": review.get("verdict", "approve"),
+            "issues": [{"severity": "high", "verified": True, "title": i.get("problem", ""), "project": i.get("project"),
+                        "evidence": i.get("fix", "")} for i in review.get("issues") or []]}
 
 
 def make_engine(ws: Workspace, script: Script, providers: Optional[List[str]] = None, sessions=None,

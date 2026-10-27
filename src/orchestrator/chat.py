@@ -324,7 +324,7 @@ class Chat:
         planner, review, workers = None, None, []
         for ev in self.eng.store.events(task_id):
             e, prov = ev.get("event"), ev.get("provider")
-            if e == "thinking" and ev.get("purpose") == "review":
+            if (e == "thinking" and ev.get("purpose") == "review") or (e == "step_start" and ev.get("step_kind") == "verify"):
                 review = prov
             elif e == "thinking" and planner is None:
                 planner = prov
@@ -333,6 +333,8 @@ class Chat:
                 review = None if review == prov else review
             elif e == "step_start":
                 workers.append(prov)
+            elif e == "step_failed" and review == prov and prov not in workers:
+                review = None
             elif e == "step_failed" and prov in workers:
                 workers.remove(prov)
         names = {"antigravity": "agy"}
@@ -886,7 +888,8 @@ class Phase:
                 f"Starting work on {projects[0]}" if len(projects) == 1 else f"Starting work on {len(projects)} projects"
         elif e == "step_start":
             project = ev.get("project", "")
-            verb = f"Investigating {project}" if ev.get("step_kind") == "investigate" else f"Implementing in {project}"
+            verb = {"investigate": f"Investigating {project}", "verify": f"Verifying the changes (QA) in {project}"}.get(
+                ev.get("step_kind"), f"Implementing in {project}")
             self.running[project] = (verb, provider or "")
             self.verb, self.who = verb, provider or self.who
         elif e == "step_failed":  # another provider may retry the step; the next step_start says so
@@ -958,7 +961,7 @@ def format_event(ev: Dict[str, Any], current: Optional[str] = None, follows: boo
     if e == "replan":
         return ui.tool("Expand plan", "new dependency") + "\n" + ui.result("; ".join(ev.get("discoveries", [])))
     if e == "step_start":
-        name = "Investigate" if ev.get("step_kind") == "investigate" else "Implement"
+        name = {"investigate": "Investigate", "verify": "Verify"}.get(ev.get("step_kind"), "Implement")
         return ui.tool(name, ev.get("project", ""), f"{ev.get('provider')}" + (f" · {ev['why']}" if ev.get("why") else ""))
     if e == "step_done":
         ok = ev.get("status") == "done"

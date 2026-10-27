@@ -12,6 +12,11 @@
 - `-p` must be attached (`-p=<prompt>`), otherwise agy parses the next flag as the prompt.
 - Web (verified 2026-10-25): plan mode has `search_web` (and `read_url_content`); agy cannot disable them per run,
   so the read-only rule tells it whether web research is allowed (prompt-level only).
+- Usage (verified 2026-10-27 from a logged run): the result payload has usage.input_tokens / output_tokens /
+  thinking_tokens / cache_read_tokens; no cost.
+- Auth (checked 2026-10-27): the login lives in ~/.gemini; the binary also reads GEMINI_API_KEY, GOOGLE_API_KEY and
+  GOOGLE_APPLICATION_CREDENTIALS, so those are the only secret-looking variables its runs keep (env_keep). agy has a
+  `--sandbox` flag ("terminal restrictions"); not evaluated yet.
 """
 
 import json
@@ -22,7 +27,7 @@ import re
 from typing import Dict, List
 
 from orchestrator.providers.base import (GIT_POLICY, OUTPUT, Capabilities, ModelInfo, Provider, RunRequest, RunResult,
-                                         SessionInfo, fit_prompt, sort_levels, stream_session_id, tool_line)
+                                         SessionInfo, fit_prompt, sort_levels, stream_session_id, token_counts, tool_line)
 from orchestrator.util import run_process
 
 
@@ -39,6 +44,7 @@ def antigravity_index() -> str:
 
 class AntigravityProvider(Provider):
     name = "antigravity"
+    env_keep = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS")
     capabilities = Capabilities(resume=True, fork=False, structured_output=True,
                                 session_discovery=True, enforced_read_only=True, web=True,
                                 writes_extra_dirs=True, effort_in_model=True)
@@ -108,7 +114,10 @@ class AntigravityProvider(Provider):
             error = (err.strip()[-600:] or text[-600:] or f"status {payload.get('status')}") + \
                 (f"; denied: {denied}" if denied else "")
         sid = payload.get("conversation_id") or stream_session_id(out, "conversation_id")
-        return RunResult(ok, text, sid, data, error, dur, raw=out, kind=kind)
+        u = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        return RunResult(ok, text, sid, data, error, dur, raw=out, kind=kind,
+                         tokens=token_counts(input=u.get("input_tokens"), output=u.get("output_tokens"),
+                                             reasoning=u.get("thinking_tokens"), cache_read=u.get("cache_read_tokens")))
 
     def activity(self, ev, cwd):
         su = ev.get("step_update") or {}

@@ -84,7 +84,8 @@ class ResumeTest(unittest.TestCase):
         resumed = claude.calls[before]
         self.assertEqual(resumed.session_id, task["steps"][1]["history"][0]["session"], "back in the asking session")
         self.assertIn("A: Install pyarrow", resumed.prompt)
-        self.assertEqual([s["status"] for s in task["steps"]], ["done"] * 4)
+        self.assertEqual([s["status"] for s in task["steps"] if not s.get("gate")], ["done"] * 4)
+        self.assertEqual([s["kind"] for s in task["steps"] if s.get("gate")], ["verify"])  # then QA checked the work
         self.assertEqual(task["next"]["mode"], "qa", "a finished development task moves on to QA")
 
     def test_a_worker_that_stops_for_input_without_asking_still_gets_a_question(self):
@@ -134,7 +135,8 @@ class ResumeTest(unittest.TestCase):
         task = self.eng.execute(nxt)["task"]
         self.assertEqual(task["status"], "done")
         self.assertEqual(self.s.log.count("claude:plan"), plans, "the existing plan is run, not re-planned")
-        self.assertEqual([s["status"] for s in task["steps"]], ["done"] * 4)
+        self.assertEqual([s["status"] for s in task["steps"] if not s.get("gate")], ["done"] * 4)
+        self.assertEqual([s["kind"] for s in task["steps"] if s.get("gate")], ["verify"])  # then QA checked the work
         self.assertEqual(len(self.eng.store.all()), 1)
 
     def test_a_task_finished_another_way_is_closed_and_never_continued(self):

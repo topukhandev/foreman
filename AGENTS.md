@@ -5,7 +5,8 @@
 - Python ≥ 3.9, one dependency (`pyyaml`). Tests: `python3 -m unittest discover tests`; lint: `ruff check .` (both run in CI; must stay green and fast;
   use `tests/helpers.py` workspaces and the scripted `MockProvider`, never real CLIs, in unit tests).
 - Keep the split described in `README_ARCHITECTURE.md`: deterministic state/safety in `registry.py`,
-  `store.py`, `engine.py`; AI prompts and schemas only in `brain.py`; CLI specifics only in `providers/`.
+  `store.py`, `engine.py`; AI prompts and schemas only in `brain.py`; CLI specifics only in `providers/`; role
+  permissions only in `roles.py` (guidance files are text and must never grant anything).
 - Interfaces (`cli.py`, `mcp_server.py`) stay thin. New behaviour goes into the engine so every front end
   gets it.
 - Don't add UI layers (visual dashboards, voice, custom line editors) unless the user asks. Visible
@@ -30,6 +31,12 @@
 8. Follow the confirmed decisions in the project's `.foreman/decisions.md`. Only Foreman writes to
    `.foreman/`; workers never do.
 9. Before code changes that are risky or touch something with known consumers, an impact investigation runs first.
+10. Report results in the versioned contract (`brain.STEP_SCHEMA`); never report a test as passed without running it.
+    Foreman validates every result and re-runs the checks itself; claims it can't confirm are reported as such.
+11. QA verifies independently (read-only, its own session) and its verified problems go back to the developer's
+    session; a result is only reported as verified when Foreman's checks or QA support it.
+12. High-impact changes (security, money, data integrity, destructive, production) wait for the user's approval of
+    the plan; a new dependency is never added silently (the user keeps it or the worker removes it).
 
 ## Models and effort
 
@@ -56,7 +63,7 @@
   of their usage window get no new work if another can do it.
 - Steps after an unfinished one wait (never skipped); a half-done plan is not checked or fixed. "continue" / "next"
   carry on the same task and sessions; re-planning only for new instructions or code changed since the last run.
-- `max_fix_rounds` (default 3) review/check bounces, then escalate as Remaining.
+- `max_fix_rounds` (default 3) QA/check bounces back to the developer, then escalate as Remaining.
 - `max_replans` (default 2) plan expansions after discoveries.
 - Daily runs per provider: hard stop at 100%, user sign-off at `warn_at_percent` (80%).
 - The user is notified once per task run, when it finishes.

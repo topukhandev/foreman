@@ -38,6 +38,15 @@ INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".gi
 CHECK_KINDS = ("test", "lint", "typecheck", "build", "e2e")
 
 
+SUPERSEDED = "[superseded"
+# "- 2026-10-27 · feature · question → answer (task #3)", the feature part optional.
+DECISION_RE = re.compile(r"^- \d{4}-\d{2}-\d{2}(?: · [^·]*?)? · (?P<q>.+?) → (?P<a>.+?)(?: \(task #\d+\))?(?: \[superseded[^\]]*\])?$")
+
+
+def _norm(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
 def slug(text: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return s[:50].rstrip("-") or "general"
@@ -58,10 +67,23 @@ class ProjectKnowledge:
 
     # ------------------------------------------------------------------ decisions
     def decisions(self, limit: int = 20) -> List[str]:
-        lines = [l[2:].strip() for l in read_text(self._path("decisions.md")).splitlines() if l.startswith("- ")]
+        """The decisions in force (a decision replaced by a later answer to the same question is left out)."""
+        lines = [l[2:].strip() for l in read_text(self._path("decisions.md")).splitlines()
+                 if l.startswith("- ") and SUPERSEDED not in l]
         return lines[-limit:]
 
+    def known_answer(self, question: str) -> Optional[str]:
+        """The answer in force to this question (same words, ignoring case and punctuation), or None."""
+        key = _norm(question)
+        for line in reversed(read_text(self._path("decisions.md")).splitlines()):
+            m = DECISION_RE.match(line)
+            if m and SUPERSEDED not in line and _norm(m.group("q")) == key:
+                return m.group("a")
+        return None
+
     def add_decision(self, question: str, answer: str, task_id: str = "", feature: str = "") -> None:
+        """Record a confirmed decision. A different answer to the same question replaces the earlier one, which stays in
+        the file marked as superseded (the history is kept; only the latest answer is given to planners and workers)."""
         self._ensure()
         path = self._path("decisions.md")
         text = read_text(path) or DECISIONS_HEADER
@@ -69,9 +91,15 @@ class ProjectKnowledge:
         a = " ".join(answer.split())
         entry = f"- {now_iso()[:10]}" + (f" · {feature}" if feature else "") + f" · {q} → {a}" + \
                 (f" (task #{task_id})" if task_id else "")
-        if f"{q} → {a}" in text:
+        if any(SUPERSEDED not in line and f"{q} → {a}" in line for line in text.splitlines()):
             return
-        atomic_write(path, text.rstrip("\n") + "\n" + entry + "\n")
+        lines = []
+        for line in text.rstrip("\n").splitlines():
+            m = DECISION_RE.match(line)
+            if m and SUPERSEDED not in line and _norm(m.group("q")) == _norm(q):
+                line += f" {SUPERSEDED} {now_iso()[:10]}" + (f" by task #{task_id}" if task_id else "") + "]"
+            lines.append(line)
+        atomic_write(path, "\n".join(lines) + "\n" + entry + "\n")
 
     # ------------------------------------------------------------------ lifecycle
     def lifecycle(self) -> Dict[str, Dict[str, Any]]:

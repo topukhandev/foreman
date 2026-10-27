@@ -32,7 +32,7 @@ class DryRunTest(unittest.TestCase):
         self.assertIn("plan only", res["report"])
         self.assertIn("add currency", res["report"])
         self.assertIn("npm test", res["report"])
-        self.assertEqual([l for l in self.s.log if ":step:" in l or ":review" in l], [], "no worker, no review")
+        self.assertEqual([l for l in self.s.log if ":step:" in l or ":verify" in l], [], "no worker, no QA")
         self.assertEqual(task["steps"][0]["status"], "pending")
         self.assertFalse([e for e in task["evidence"] if e["kind"] == "check"], "no check ran")
         self.assertEqual(self.eng.store.all()[0]["id"], task["id"])
