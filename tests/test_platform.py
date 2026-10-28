@@ -155,6 +155,58 @@ class WindowsCommandTest(unittest.TestCase):
         self.assertIn("refused to run", res.err)
 
 
+class GitHeadTest(unittest.TestCase):
+    """HEAD read from the .git files must always equal what git itself says."""
+
+    def setUp(self):
+        from helpers import git, make_repo
+        self.git = git
+        self.repo = make_repo(tempfile.mkdtemp(prefix="foreman_head_"), "repo", {"a.txt": "a\n"})
+
+    def same(self, path):
+        from orchestrator.util import git_head, is_git_repo
+        truth = subprocess.run(["git", "-C", path, "rev-parse", "HEAD"], capture_output=True, text=True)
+        self.assertEqual(git_head(path), truth.stdout.strip() if truth.returncode == 0 else None)
+        self.assertTrue(is_git_repo(path))
+
+    def commit(self, path, name):
+        with open(os.path.join(path, name), "w") as f:
+            f.write(name)
+        self.git(path, "add", "-A")
+        self.git(path, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", name)
+
+    def test_branch_packed_refs_detached_and_unborn(self):
+        self.same(self.repo)
+        self.commit(self.repo, "b.txt")
+        self.same(self.repo)
+        self.git(self.repo, "pack-refs", "--all")  # the branch now lives only in packed-refs
+        self.same(self.repo)
+        self.commit(self.repo, "c.txt")
+        self.same(self.repo)
+        self.git(self.repo, "checkout", "-q", "--detach")
+        self.same(self.repo)
+        empty = os.path.join(os.path.dirname(self.repo), "empty")
+        os.makedirs(empty)
+        self.git(empty, "init", "-q")
+        self.same(empty)  # no commit yet: no HEAD
+
+    def test_worktrees_and_subfolders(self):
+        wt = os.path.join(os.path.dirname(self.repo), "wt")
+        self.git(self.repo, "worktree", "add", "-q", "-b", "side", wt)
+        self.commit(wt, "w.txt")
+        self.same(wt)
+        self.same(self.repo)
+        sub = os.path.join(self.repo, "pkg")
+        os.makedirs(sub)
+        self.same(sub)  # a project inside a repository: asked of git
+
+    def test_not_a_repository(self):
+        from orchestrator.util import git_head, is_git_repo
+        plain = tempfile.mkdtemp(prefix="foreman_plain_")
+        self.assertIsNone(git_head(plain))
+        self.assertFalse(is_git_repo(plain))
+
+
 class SkipListTest(unittest.TestCase):
     def test_the_skip_list_never_grows_and_every_entry_has_a_reason(self):
         count = sum(len(v) for v in platform_skips.SKIPS.values())

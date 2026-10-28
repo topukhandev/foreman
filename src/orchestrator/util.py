@@ -229,11 +229,60 @@ def _git(path: str, *args: str) -> Optional[str]:
     return res.out if res.code == 0 else None
 
 
+# HEAD and the repository check are read from the .git files when they are plain (the usual case): Foreman asks for
+# them many times per step and per prompt, and starting a git process for each costs ~5 ms on Linux and ten times that
+# on Windows. Anything unusual (a project in a subfolder of a repository, the reftable format, a missing ref) is
+# asked of git itself, so the answer is always git's.
+_SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _git_dir(path: str) -> Optional[str]:
+    """The git directory of a repository whose top level is `path` (.git, or the folder a worktree's .git file names)."""
+    dot = os.path.join(path, ".git")
+    if os.path.isdir(dot):
+        return dot
+    if os.path.isfile(dot):
+        text = read_text(dot, 4096).strip()
+        if text.startswith("gitdir:"):
+            gitdir = os.path.normpath(os.path.join(path, text[7:].strip()))
+            return gitdir if os.path.isdir(gitdir) else None
+    return None
+
+
+def _head_from_files(gitdir: str) -> Optional[str]:
+    if os.path.isdir(os.path.join(gitdir, "reftable")):
+        return None
+    head = read_text(os.path.join(gitdir, "HEAD"), 4096).strip()
+    if _SHA_RE.fullmatch(head):
+        return head  # detached
+    if not head.startswith("ref:"):
+        return None
+    ref = head[4:].strip()
+    common = read_text(os.path.join(gitdir, "commondir"), 4096).strip()
+    bases = [gitdir] + ([os.path.normpath(os.path.join(gitdir, common))] if common else [])
+    for base in bases:
+        value = read_text(os.path.join(base, *ref.split("/")), 4096).strip()
+        if _SHA_RE.fullmatch(value):
+            return value
+    for base in bases:
+        for line in read_text(os.path.join(base, "packed-refs")).splitlines():
+            sha, _, name = line.partition(" ")
+            if name.strip() == ref and _SHA_RE.fullmatch(sha):
+                return sha
+    return None
+
+
 def is_git_repo(path: str) -> bool:
+    if _git_dir(path):
+        return True
     return _git(path, "rev-parse", "--is-inside-work-tree") is not None
 
 
 def git_head(path: str) -> Optional[str]:
+    gitdir = _git_dir(path)
+    head = _head_from_files(gitdir) if gitdir else None
+    if head:
+        return head
     out = _git(path, "rev-parse", "HEAD")
     return out.strip() if out else None
 

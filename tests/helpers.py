@@ -1,5 +1,6 @@
 """Test fixtures: a throwaway multi-project workspace and a scripted provider."""
 
+import atexit
 import itertools
 import json
 import os
@@ -45,6 +46,38 @@ def node_pkg(name: str, test: str = "node test.js") -> str:
     return json.dumps({"name": name, "version": "1.0.0", "scripts": {"test": test}})
 
 
+TEMPLATE_PROJECTS = {
+    "orders-api": {
+        "package.json": node_pkg("orders-api"),
+        "README.md": "# orders-api\n\nOrders microservice. Serves GET /orders with id, total.\n",
+        "server.js": "module.exports = () => [{id: 1, total: 10}];\n",
+        "test.js": PASSING_TEST,
+    },
+    "e2e-tests": {
+        "package.json": node_pkg("e2e-tests"),
+        "README.md": "# e2e-tests\n\nIntegration scenarios for the admin panel and the orders service.\n",
+        "test.js": PASSING_TEST,
+    },
+    "notes-app": {
+        "pyproject.toml": "[project]\nname='notes'\n",
+        "README.md": "# notes\n\nA personal notes app.\n",
+    },
+}
+_TEMPLATE: Dict[str, str] = {}
+
+
+def _copy_template(name: str, root: str) -> str:
+    """A fresh copy of a template project (a git repository with one commit), built once per test process."""
+    if not _TEMPLATE:
+        folder = tempfile.mkdtemp(prefix="foreman_template_")
+        atexit.register(shutil.rmtree, folder, True)
+        for n, files in TEMPLATE_PROJECTS.items():
+            _TEMPLATE[n] = make_repo(folder, n, files)
+    dst = os.path.join(root, name)
+    shutil.copytree(_TEMPLATE[name], dst)
+    return dst
+
+
 class Workspace:
     """admin-ui (frontend) -> orders-api (backend) <- e2e-tests (integration); notes-app unrelated."""
 
@@ -54,26 +87,14 @@ class Workspace:
         self.home = os.path.join(self.tmp, "home")
         os.makedirs(self.root)
         os.makedirs(self.home)
-        self.api = make_repo(self.root, "orders-api", {
-            "package.json": node_pkg("orders-api"),
-            "README.md": "# orders-api\n\nOrders microservice. Serves GET /orders with id, total.\n",
-            "server.js": "module.exports = () => [{id: 1, total: 10}];\n",
-            "test.js": PASSING_TEST,
-        })
-        self.ui = make_repo(self.root, "admin-ui", {
+        # Three of the four projects are the same in every workspace: built once (git init, add, commit) and copied.
+        # Starting git processes is slow on Windows, and every test builds a workspace.
+        self.api, self.e2e, self.notes = (_copy_template(name, self.root) for name in ("orders-api", "e2e-tests", "notes-app"))
+        self.ui = make_repo(self.root, "admin-ui", {  # names this workspace's orders-api path: built here
             "package.json": node_pkg("admin-ui"),
             "README.md": f"# admin-ui\n\nAdmin panel UI. Orders page reads the orders API from {self.api}.\n",
             "src/orders.js": "export const show = (o) => o.total;\n",
             "test.js": PASSING_TEST,
-        })
-        self.e2e = make_repo(self.root, "e2e-tests", {
-            "package.json": node_pkg("e2e-tests"),
-            "README.md": "# e2e-tests\n\nIntegration scenarios for the admin panel and the orders service.\n",
-            "test.js": PASSING_TEST,
-        })
-        self.notes = make_repo(self.root, "notes-app", {
-            "pyproject.toml": "[project]\nname='notes'\n",
-            "README.md": "# notes\n\nA personal notes app.\n",
         })
         with open(os.path.join(self.home, "config.yaml"), "w") as f:
             f.write(f"roots: [{self.root}]\nbrain: claude\nproviders:\n  claude: {{command: claude}}\n"
