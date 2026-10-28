@@ -485,8 +485,10 @@ Deliberate deviations and open points:
   is `npm.cmd`), batch-file arguments refused when `cmd.exe` would misread them, file URIs for agy, separator-
   and case-aware paths, the home path, durations on a coarse clock, chat history order. Only `test_paste` is
   skipped (on Windows, D10). Real-provider checks on Windows and macOS are still to do (C1).
-- **CI time:** Windows takes 15–20 minutes against 1–2 on Linux, because the tests start many git processes.
-  Proposed: build the test git projects once and copy them per test.
+- **CI time:** Windows went from 15–20 minutes to about 5 (Linux 1–2, macOS 2). Two changes made the difference:
+  HEAD is read from the `.git` files instead of a `git rev-parse` process (5,400 per suite run, several per prompt;
+  git is still asked for anything unusual), and test workspaces copy three template projects. Processes per suite
+  run: about 10,500 down to 3,100. The largest remaining cost is 107 `npm test` runs.
 
 ## 12. Implementation sequence (revised)
 
