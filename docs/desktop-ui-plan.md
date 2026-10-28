@@ -480,9 +480,13 @@ Deliberate deviations and open points:
 - **No fsync in `atomic_write`.** Measured at 6–12 ms per write (it doubled the test suite's time). The atomic
   rename already protects against process crashes; power loss is handled by listing unreadable tasks (A5).
 - **Idempotency keys** move to A7, the API layer. Duplicate *runs* are already prevented by the run token.
-- **Windows and macOS code paths** (msvcrt, Job Object, taskkill, CREATE_NO_WINDOW) are written but have only
-  run on Linux. The first CI run on the other OSes still needs a push, and its failures may extend
-  `platform_skips.py` once, with reasons.
+- **CI on all three OSes is green** (2026-10-28, branch `desktop-core-hardening`): lint, Linux 3.9–3.13, macOS 3.13,
+  Windows 3.9 and 3.13. The first runs found real Windows bugs, now fixed: programs found through PATHEXT (`npm`
+  is `npm.cmd`), batch-file arguments refused when `cmd.exe` would misread them, file URIs for agy, separator-
+  and case-aware paths, the home path, durations on a coarse clock, chat history order. Only `test_paste` is
+  skipped (on Windows, D10). Real-provider checks on Windows and macOS are still to do (C1).
+- **CI time:** Windows takes 15–20 minutes against 1–2 on Linux, because the tests start many git processes.
+  Proposed: build the test git projects once and copy them per test.
 
 ## 12. Implementation sequence (revised)
 
