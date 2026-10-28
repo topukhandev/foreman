@@ -22,7 +22,7 @@ class OpenCodeProvider(Provider):
                                 session_discovery=True, enforced_read_only=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
-        req = fit_prompt(req)
+        req = fit_prompt(req, self.batch_shim)
         cmd = [self._binary or self.settings.command, "run", "--format", "json", "--dir", req.cwd]
         if req.model:
             cmd += ["-m", str(req.model)]

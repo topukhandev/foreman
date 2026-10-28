@@ -14,6 +14,7 @@ structured result is read from a fenced JSON block the prompt asks for. No sessi
 fresh. Foreman's own guards (file-change checks on read steps, the HEAD check) apply as for every provider.
 """
 
+from dataclasses import replace
 from typing import List
 
 from orchestrator.providers.base import GIT_POLICY, Capabilities, Provider, RunRequest, RunResult, fit_prompt
@@ -30,7 +31,6 @@ class GenericProvider(Provider):
                                          web=bool(extra.get("web")))
 
     def build_command(self, req: RunRequest) -> List[str]:
-        req = fit_prompt(req)
         extra = self.settings.extra or {}
         args = extra.get("write_args" if req.mode == "write" else "read_args") or ["{prompt}"]
         prompt = req.prompt
@@ -40,6 +40,7 @@ class GenericProvider(Provider):
                             "Read-only step: do not create, modify or delete files.")
         if req.schema:
             prompt += self.schema_instruction(req.schema)
+        prompt = fit_prompt(replace(req, prompt=prompt), self.batch_shim).prompt  # everything, in a file if need be
         return [self._binary or self.settings.command] + [str(a).replace("{prompt}", prompt).replace("{cwd}", req.cwd)
                                                           for a in args]
 

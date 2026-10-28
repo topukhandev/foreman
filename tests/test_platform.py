@@ -144,6 +144,24 @@ class WindowsCommandTest(unittest.TestCase):
         for bad in ("a & calc", "x|y", "100%", "!x!", 'say "hi"', "two\nlines", "a^b", "<in"):
             self.assertTrue(batch_args_problem(["run", bad]), bad)
 
+    def test_a_batch_file_cli_gets_its_prompt_through_a_file_only(self):
+        from orchestrator.config import ProviderSettings
+        from orchestrator.oscompat import batch_args_problem
+        from orchestrator.providers.base import RunRequest
+        from orchestrator.providers.generic import GenericProvider
+        p = GenericProvider(ProviderSettings("codex", command="codex", extra={"read_args": ["exec", "{prompt}"]}))
+        p._binary = r"C:\Users\me\AppData\Roaming\npm\codex.cmd"
+        self.assertTrue(p.batch_shim)
+        prompt = 'Fix "totals" & refunds: 100% | <b> ^done^ !now!'
+        cmd = p.build_command(RunRequest(prompt, tempfile.gettempdir(), schema={"type": "object"},
+                                         prompt_dir=tempfile.mkdtemp(prefix="foreman_batch_")))
+        self.assertEqual(batch_args_problem(cmd[1:]), "", "nothing cmd.exe would misread on the command line")
+        path = cmd[-1].rsplit(" ", 1)[-1]
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(prompt, text)
+        self.assertIn('"type"', text, "the schema instruction is in the file too")
+
     @unittest.skipUnless(os.name == "nt", "Windows program lookup")
     def test_programs_are_found_like_a_shell_finds_them(self):
         import shutil

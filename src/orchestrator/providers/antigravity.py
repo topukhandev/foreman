@@ -51,7 +51,7 @@ class AntigravityProvider(Provider):
                                 writes_extra_dirs=True, effort_in_model=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
-        req = fit_prompt(req)
+        req = fit_prompt(req, self.batch_shim)
         streamed = req.visual or req.on_activity is not None or req.on_session is not None
         cmd = [self._binary or self.settings.command, "--output-format", "stream-json" if streamed else "json"]
         model = req.model

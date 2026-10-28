@@ -60,16 +60,19 @@ class RunRequest:
     on_output: Optional[Callable[[str], None]] = field(default=None, repr=False)  # every raw output line, as it comes
 
 
-# A command-line argument can hold about 128 KB on Linux; a big paste in the request can exceed that.
-MAX_PROMPT_BYTES = 90_000
+# A command-line argument can hold about 128 KB on Linux; a big paste in the request can exceed that. A whole Windows
+# command line holds 32,767 characters.
+MAX_PROMPT_BYTES = 30_000 if os.name == "nt" else 90_000
 
 
-def fit_prompt(req: RunRequest) -> RunRequest:
+def fit_prompt(req: RunRequest, batch: bool = False) -> RunRequest:
     """A request whose prompt fits on a command line. Longer prompts are written to a file the CLI is told to read
     first (its directory is added to the readable ones); the start and the end stay in the prompt itself.
     Prompts hold code and decisions: each one gets its own private folder (0700, file 0600) under the task or the
-    Foreman home, so neither other users nor other runs can read it (the shared temp directory could)."""
-    if len(req.prompt.encode("utf-8")) <= MAX_PROMPT_BYTES:
+    Foreman home, so neither other users nor other runs can read it (the shared temp directory could).
+    batch: the CLI is a Windows batch-file shim (npm's claude.cmd): cmd.exe re-reads its command line, so the prompt
+    always goes in the file and the command line names only the file (oscompat.batch_args_problem)."""
+    if not batch and len(req.prompt.encode("utf-8")) <= MAX_PROMPT_BYTES:
         return req
     base = req.prompt_dir or os.path.join(foreman_home(), "prompts")
     os.makedirs(base, mode=0o700, exist_ok=True)
@@ -84,9 +87,12 @@ def fit_prompt(req: RunRequest) -> RunRequest:
     path = os.path.join(folder, "prompt.md")
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:
         f.write(req.prompt)
-    stub = (f"The full instructions are too long for the command line. They are in this file:\n{path}\n"
-            f"Read it completely before doing anything and follow it exactly.\n\nStart of the instructions:\n"
-            f"{req.prompt[:3000]}\n[...]\nEnd of the instructions:\n{req.prompt[-3000:]}")
+    if batch:
+        stub = f"Your instructions are in this file. Read it completely before doing anything and follow it exactly. {path}"
+    else:
+        stub = (f"The full instructions are too long for the command line. They are in this file:\n{path}\n"
+                f"Read it completely before doing anything and follow it exactly.\n\nStart of the instructions:\n"
+                f"{req.prompt[:3000]}\n[...]\nEnd of the instructions:\n{req.prompt[-3000:]}")
     return replace(req, prompt=stub, extra_dirs=[*req.extra_dirs, folder])
 
 
@@ -253,6 +259,11 @@ class Provider:
     def __init__(self, settings: ProviderSettings):
         self.settings = settings
         self._binary = find_executable(settings.command) if settings.command else None
+
+    @property
+    def batch_shim(self) -> bool:
+        """The CLI found is a Windows .cmd/.bat file (npm installs CLIs that way): its arguments pass through cmd.exe."""
+        return bool(self._binary) and str(self._binary).lower().endswith((".cmd", ".bat"))
 
     def available(self) -> Tuple[bool, str]:
         if not self.settings.enabled:

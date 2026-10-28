@@ -50,7 +50,7 @@ class ClaudeProvider(Provider):
                                 writes_extra_dirs=True)
 
     def build_command(self, req: RunRequest) -> List[str]:
-        req = fit_prompt(req)
+        req = fit_prompt(req, self.batch_shim)
         cmd = [self._binary or self.settings.command, "-p"]
         # stream-json gives live activity (and a readable visible terminal); its last line is the result object.
         streamed = req.visual or req.on_activity is not None or req.on_session is not None
