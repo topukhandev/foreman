@@ -1,5 +1,6 @@
 """Chat front end: plain-language routing, plan approval, answers, suggestions, conversation context."""
 
+import os
 import unittest
 
 from helpers import Script, Workspace, make_engine
@@ -66,7 +67,8 @@ class ChatTest(unittest.TestCase):
         with mock.patch("orchestrator.ui.Spinner.say", lambda _s, msg: said.append(msg)):
             proc = self._watch_with_keys(["", "\x1b"])
         proc.wait(timeout=5)
-        self.assertEqual(proc.returncode, -15, "the task process got SIGTERM")
+        # POSIX reports the signal as -15; Windows ends the process with exit code 15 (TerminateProcess)
+        self.assertEqual(proc.returncode, 15 if os.name == "nt" else -15, "the task process got SIGTERM")
         self.assertTrue(any("Interrupted by user" in m for m in said))
 
     def test_arrow_keys_or_esc_while_scrolled_up_do_not_stop_it(self):

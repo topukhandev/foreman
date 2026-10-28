@@ -180,7 +180,7 @@ def foreman_home() -> str:
     env = os.environ.get("FOREMAN_HOME") or os.environ.get("SWITCHYARD_HOME")
     if env:
         return os.path.abspath(os.path.expanduser(env))
-    home, legacy = os.path.expanduser("~/.foreman"), os.path.expanduser("~/.switchyard")
+    home, legacy = (os.path.join(os.path.expanduser("~"), n) for n in (".foreman", ".switchyard"))
     if not os.path.exists(home) and os.path.isdir(legacy):
         try:
             os.rename(legacy, home)
