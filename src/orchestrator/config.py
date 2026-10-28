@@ -49,7 +49,8 @@ providers:
     max_runs_per_day: 300
 
 limits:
-  max_parallel: 4          # concurrent worker sessions
+  max_parallel: 4          # concurrent worker sessions within one task
+  max_global: 6            # AI CLI runs at once across every task and Foreman process (workers, QA, planning)
   step_timeout_sec: 3600   # one worker step (first attempt); planners can ask for more per step
   step_timeout_max_sec: 14400   # ceiling for any single attempt
   timeout_retries: 3       # after a timeout the same session is resumed, with double the time, this many times
@@ -138,6 +139,7 @@ class ProviderSettings:
 @dataclass
 class Limits:
     max_parallel: int = 4
+    max_global: int = 6               # AI CLI runs at once across all tasks and Foreman processes (oscompat slots)
     step_timeout_sec: int = 3600
     step_timeout_max_sec: int = 14400
     timeout_retries: int = 3

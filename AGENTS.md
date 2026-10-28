@@ -51,7 +51,8 @@
 
 ## Limits (config.yaml → `limits`)
 
-- Concurrency `max_parallel` (default 4); one running step per project at a time.
+- Concurrency `max_parallel` (default 4) within a task; `max_global` (default 6) AI CLI runs at once across all tasks and
+  Foreman processes (slot locks); one running step per project at a time.
 - Step timeout `step_timeout_sec` (default 1 h; a planner can ask for more per step with `expected_minutes`, about
   1.5x). A step that runs out of time resumes the same session (same provider) up to `timeout_retries` times with
   double the time each time, capped by `step_timeout_max_sec`; it never starts over in a fresh session for a

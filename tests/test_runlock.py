@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import unittest
 from unittest import mock
@@ -132,6 +133,43 @@ class RunLockTest(unittest.TestCase):
     def test_nothing_to_stop_when_nothing_runs(self):
         task = self.eng.prepare_new("add a footer", self.ws.ui)
         self.assertFalse(self.eng.request_stop(task["id"]))
+
+
+class SlotTest(unittest.TestCase):
+    """limits.max_global: AI CLI runs at once across every task and Foreman process."""
+
+    def setUp(self):
+        self.ws = Workspace()
+        self.s = Script()
+        self.eng = make_engine(self.ws, self.s)
+
+    def tearDown(self):
+        self.ws.cleanup()
+
+    def test_parallel_steps_share_the_global_slots(self):
+        self.s.plan = lambda req: {"intent": "change", "title": "Logging", "questions": [], "checks": [],
+                                   "projects": [{"name": n, "role": "modify", "why": "x"} for n in ("orders-api", "admin-ui")],
+                                   "steps": [{"id": i, "project": n, "kind": "implement", "instructions": "log",
+                                              "depends_on": []} for i, n in (("a", "orders-api"), ("b", "admin-ui"))]}
+        self.s.step, self.s.delay = edit, 0.3
+        self.eng.cfg.limits.max_global = 1
+        task = self.eng.handle("add logging", self.ws.ui)["task"]
+        self.assertEqual([s["status"] for s in task["steps"] if s["kind"] == "implement"], ["done", "done"])
+        self.assertEqual(self.eng.providers["claude"].max_active, 1, "one AI run at a time")
+        self.assertTrue(any("Waiting for a free slot" in n for n in task["notices"]))
+
+    def test_a_slot_held_by_another_process_is_waited_for(self):
+        self.s.plan, self.s.step = plan_one_change, edit
+        self.eng.cfg.limits.max_global = 1
+        slot = os.path.join(self.ws.home, "locks", "slot-0.lock")
+        holder = subprocess.Popen([sys.executable, FAKE, "hold-lock", slot, "77"], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (holder.poll() is None and holder.kill(), holder.wait()))
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+        threading.Timer(1.0, holder.kill).start()  # the other process's AI run ends
+        start = time.time()
+        task = self.eng.handle("add a footer", self.ws.ui)["task"]
+        self.assertGreaterEqual(time.time() - start, 0.9, "planning waited for the slot")
+        self.assertEqual(task["status"], "done")
 
 
 CHILD = textwrap.dedent('''

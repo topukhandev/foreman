@@ -20,6 +20,7 @@ lifecycle and next step, report.
 AI: mode choice and planning, the work itself (Developer, Researcher), QA verification, documents.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -615,6 +616,36 @@ class Engine:
                 self.store.event(task_id, "stop_requested", actor=request.get("actor") or "")
                 kill_all_children()
                 return
+
+    @contextlib.contextmanager
+    def _slot(self, task: Optional[Dict[str, Any]], what: str):
+        """One of `limits.max_global` slots for an AI CLI run, shared by every task and Foreman process (an OS lock
+        per slot, released when its process ends). Held only while the CLI runs: waiting for a usage limit or a
+        project doesn't hold one, and waiting for a slot doesn't count toward the step's time."""
+        n = max(1, int(self.cfg.limits.max_global))
+        told = False
+        while True:
+            for k in range(n):
+                slot = FileLock(os.path.join(self.cfg.home, "locks", f"slot-{k}.lock"))
+                if slot.try_acquire():
+                    break
+            else:
+                if STOPPING.is_set():  # a stopped run starts no CLI anyway: don't wait for a slot
+                    yield
+                    return
+                if task and not told:
+                    told = True
+                    self._notice(task, f"Waiting for a free slot: {n} AI runs are going on at once (limits.max_global)")
+                    self.store.event(task["id"], "slot_wait", slots=n)
+                STOPPING.wait(0.5)
+                continue
+            break
+        slot.write_info({"pid": os.getpid(), "task": (task or {}).get("id"), "what": what, "at": now_iso()})
+        try:
+            yield
+        finally:
+            slot.clear_info()
+            slot.release()
 
     @staticmethod
     def _check_stop() -> None:
@@ -1276,17 +1307,19 @@ class Engine:
                 step.setdefault("history", []).append(attempt)
                 self.store.save(task)
             perm = step["assignment"]["permissions"]
-            result = provider.run(RunRequest(
-                web=perm["web"], prompt=attempt_prompt, cwd=proj.path, mode="read" if perm["writes"] == "none" else "write",
-                session_id=session_id, fork=fork, schema=schema, timeout=timeout, model=pick.model,
-                effort=pick.effort,
-                extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
-                + image_dirs(task["request"]) + ([os.path.dirname(notes)] if notes else []),
-                visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
-                prompt_dir=self._prompt_dir(task),
-                on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text),
-                on_session=lambda sid, _p=provider.name, _a=attempt, _f=(session_id if fork else None):
-                    self._live_session(task, step, _p, sid, _a, _f)))
+            with self._slot(task, f"{step['kind']} {step['project']} via {provider.name}"):  # waiting isn't timed
+                result = provider.run(RunRequest(
+                    web=perm["web"], prompt=attempt_prompt, cwd=proj.path,
+                    mode="read" if perm["writes"] == "none" else "write",
+                    session_id=session_id, fork=fork, schema=schema, timeout=timeout, model=pick.model,
+                    effort=pick.effort,
+                    extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
+                    + image_dirs(task["request"]) + ([os.path.dirname(notes)] if notes else []),
+                    visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
+                    prompt_dir=self._prompt_dir(task),
+                    on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text),
+                    on_session=lambda sid, _p=provider.name, _a=attempt, _f=(session_id if fork else None):
+                        self._live_session(task, step, _p, sid, _a, _f)))
             if result.ok:  # the final report must match the contract; otherwise it is a missing report, not success
                 data, problems = check_result(result.data, schema)
                 if data is not None and int(data.get("v") or PROTOCOL_VERSION) > PROTOCOL_VERSION:
@@ -2394,7 +2427,7 @@ class Engine:
                      on_fail=lambda name, err: self._brain_failed(tid, name, err),
                      on_result=lambda name, purpose, res: tid and self.store.event(
                          tid, "thinking_done", provider=name, purpose=purpose, ok=res.ok, **usage_fields(res)),
-                     prompt_dir=self._prompt_dir(task))
+                     prompt_dir=self._prompt_dir(task), slot=lambda what: self._slot(task, what))
 
     def _prompt_dir(self, task: Optional[Dict[str, Any]]) -> str:
         """Private folder for prompts too long for a command line: the task's own, or the home's for task-less calls."""
