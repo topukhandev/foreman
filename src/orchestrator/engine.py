@@ -26,17 +26,14 @@ import os
 import re
 import threading
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
-try:
-    import fcntl
-except ImportError:  # not POSIX: project claims are kept within this process only
-    fcntl = None
 
 from orchestrator.brain import (BTW_SCHEMA, DOC_SCHEMA, PLAN_SCHEMA, PROTOCOL_VERSION, QUESTION_RULE, STEP_SCHEMA,
                                 VERIFY_SCHEMA, Brain, BrainError, task_context)
 from orchestrator.budget import Budget
+from orchestrator.oscompat import FileLock, pid_alive as _pid_alive
 from orchestrator.clipboard import image_dirs
 from orchestrator.config import Choice, Config
 from orchestrator.deps import added as added_dependencies, read_manifests
@@ -49,9 +46,9 @@ from orchestrator.registry import Registry
 from orchestrator.roles import effective_writes, guidance as role_guidance, role_of
 from orchestrator.report import LEVEL_TEXT, clock, notify, render_plan, render_report, render_status
 from orchestrator.store import FINAL, Store
-from orchestrator.util import (STOPPING, changed_since, check_result, diff_text, file_hash, git_head, now_iso, read_json,
-                               read_text, remote_refs, review_files, run_process, short, snapshot, trust_files,
-                               write_json)
+from orchestrator.util import (STOPPING, atomic_write, changed_since, check_result, diff_text, file_hash, git_head,
+                               kill_all_children, now_iso, read_json, read_text, remote_refs, review_files, run_process,
+                               short, snapshot, trust_files, update_json, write_json)
 
 STATUS_RE = re.compile(
     r"^\s*(status\b|state\b|progress\b|"
@@ -72,6 +69,9 @@ STOP_REASONS = {TIMEOUT: "Foreman's time limit", LIMIT: "the provider's usage li
                 STOPPED: "you stopping the task"}
 TRANSIENT_WAITS = (30, 120, 300)
 PROJECT_LOCK_POLL = 5.0
+RUN_LOCK_WAIT = 10.0  # a runner waits this long for a task's run lock (a run that is just ending, a reconcile)
+QUEUED_GRACE = 120.0  # seconds a queued task waits for its runner to start before it counts as interrupted
+STOP_POLL = 0.25  # how often a run looks for a stop request
 # Paths whose change needs the stricter QA tier (engine._tier), whatever the planner predicted.
 SENSITIVE_RE = re.compile(r"(^|/)(migrations?|db/migrate|alembic|deploy|infra|terraform|k8s|helm)/|\.sql$|"
                           r"(^|/)[^/]*(auth|security|permission|payment|billing|secret|crypto|password)[^/]*$|"
@@ -246,8 +246,9 @@ def counts_as_test(cmd: str, trusted_test: Optional[str]) -> bool:
 class Engine:
     def __init__(self, cfg: Config, providers: Dict[str, Provider], registry: Registry, store: Store,
                  out: Callable[[str], None] = print, visual: Optional[bool] = None,
-                 notifier: Callable[[str, str], None] = notify):
+                 notifier: Callable[[str, str], None] = notify, actor: str = "cli"):
         self.cfg = cfg
+        self.actor = actor  # the interface this engine serves (cli, chat, mcp, desktop): recorded with every change
         self.providers = providers
         self.registry = registry
         self.store = store
@@ -259,7 +260,7 @@ class Engine:
                              cfg.limits.warn_at_percent)
         self._lock = threading.RLock()
         self._last_activity: Dict[Any, Tuple[float, str]] = {}
-        self._claims: Dict[str, Tuple[Optional[int], str]] = {}  # project -> (flock fd, task id) held by this process
+        self._claims: Dict[str, Tuple[FileLock, str]] = {}  # project -> (OS lock, task id) held by this process
 
     def reload_config(self) -> None:
         """Re-read config.yaml into this running engine, after a menu or another process changed it."""
@@ -332,11 +333,7 @@ class Engine:
             return {"task": None, "report": "No tasks recorded yet" + (f" matching '{ref}'." if ref else ".")}
         if ref and len(cands) > 1:
             return {"task": None, "report": self._ambiguous(cands)}
-        task = cands[0]
-        lock = self.store.path(task["id"], "lock")
-        if task["status"] in ("running", "planning", "queued") and not _pid_alive(_read_int(lock)):
-            task["status"] = "interrupted"
-            self.store.save(task)
+        task = self.reconcile(cands[0])
         others = [t for t in cands[1:] if t["status"] not in FINAL]
         return {"task": task, "report": render_status(task, self._changes_since_last_run(task), others)}
 
@@ -367,7 +364,9 @@ class Engine:
             return None, "No task found to continue" + (f" matching '{ref}'." if ref else ".")
         if (ref and len(cands) > 1) or (not ref and len(unfinished) > 1):
             return None, self._ambiguous(unfinished or cands)
-        task = (unfinished or cands)[0]
+        return self._locked_change((unfinished or cands)[0], lambda t: self._apply_resume(t, note))
+
+    def _apply_resume(self, task: Dict[str, Any], note: str) -> Tuple[Optional[Dict[str, Any]], str]:
         extra = _instructions(note)
         if extra:
             task["decisions"].append({"text": f"User asked to continue: {note}", "by": "user", "at": now_iso()})
@@ -377,8 +376,9 @@ class Engine:
         if not task["replan"]:
             self._reopen_steps(task)
         task["dry_run"] = False
-        task["status"] = "queued"
+        self._queue(task)
         self.store.save(task)
+        self.store.event(task["id"], "resumed", note=note, actor=self.actor)
         return task, ""
 
     def close(self, ref: str, note: str = "", cancel: bool = False) -> Dict[str, Any]:
@@ -388,12 +388,12 @@ class Engine:
         cands = self.store.resolve(ref, fallback=False)
         if len(cands) != 1:
             return {"task": None, "report": self._ambiguous(cands) if cands else f"No task '{ref}'."}
-        task = cands[0]
-        lock = self.store.path(task["id"], "lock")
-        if os.path.exists(lock) and _pid_alive(_read_int(lock)):
-            return {"task": task, "report": f"#{task['id']} is running; stop it first (Esc in the chat)."}
+        task, msg = self._locked_change(cands[0], lambda t: self._apply_close(t, note, cancel))
+        return {"task": task or cands[0], "report": msg}
+
+    def _apply_close(self, task: Dict[str, Any], note: str, cancel: bool) -> Tuple[Dict[str, Any], str]:
         if task["status"] in FINAL:
-            return {"task": task, "report": f"#{task['id']} is already {task['status']}."}
+            return task, f"#{task['id']} is already {task['status']}."
         how = "cancelled by you" if cancel else "closed by you"
         for s in task["steps"]:
             if not _settled(s):
@@ -411,10 +411,10 @@ class Engine:
         task["outcome"] = how
         self._record_lifecycle(task)
         self.store.save(task)
-        self.store.event(task["id"], "closed", how=how, note=note)
+        self.store.event(task["id"], "closed", how=how, note=note, actor=self.actor)
         report = render_report(task, self.store.suggestions())
         self.store.write_report(task["id"], report)
-        return {"task": task, "report": report}
+        return task, report
 
     @staticmethod
     def _reopen_steps(task: Dict[str, Any]) -> None:
@@ -437,21 +437,58 @@ class Engine:
         cands = [t for t in cands if any(not q.get("answer") for q in t["questions"])] or cands
         if len(cands) != 1:
             return None, (self._ambiguous(cands) if cands else f"No task '{ref}'.")
-        task = cands[0]
+        return self._locked_change(cands[0], lambda t: self._apply_answer(t, text))
+
+    def _apply_answer(self, task: Dict[str, Any], text: str) -> Tuple[Optional[Dict[str, Any]], str]:
         open_q = [q for q in task["questions"] if not q.get("answer")]
         if not open_q:
             return None, f"#{task['id']} has no open questions."
         if NO_RE.match(text) and all(q.get("kind") in ("approval", "budget") for q in open_q):
-            for q in open_q:
-                q["answer"] = text
-            task["status"] = "cancelled"
-            self.store.save(task)
-            self.store.event(task["id"], "cancelled", text=text)
-            return None, f"Cancelled #{task['id']}. Nothing was changed."
-        yes = bool(YES_RE.match(text))
-        replies = _split_answers(text, len(open_q))
+            return self._cancel(task, [(q, text) for q in open_q], text)
+        return self._apply_replies(task, list(zip(open_q, _split_answers(text, len(open_q)))), text)
+
+    def prepare_answers(self, ref: str, answers: Dict[str, str], plan_fp: Optional[str] = None
+                        ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Answer questions by id (the desktop app and other API clients). An approval names the plan it approves
+        (plan_fp): one given for another version of the plan is refused as stale, and so is an answer to a question
+        that is no longer open. Refused while the task runs. Returns the task when it is queued to run again."""
+        cands = self.store.resolve(ref, fallback=False)
+        if len(cands) != 1:
+            return None, (self._ambiguous(cands) if cands else f"No task '{ref}'.")
+        return self._locked_change(cands[0], lambda t: self._apply_answers(t, answers, plan_fp))
+
+    def _apply_answers(self, task: Dict[str, Any], answers: Dict[str, str], plan_fp: Optional[str]
+                       ) -> Tuple[Optional[Dict[str, Any]], str]:
+        by_id = {q.get("id"): q for q in task["questions"]}
+        pairs = []
+        for qid, reply in answers.items():
+            q = by_id.get(qid)
+            if not q or q.get("answer"):
+                return None, f"stale: question {qid} of #{task['id']} is not open any more."
+            if q.get("kind") == "approval" and not (plan_fp and plan_fp == q.get("plan_fp") == self._plan_fingerprint(task)):
+                return None, f"stale: the plan of #{task['id']} changed since it was shown; review the current plan."
+            if not str(reply).strip():
+                return None, f"No answer given for {qid}."
+            pairs.append((q, str(reply).strip()))
+        if not pairs:
+            return None, "No answers given."
+        if all(q.get("kind") in ("approval", "budget") and NO_RE.match(r) for q, r in pairs):
+            return self._cancel(task, pairs, "; ".join(r for _, r in pairs))
+        return self._apply_replies(task, pairs, "\n".join(f"{q['id']}: {r}" for q, r in pairs))
+
+    def _cancel(self, task: Dict[str, Any], pairs: List[Tuple[Dict[str, Any], str]], text: str) -> Tuple[None, str]:
+        for q, reply in pairs:
+            q["answer"] = reply
+        task["status"] = "cancelled"
+        task.pop("run_request", None)
+        self.store.save(task)
+        self.store.event(task["id"], "cancelled", text=text, actor=self.actor)
+        return None, f"Cancelled #{task['id']}. Nothing was changed."
+
+    def _apply_replies(self, task: Dict[str, Any], pairs: List[Tuple[Dict[str, Any], str]], text: str
+                       ) -> Tuple[Optional[Dict[str, Any]], str]:
         home = self._home_project(task)
-        for q, reply in zip(open_q, replies):
+        for q, reply in pairs:
             q["answer"] = reply
             if q.get("kind") == "budget" and YES_RE.match(reply):
                 task["budget_ack"] = now_iso()
@@ -468,20 +505,26 @@ class Engine:
                                       "at": now_iso()})
         # Answers to a worker's questions go back to that worker's session and the plan carries on; plain approvals
         # also continue the plan. Anything else (the planner's own questions, feedback) needs a new plan.
-        task["replan"] = not all(q.get("from_step") or (q.get("kind") in ("budget", "approval") and yes) for q in open_q)
+        task["replan"] = bool(task.get("replan")) or not all(
+            q.get("from_step") or (q.get("kind") in ("budget", "approval") and YES_RE.match(r)) for q, r in pairs)
+        task["dry_run"] = False
+        left = self._open_questions(task)
+        if left:  # answered by id, some still open: the task runs once they are all answered
+            self.store.save(task)
+            self.store.event(task["id"], "answered", text=text, actor=self.actor)
+            return None, f"#{task['id']}: saved; {len(left)} question{'s' if len(left) != 1 else ''} still open."
         if not task["replan"]:
             self._reopen_steps(task)
-        task["dry_run"] = False
-        task["status"] = "queued"
+        self._queue(task)
         self.store.save(task)
-        self.store.event(task["id"], "answered", text=text)
+        self.store.event(task["id"], "answered", text=text, actor=self.actor)
         return task, ""
 
     def prepare_new(self, request: str, cwd: str, conversation: str = "", confirm_plan: bool = False,
                     mode: Optional[str] = None, feature: Optional[str] = None,
                     parent: Optional[str] = None) -> Dict[str, Any]:
-        task = self.store.new_task(request, os.path.abspath(cwd))
-        task["status"] = "queued"
+        task = self.store.new_task(request, os.path.abspath(cwd), actor=self.actor)
+        self._queue(task)
         task["conversation"] = conversation[-2500:]
         task["confirm_plan"] = confirm_plan
         chosen = resolve_mode(mode, self.modes(cwd))
@@ -493,6 +536,90 @@ class Engine:
             task["parent"] = parent
         self.store.save(task)
         return task
+
+    # ================================================================== one run at a time
+    # A task is run by one process at a time: the one holding its run lock (tasks/<id>/run.lock, an OS lock the OS
+    # releases when the holder dies, so it is never stale). Changes to a task (answer, resume, close) take the same lock
+    # briefly and are refused while a run holds it. A change that queues a run writes a one-time token; the runner
+    # proceeds only with that token, so a duplicate or late runner can't run the task a second time.
+    def _run_lock(self, task_id: str) -> FileLock:
+        return FileLock(self.store.path(str(task_id), "run.lock"))
+
+    def _legacy_runner(self, task_id: str) -> bool:
+        """A Foreman from before the run lock (which only writes tasks/<id>/lock) is running this task."""
+        pid = _read_int(self.store.path(str(task_id), "lock"))
+        return pid != os.getpid() and _pid_alive(pid) and not FileLock.read_info(self.store.path(str(task_id), "run.lock"))
+
+    def is_running(self, task_id: str) -> bool:
+        """Some process is running this task right now."""
+        lock = self._run_lock(task_id)
+        if not lock.try_acquire():
+            return True
+        lock.release()
+        return self._legacy_runner(task_id)
+
+    def _locked_change(self, task: Dict[str, Any], change: Callable[[Dict[str, Any]], Tuple[Any, str]]) -> Tuple[Any, str]:
+        """Apply a change to the latest record of a task while holding its run lock; refused while it runs."""
+        lock = self._run_lock(task["id"])
+        if not lock.try_acquire():
+            return None, f"#{task['id']} is running; wait for it to finish or stop it first."
+        try:
+            if self._legacy_runner(task["id"]):
+                return None, f"#{task['id']} is running; wait for it to finish or stop it first."
+            return change(self.store.load(task["id"]) or task)
+        finally:
+            lock.release()
+
+    @staticmethod
+    def _queue(task: Dict[str, Any]) -> None:
+        task["status"] = "queued"
+        task["run_request"], task["queued_at"] = uuid.uuid4().hex, time.time()
+
+    def reconcile(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """A task recorded as running whose runner is gone (crash, kill, power loss) is interrupted; resume continues it
+        in the same sessions. A queued task first gets QUEUED_GRACE for its runner to start."""
+        def stale(t: Dict[str, Any]) -> bool:
+            return t["status"] in ("running", "planning") or (
+                t["status"] == "queued" and time.time() - float(t.get("queued_at") or 0) >= QUEUED_GRACE)
+        if not stale(task):
+            return task
+        lock = self._run_lock(task["id"])
+        if not lock.try_acquire():
+            return task
+        try:
+            fresh = self.store.load(task["id"]) or task
+            if not stale(fresh) or self._legacy_runner(task["id"]):
+                return fresh
+            fresh["status"] = "interrupted"
+            fresh.pop("run_request", None)
+            self.store.save(fresh, reason="runner_exited")
+            return fresh
+        finally:
+            lock.release()
+
+    def request_stop(self, task_id: str) -> bool:
+        """Ask the run of a task to stop (any process, any OS): its runner watches for this file, stops its workers
+        and ends the run as interrupted. False when nothing is running it."""
+        run = FileLock.read_info(self.store.path(str(task_id), "run.lock")).get("run")
+        if not run or not self.is_running(task_id):
+            return False
+        atomic_write(self.store.path(str(task_id), "stop"), json.dumps({"run": run, "actor": self.actor}))
+        return True
+
+    def _watch_stop(self, task_id: str, run: str, done: threading.Event) -> None:
+        path = self.store.path(task_id, "stop")
+        while not done.wait(STOP_POLL):
+            request = read_json(path, {}) if os.path.exists(path) else {}
+            if isinstance(request, dict) and request.get("run") == run:
+                # logged here, by the run itself: while a task runs only its runner writes its events
+                self.store.event(task_id, "stop_requested", actor=request.get("actor") or "")
+                kill_all_children()
+                return
+
+    @staticmethod
+    def _check_stop() -> None:
+        if STOPPING.is_set():
+            raise Interrupted()
 
     # ================================================================== lifecycle
     def accept_suggestion(self, s: Dict[str, Any], cwd: str, conversation: str = "",
@@ -635,6 +762,9 @@ class Engine:
     def plan_only(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Dry run: plan the task (read-only planner, impact check included) and stop before any worker runs, any
         check runs or anything is written to a project. `resume` on the task then runs exactly this plan."""
+        return self._as_run(task, self._plan_only)
+
+    def _plan_only(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task["status"], task["dry_run"] = "planning", True
         self.store.save(task)
         try:
@@ -648,9 +778,46 @@ class Engine:
         return {"task": task, "report": render_plan(task)}
 
     def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        lock = self.store.path(task["id"], "lock")
-        if os.path.exists(lock) and _pid_alive(_read_int(lock)) and _read_int(lock) != os.getpid():
-            return {"task": task, "report": f"#{task['id']} is already running (pid {_read_int(lock)})."}
+        return self._as_run(task, self._execute)
+
+    def _as_run(self, task: Dict[str, Any], body: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
+        """Run `body` on a task while holding its run lock the whole time. The record is read again under the lock,
+        so a change made after the caller loaded it is not lost. A task queued with a run token runs only once for
+        that token. The run watches for a stop request (request_stop) meanwhile."""
+        run_lock = self._run_lock(task["id"])
+        if not run_lock.acquire(RUN_LOCK_WAIT):
+            return {"task": task, "report": f"#{task['id']} is already running."}
+        try:
+            if self._legacy_runner(task["id"]):
+                return {"task": task, "report": f"#{task['id']} is already running."}
+            fresh = self.store.load(task["id"])
+            expected = task.get("run_request")
+            if fresh and expected and (fresh.get("run_request") != expected or fresh["status"] != "queued"):
+                return {"task": fresh, "report": f"#{task['id']} is not waiting to run any more ({fresh['status']}); "
+                                                 "nothing was started."}
+            if fresh:
+                task.clear()
+                task.update(fresh)
+            run = task.pop("run_request", None) or uuid.uuid4().hex
+            task.pop("queued_at", None)
+            run_lock.write_info({"pid": os.getpid(), "run": run, "task": task["id"], "at": now_iso()})
+            stop = self.store.path(task["id"], "stop")
+            if os.path.exists(stop):
+                os.remove(stop)  # a stop request for an earlier run
+            done = threading.Event()
+            threading.Thread(target=self._watch_stop, args=(task["id"], run, done), daemon=True).start()
+            try:
+                return body(task)
+            finally:
+                done.set()
+                if os.path.exists(stop):
+                    os.remove(stop)
+        finally:
+            run_lock.clear_info()
+            run_lock.release()
+
+    def _execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        lock = self.store.path(task["id"], "lock")  # the pid file older Foreman versions look for (transition)
         with open(lock, "w") as f:
             f.write(str(os.getpid()))
         task["runs"] += 1
@@ -675,13 +842,18 @@ class Engine:
         self.store.save(task)
         try:
             self._run(task)
+            self._check_stop()
         except Interrupted:
             task["status"] = "interrupted"
             self.store.event(task["id"], "interrupted")
         except Exception as e:  # never leave a task stuck in "running"
-            task["status"] = "failed"
-            task["remaining"].append(f"Orchestrator error: {e}")
-            self.store.event(task["id"], "error", error=repr(e))
+            if STOPPING.is_set():  # a planner or check cut off by the stop
+                task["status"] = "interrupted"
+                self.store.event(task["id"], "interrupted")
+            else:
+                task["status"] = "failed"
+                task["remaining"].append(f"Orchestrator error: {e}")
+                self.store.event(task["id"], "error", error=repr(e))
         finally:
             self._release_all(task)
             self._finalize(task)
@@ -699,7 +871,9 @@ class Engine:
 
     def _run(self, task: Dict[str, Any]) -> None:
         if not task["steps"] or task.pop("replan", False) or not task["intent"]:
-            if not self._plan(task):
+            planned = self._plan(task)
+            self._check_stop()
+            if not planned:
                 return
         if self._open_questions(task):
             task["status"] = "needs_input"
@@ -868,6 +1042,7 @@ class Engine:
             if plan.get("impact"):
                 task["impact"] = plan["impact"]
             task.pop("plan_approved", None)  # a new plan is approved on its own, never by an earlier yes
+            self._supersede_approvals(task)
             target = plan.get("review_target") or {}
             if target.get("kind") in ("uncommitted", "branch") and \
                     not any(s.get("kind") == "implement" for s in plan.get("steps") or []):
@@ -880,6 +1055,7 @@ class Engine:
                 not (task.get("impact") or {}).get("needs_approval"):  # a re-plan found high impact: ask again
             task["impact"] = {**(task.get("impact") or {}), **plan["impact"]}
             task.pop("plan_approved", None)
+            self._supersede_approvals(task)
         for p in plan.get("projects", []):
             proj = self.registry.find(p.get("name", ""))
             if not proj:
@@ -992,7 +1168,7 @@ class Engine:
                 busy_projects = {s["project"] for s in running.values()}
                 held_elsewhere: Dict[str, str] = {}
                 for s in task["steps"]:
-                    if s["status"] != "pending":
+                    if s["status"] != "pending" or STOPPING.is_set():  # a stopped run starts nothing new
                         continue
                     # A step whose dependency didn't finish stays pending (waiting for it): "continue" runs it once the
                     # dependency is done, instead of it being lost as skipped.
@@ -1032,6 +1208,7 @@ class Engine:
                     except Exception as e:
                         step["status"] = "failed"
                         step["summary"] = f"orchestrator error: {e}"
+        self._check_stop()  # a stopped run goes no further (no checks, QA, fixes or documents)
 
     def _run_step(self, task: Dict[str, Any], step: Dict[str, Any]) -> None:
         """Run one step to a result, whatever happens to the providers on the way. Every attempt is journaled in
@@ -1106,6 +1283,7 @@ class Engine:
                 extra_dirs=[self.registry.projects[r].path for r in step["read_projects"] if r in self.registry.projects]
                 + image_dirs(task["request"]) + ([os.path.dirname(notes)] if notes else []),
                 visual=self.visual, title=f"Foreman #{task['id']} · {step['kind']} · {step['project']}",
+                prompt_dir=self._prompt_dir(task),
                 on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text),
                 on_session=lambda sid, _p=provider.name, _a=attempt, _f=(session_id if fork else None):
                     self._live_session(task, step, _p, sid, _a, _f)))
@@ -1214,48 +1392,33 @@ class Engine:
 
     def _claim_project(self, task, step) -> Optional[str]:
         """Claim a project for this task's changes, across tasks and Foreman processes (chat, MCP, CLI), until the
-        task's run ends (the work, its checks and QA). An OS file lock (flock): it can't be taken twice, and it is
-        released by the OS when its process ends, so there are no stale claims to take over. Returns None when
-        claimed (or already held by this task), else who holds it ("#12 (pid 345)")."""
+        task's run ends (the work, its checks and QA). An OS file lock (oscompat.FileLock): it can't be taken twice,
+        and it is released by the OS when its process ends, so there are no stale claims to take over. Returns None
+        when claimed (or already held by this task), else who holds it ("#12 (pid 345)")."""
         with self._lock:
             held = self._claims.get(step["project"])
             if held and held[1] == task["id"]:
                 return None
             if held:  # another task of this process
                 return f"#{held[1]} (this Foreman)"
-            if fcntl is None:  # no flock on this platform: only this process's own bookkeeping
-                self._claims[step["project"]] = (None, task["id"])
-                return None
             path = self._project_lock(step["project"])
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                try:
-                    holder = json.loads(os.read(fd, 4096).decode() or "{}")
-                except ValueError:
-                    holder = {}
-                os.close(fd)
+            claim = FileLock(path)
+            if not claim.try_acquire():
+                holder = FileLock.read_info(path)
                 return f"#{holder['task']} (pid {holder.get('pid')})" if holder.get("task") else "another Foreman task"
-            os.ftruncate(fd, 0)
-            os.write(fd, json.dumps({"pid": os.getpid(), "task": task["id"], "step": step["id"], "at": now_iso()}).encode())
-            self._claims[step["project"]] = (fd, task["id"])
+            claim.write_info({"pid": os.getpid(), "task": task["id"], "step": step["id"], "at": now_iso()})
+            self._claims[step["project"]] = (claim, task["id"])
             return None
 
     def _release_all(self, task) -> None:
         """When the task's run ends, however it ends, the projects it claimed are free again."""
         with self._lock:
-            for project, (fd, owner) in list(self._claims.items()):
+            for project, (claim, owner) in list(self._claims.items()):
                 if owner != task["id"]:
                     continue
                 del self._claims[project]
-                if fd is not None:
-                    try:
-                        os.ftruncate(fd, 0)
-                        fcntl.flock(fd, fcntl.LOCK_UN)
-                    finally:
-                        os.close(fd)
+                claim.clear_info()
+                claim.release()
 
     @staticmethod
     def _keep_session(step: Dict[str, Any], provider: str, sid: Optional[str], followup: str) -> None:
@@ -2230,7 +2393,12 @@ class Engine:
                      on_activity=(lambda name, purpose, text: self._activity(tid, name, purpose, text)) if tid else None,
                      on_fail=lambda name, err: self._brain_failed(tid, name, err),
                      on_result=lambda name, purpose, res: tid and self.store.event(
-                         tid, "thinking_done", provider=name, purpose=purpose, ok=res.ok, **usage_fields(res)))
+                         tid, "thinking_done", provider=name, purpose=purpose, ok=res.ok, **usage_fields(res)),
+                     prompt_dir=self._prompt_dir(task))
+
+    def _prompt_dir(self, task: Optional[Dict[str, Any]]) -> str:
+        """Private folder for prompts too long for a command line: the task's own, or the home's for task-less calls."""
+        return self.store.path(task["id"], "prompts") if task else os.path.join(self.cfg.home, "prompts")
 
     # ------------------------------------------------------------------ provider health
     def _health(self) -> Dict[str, Any]:
@@ -2256,19 +2424,20 @@ class Engine:
             until, known = (retry_at, True) if retry_at and retry_at > now else (now + self.cfg.limits.limit_retry_sec, False)
         else:
             return
+        entry = {"error": short(error, 160), "kind": kind, "at": now_iso(), "until": until, "known": known}
         with self._lock:
-            h = self._health()
-            h[name] = {"error": short(error, 160), "kind": kind, "at": now_iso(), "until": until, "known": known}
-            write_json(os.path.join(self.cfg.home, "health.json"), h)
+            update_json(os.path.join(self.cfg.home, "health.json"), lambda h: {**(h or {}), name: entry}, {})
 
     def _note_usage(self, name: str, usage: Optional[Dict[str, Any]]) -> None:
         """Remember how close a provider is to its usage limit (providers that report it), for _pressed."""
         if not usage:
             return
-        with self._lock:
-            h = self._health()
+        def change(h):
+            h = h or {}
             h.setdefault("_usage", {})[name] = usage
-            write_json(os.path.join(self.cfg.home, "health.json"), h)
+            return h
+        with self._lock:
+            update_json(os.path.join(self.cfg.home, "health.json"), change, {})
 
     def _pressed(self, name: str) -> bool:
         """The provider said it is near its usage limit (at or above pressure_percent) and the window hasn't reset."""
@@ -2345,9 +2514,31 @@ class Engine:
             lines.append(f"  then checks: {'; '.join(checks)}")
         lines.append("Go ahead? (yes / no / or tell me what to change)")
         text = "\n".join(lines)
-        if not any(q["text"] == text and not q.get("answer") for q in task["questions"]):
-            task["questions"].append({"text": text, "kind": "approval", "options": [], "answer": None})
+        fp = self._plan_fingerprint(task)
+        self._supersede_approvals(task, keep=fp)
+        if not any(q.get("kind") == "approval" and q.get("plan_fp") == fp and not q.get("answer") for q in task["questions"]):
+            task["questions"].append({"text": text, "kind": "approval", "options": [], "answer": None, "plan_fp": fp})
         return False
+
+    @staticmethod
+    def _plan_fingerprint(task: Dict[str, Any]) -> str:
+        """What an approval approves: the pending changes (step, project, instructions), their stated impact and the
+        checks. An approval given for another version of the plan is stale. A consistency check, not authorisation:
+        anything that can read the task record can compute it."""
+        impact = task.get("impact") or {}
+        data = {"steps": [[s["id"], s["project"], s["kind"], s["instructions"]] for s in task["steps"]
+                          if s["status"] == "pending" and s["kind"] == "implement"],
+                "impact": [bool(impact.get("needs_approval")), impact.get("summary") or ""],
+                "checks": [[c.get("project"), c.get("command")] for c in task.get("checks") or []]}
+        return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+    def _supersede_approvals(self, task: Dict[str, Any], keep: Optional[str] = None) -> None:
+        """Close the open approval questions for an earlier version of the plan, so a "yes" can only reach the
+        current one."""
+        for q in task["questions"]:
+            if q.get("kind") == "approval" and not q.get("answer") and (keep is None or q.get("plan_fp") != keep):
+                q["answer"], q["superseded"] = "(superseded: the plan changed)", now_iso()
+                self.store.event(task["id"], "question_superseded", question=q.get("id"))
 
     def _budget_ok(self, task) -> bool:
         if task.get("budget_ack"):
@@ -2437,16 +2628,6 @@ def _read_int(path: str) -> int:
             return int(f.read().strip() or 0)
     except (OSError, ValueError):
         return 0
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def _midnight() -> float:

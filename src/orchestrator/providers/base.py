@@ -3,13 +3,14 @@
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from orchestrator.config import ProviderSettings
+from orchestrator.config import ProviderSettings, foreman_home
 from orchestrator.finder import find_executable
 from orchestrator.util import extract_json, run_process, run_streaming, worker_env
 
@@ -55,6 +56,7 @@ class RunRequest:
     # Called once with the session id as soon as the CLI's output reveals it, so a run that is cut off (crash,
     # killed terminal, network) can still be resumed.
     on_session: Optional[Callable[[str], None]] = field(default=None, repr=False)
+    prompt_dir: Optional[str] = None       # private folder for prompts too long for a command line (default: home/prompts)
 
 
 # A command-line argument can hold about 128 KB on Linux; a big paste in the request can exceed that.
@@ -63,17 +65,23 @@ MAX_PROMPT_BYTES = 90_000
 
 def fit_prompt(req: RunRequest) -> RunRequest:
     """A request whose prompt fits on a command line. Longer prompts are written to a file the CLI is told to read
-    first (its directory is added to the readable ones); the start and the end stay in the prompt itself."""
+    first (its directory is added to the readable ones); the start and the end stay in the prompt itself.
+    Prompts hold code and decisions: each one gets its own private folder (0700, file 0600) under the task or the
+    Foreman home, so neither other users nor other runs can read it (the shared temp directory could)."""
     if len(req.prompt.encode("utf-8")) <= MAX_PROMPT_BYTES:
         return req
-    folder = os.path.join(tempfile.gettempdir(), "foreman-prompts")
-    os.makedirs(folder, exist_ok=True)
-    for name in os.listdir(folder):  # tidy up what earlier runs left behind
-        old = os.path.join(folder, name)
-        if time.time() - os.path.getmtime(old) > 86400:
-            os.remove(old)
-    path = os.path.join(folder, f"prompt-{os.getpid()}-{int(time.time() * 1000)}.md")
-    with open(path, "w", encoding="utf-8") as f:
+    base = req.prompt_dir or os.path.join(foreman_home(), "prompts")
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    for name in os.listdir(base):  # tidy up what earlier runs left behind
+        old = os.path.join(base, name)
+        try:
+            if time.time() - os.path.getmtime(old) > 86400:
+                shutil.rmtree(old) if os.path.isdir(old) else os.remove(old)
+        except OSError:
+            pass
+    folder = tempfile.mkdtemp(prefix="prompt-", dir=base)  # 0700: only this run's CLI is pointed at it
+    path = os.path.join(folder, "prompt.md")
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as f:
         f.write(req.prompt)
     stub = (f"The full instructions are too long for the command line. They are in this file:\n{path}\n"
             f"Read it completely before doing anything and follow it exactly.\n\nStart of the instructions:\n"

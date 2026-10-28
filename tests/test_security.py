@@ -190,13 +190,8 @@ class EngineBoundaryTest(unittest.TestCase):
     def _hold_lock_in_another_process(self, task_id="99"):
         lock = os.path.join(self.ws.home, "locks", "admin-ui.lock")
         os.makedirs(os.path.dirname(lock), exist_ok=True)
-        code = ("import fcntl, json, os, sys, time\n"
-                f"fd = os.open({lock!r}, os.O_RDWR | os.O_CREAT)\n"
-                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
-                f"os.write(fd, json.dumps({{'pid': os.getpid(), 'task': {task_id!r}}}).encode())\n"
-                "print('ready', flush=True)\n"
-                "time.sleep(60)\n")
-        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        fake = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_cli.py")
+        proc = subprocess.Popen([sys.executable, fake, "hold-lock", lock, task_id], stdout=subprocess.PIPE, text=True)
         self.assertEqual(proc.stdout.readline().strip(), "ready")
         self.addCleanup(proc.kill)
         return lock, proc
@@ -233,12 +228,10 @@ class EngineBoundaryTest(unittest.TestCase):
         task = self.eng.handle("change the ui", self.ws.ui)["task"]
         self.assertEqual(task["status"], "done")
         self.assertEqual((claimed[0]["pid"], claimed[0]["task"]), (os.getpid(), task["id"]))
-        import fcntl
-        fd = os.open(lock, os.O_RDWR)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # free again after the run
-        finally:
-            os.close(fd)
+        from orchestrator.oscompat import FileLock
+        free = FileLock(lock)
+        self.assertTrue(free.try_acquire())  # free again after the run
+        free.release()
 
     def test_two_tasks_in_one_process_dont_share_a_project(self):
         a = self.eng.store.new_task("a", self.ws.ui)
@@ -321,6 +314,78 @@ class EngineBoundaryTest(unittest.TestCase):
         task = self.eng.handle("change the ui", self.ws.ui)["task"]
         self.assertTrue(any("already had your uncommitted edits" in n and "src/orders.js" in n for n in task["notices"]))
 
+
+
+class PrivateDataTest(unittest.TestCase):
+    """What Foreman stores (records, logs, prompts) is readable by the user only, and AI-written text never becomes
+    part of a command or script (the desktop notification)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="foreman_private_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_an_existing_home_readable_by_others_is_made_private(self):
+        from orchestrator.config import load_config
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(home)
+        os.chmod(home, 0o775)  # what earlier versions left behind
+        load_config(home)
+        self.assertEqual(os.stat(home).st_mode & 0o777, 0o700)
+
+    def test_long_prompts_go_to_a_private_folder_of_their_own(self):
+        big = "start " + "word " * base.MAX_PROMPT_BYTES + " the end"
+        req = base.fit_prompt(RunRequest(prompt=big, cwd=".", prompt_dir=os.path.join(self.tmp, "prompts")))
+        folder = req.extra_dirs[-1]
+        path = os.path.join(folder, "prompt.md")
+        self.assertEqual(os.path.dirname(folder), os.path.join(self.tmp, "prompts"))
+        self.assertIn(path, req.prompt)
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), big)
+        if os.name != "nt":
+            self.assertEqual(os.stat(folder).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        other = base.fit_prompt(RunRequest(prompt=big, cwd=".", prompt_dir=os.path.join(self.tmp, "prompts")))
+        self.assertNotEqual(other.extra_dirs[-1], folder, "each run's CLI is pointed at its own folder only")
+
+    def test_without_a_task_long_prompts_stay_in_the_foreman_home(self):
+        with mock.patch.dict(os.environ, {"FOREMAN_HOME": self.tmp}):
+            req = base.fit_prompt(RunRequest(prompt="x" * (base.MAX_PROMPT_BYTES + 1), cwd="."))
+        self.assertTrue(req.extra_dirs[-1].startswith(os.path.join(self.tmp, "prompts") + os.sep))
+        self.assertFalse(req.extra_dirs[-1].startswith(os.path.join(tempfile.gettempdir(), "foreman-prompts")))
+
+    def test_engine_runs_put_long_prompts_in_the_task_folder(self):
+        ws, s = Workspace(), Script()
+        try:
+            eng = make_engine(ws, s)
+            s.plan = lambda req: plan([("admin-ui", "modify")], [step("admin-ui")])
+            task = eng.handle("change the ui", ws.ui)["task"]
+            calls = [c for p in eng.providers.values() for c in p.calls]
+            self.assertTrue(calls)  # planning, the worker and QA alike
+            self.assertEqual({c.prompt_dir for c in calls}, {eng.store.path(task["id"], "prompts")})
+        finally:
+            ws.cleanup()
+
+    def _notify(self, exe: str, title: str, body: str):
+        from orchestrator import report
+        with mock.patch.object(report.shutil, "which", lambda name: exe if exe.endswith(name) else None), \
+                mock.patch.object(report.subprocess, "Popen") as popen:
+            report.notify(title, body)
+        return popen.call_args[0][0]
+
+    def test_macos_notification_text_is_never_part_of_the_script(self):
+        evil = 'done" with title "x"\ndo shell script "touch /tmp/pwned"\ndisplay notification "'
+        cmd = self._notify("/usr/bin/osascript", "Foreman #1: done", evil)
+        scripts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-e"]
+        self.assertFalse(any("pwned" in sc or "done" in sc for sc in scripts), scripts)
+        self.assertEqual(cmd[-2:], ["Foreman #1: done", evil[:150]])
+
+    def test_linux_notification_text_is_never_read_as_an_option(self):
+        cmd = self._notify("/usr/bin/notify-send", "--icon=/etc/passwd", "-u critical")
+        self.assertEqual(cmd[-3:], ["--", "--icon=/etc/passwd", "-u critical"])
 
 if __name__ == "__main__":
     unittest.main()

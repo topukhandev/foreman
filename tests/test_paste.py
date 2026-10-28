@@ -1,6 +1,10 @@
 """Pasted text and images: chips, the 2000-line limit, dropped image files, the editor's handling of chips, and prompts
 too long for a command line."""
 
+import platform_skips
+
+platform_skips.skip_module("test_paste")
+
 import os
 import pty
 import select
@@ -268,7 +272,7 @@ class PromptSizeTest(unittest.TestCase):
 
     def test_huge_prompt_moves_to_a_file_the_cli_is_pointed_at(self):
         big = "start " + "word " * (MAX_PROMPT_BYTES // 4) + " the end"
-        req = fit_prompt(RunRequest(prompt=big, cwd="."))
+        req = fit_prompt(RunRequest(prompt=big, cwd=".", prompt_dir=tempfile.mkdtemp(prefix="foreman_prompts_")))
         self.assertLess(len(req.prompt.encode()), MAX_PROMPT_BYTES // 4)
         self.assertIn("start ", req.prompt)
         self.assertIn("the end", req.prompt)

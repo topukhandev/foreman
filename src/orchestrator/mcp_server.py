@@ -83,7 +83,7 @@ TOOLS = [
 
 class MCPServer:
     def __init__(self, engine_factory=None):
-        self.engine_factory = engine_factory or (lambda visual=None: build_engine(visual=visual, out=lambda _m: None))
+        self.engine_factory = engine_factory or (lambda visual=None: build_engine(visual=visual, out=lambda _m: None, actor="mcp"))
 
     def _engine(self, display: Optional[str] = None) -> Engine:
         return self.engine_factory(None if not display else display == "terminal")
@@ -143,7 +143,7 @@ class MCPServer:
     def _launch(self, eng: Engine, task, msg: str, wait: int, visual) -> str:
         if not task:
             return msg
-        spawn_task(eng.cfg.home, task["id"], visual)
+        spawn_task(eng.cfg.home, task["id"], visual, run=task.get("run_request"))
         task, finished = wait_for(eng, task["id"], wait)
         if finished:
             return read_report(eng, task["id"]) or f"#{task['id']} {task['status']}"

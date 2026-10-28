@@ -253,7 +253,7 @@ class Brain:
                  on_call: Optional[Callable[[str], bool]] = None, on_start: Optional[Callable[[str, str], None]] = None,
                  on_activity: Optional[Callable[[str, str, str], None]] = None,
                  on_fail: Optional[Callable[[str, RunResult], None]] = None, stop_on_limit: bool = False,
-                 on_result: Optional[Callable[[str, str, RunResult], None]] = None):
+                 on_result: Optional[Callable[[str, str, RunResult], None]] = None, prompt_dir: Optional[str] = None):
         self.providers = providers  # preference order; first that succeeds wins
         self.timeout = timeout
         self.choice_for = choice_for or (lambda provider, purpose: None)  # -> Choice(model, effort) or None
@@ -263,6 +263,7 @@ class Brain:
         self.on_fail = on_fail or (lambda name, result: None)
         self.stop_on_limit = stop_on_limit  # automatic switching is off: a usage limit ends the call (the caller waits)
         self.on_result = on_result or (lambda name, purpose, result: None)  # every run, for metrics
+        self.prompt_dir = prompt_dir  # where prompts too long for a command line are written (see fit_prompt)
 
     def call(self, prompt: str, schema: Dict[str, Any], cwd: str, extra_dirs: Optional[List[str]] = None,
              exclude: Optional[List[str]] = None, purpose: str = "plan", web: bool = False) -> Dict[str, Any]:
@@ -281,7 +282,8 @@ class Brain:
             pick = self.choice_for(p.name, purpose)
             res = p.run(RunRequest(prompt=prompt, cwd=cwd, mode="read", extra_dirs=extra_dirs or [], persist=False,
                                    schema=schema, timeout=self.timeout, model=pick.model if pick else None,
-                                   effort=pick.effort if pick else None, on_activity=act, web=web))
+                                   effort=pick.effort if pick else None, on_activity=act, web=web,
+                                   prompt_dir=self.prompt_dir))
             self.on_result(p.name, purpose, res)
             if res.ok:  # a result that doesn't match its schema is a failure, never a partial success
                 data, problems = check_result(res.data, schema)

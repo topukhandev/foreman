@@ -1,8 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  push:  # every branch: work in progress is tested on all three OSes before it reaches main
   pull_request:
 
 jobs:
@@ -17,16 +16,33 @@ jobs:
       - run: ruff check .
 
   test:
-    runs-on: ubuntu-latest
+    # Linux, macOS and Windows are all targets: every job blocks. A test may be skipped on a platform only through
+    # tests/platform_skips.py, which must not grow; tests/test_platform.py is never skipped.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - { os: ubuntu-latest, python-version: "3.9" }
+          - { os: ubuntu-latest, python-version: "3.10" }
+          - { os: ubuntu-latest, python-version: "3.11" }
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: ubuntu-latest, python-version: "3.13" }
+          - { os: macos-latest, python-version: "3.13" }
+          - { os: windows-latest, python-version: "3.9" }
+          - { os: windows-latest, python-version: "3.13" }
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4  # the test workspaces' projects run `node test.js`
+        with:
+          node-version: "20"
+      - run: git config --global core.autocrlf false
       - run: pip install -e .
       - run: python -m unittest discover tests
       - run: foreman --version

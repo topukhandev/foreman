@@ -31,11 +31,10 @@ def _engine(args):
 
 
 def _stop_task(signum, frame) -> None:
-    """Stop request for a running task: kill worker processes, then unwind so the task is marked interrupted."""
-    from orchestrator.engine import Interrupted
+    """Stop request for a running task, the same as a stop file (Engine.request_stop): kill the worker processes and
+    let the run end as interrupted at its next checkpoint (raising here could cut a record or event write in half)."""
     from orchestrator.util import kill_all_children
     kill_all_children()
-    raise Interrupted()
 
 
 def _dump(data) -> None:
@@ -173,6 +172,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("targets", nargs="*")
     p = add("run-task", argparse.SUPPRESS, json_=False)
     p.add_argument("task")
+    p.add_argument("--run", help=argparse.SUPPRESS)  # the token of the run this process was started for
     sub.add_parser("help")
 
     args = ap.parse_args(argv)
@@ -252,6 +252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if cmd == "chat":
         from orchestrator.chat import Chat
+        eng.actor = "chat"
         visual = True if args.visual else (False if args.headless else None)
         Chat(args.cwd, visual=visual, engine=eng).run(resume="last" if args.cont else "pick" if args.resume else None)
         return 0
@@ -300,16 +301,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not task:
             print(f"no task {args.task}", file=sys.stderr)
             return 1
+        from orchestrator.oscompat import join_kill_on_close_job
+        join_kill_on_close_job()  # Windows: every worker this runner starts ends with it
         signal.signal(signal.SIGTERM, _stop_task)
         signal.signal(signal.SIGINT, _stop_task)
+        if args.run:
+            task["run_request"] = args.run
         eng.execute(task)
         return 0
     if cmd == "tasks":
+        broken = eng.store.unreadable()
         if args.json:
-            _dump([task_summary(t) for t in eng.store.all()[: args.n]])
+            _dump([task_summary(t) for t in eng.store.all()[: args.n]]
+                  + [{"id": i, "status": "unreadable", "record": eng.store.path(i, "task.json")} for i in broken])
             return 0
         for t in eng.store.all()[: args.n]:
             print(f"#{t['id']:<4} {t['status']:<12} {t['title']}  ({t['updated_at'][:16]})")
+        for i in broken:
+            print(f"#{i:<4} {'unreadable':<12} its record can't be read: {eng.store.path(i, 'task.json')}")
         return 0
     if cmd == "stats":
         from orchestrator.metrics import render_stats, stats

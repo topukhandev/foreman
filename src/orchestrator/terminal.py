@@ -154,8 +154,8 @@ def _main() -> None:
     code = 1
     with open(args.out, "w", encoding="utf-8") as out, open(args.err, "w", encoding="utf-8") as err:
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL,
-                                    text=True, errors="replace", start_new_session=True, env=worker_env(keep))
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL, text=True,
+                                    encoding="utf-8", errors="replace", start_new_session=True, env=worker_env(keep))
             with open(args.pid, "w") as pf:
                 pf.write(str(proc.pid))
             for line in proc.stdout:

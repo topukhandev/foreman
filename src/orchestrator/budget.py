@@ -5,7 +5,7 @@ import threading
 from datetime import date
 from typing import Dict, Tuple
 
-from orchestrator.util import read_json, write_json
+from orchestrator.util import read_json, update_json
 
 
 class Budget:
@@ -30,17 +30,24 @@ class Budget:
 
     def acquire(self, provider: str) -> Tuple[bool, str]:
         """Count one run. Returns (allowed, warning-or-reason)."""
+        limit = self.limits.get(provider) or 0
+        seen: Dict[str, int] = {}
+
+        def change(data):  # under a lock shared by every Foreman process, so no run goes uncounted
+            if not data or data.get("date") != date.today().isoformat():
+                data = {"date": date.today().isoformat(), "runs": {}}
+            used = seen["used"] = int(data["runs"].get(provider, 0))
+            if not (limit and used >= limit):
+                data["runs"][provider] = used + 1
+            return data
         with self._lock:
-            data = self._ledger()
-            limit = self.limits.get(provider) or 0
-            used = int(data["runs"].get(provider, 0))
-            if limit and used >= limit:
-                return False, f"{provider} reached its daily limit ({limit} runs)"
-            data["runs"][provider] = used + 1
-            write_json(self.path, data)
-            if limit and (used + 1) * 100 >= limit * self.warn_at:
-                return True, f"{provider} at {int(100 * (used + 1) / limit)}% of its daily limit ({used + 1}/{limit})"
-            return True, ""
+            update_json(self.path, change, {})
+        used = seen["used"]
+        if limit and used >= limit:
+            return False, f"{provider} reached its daily limit ({limit} runs)"
+        if limit and (used + 1) * 100 >= limit * self.warn_at:
+            return True, f"{provider} at {int(100 * (used + 1) / limit)}% of its daily limit ({used + 1}/{limit})"
+        return True, ""
 
     def over_warning(self, provider: str) -> bool:
         limit = self.limits.get(provider) or 0

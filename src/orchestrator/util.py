@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import signal
 import subprocess
 import tempfile
 import threading
@@ -13,17 +12,30 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from orchestrator.oscompat import group_kwargs, kill_tree, replace_file
+
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
 def atomic_write(path: str, text: str) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".tmp_")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    """Write a whole file so readers see the old or the new content, never a mix, even if the process dies midway.
+    No fsync: it costs 6-12 ms per write (measured) and only adds safety against power loss; a record damaged by
+    one is reported as unreadable, not silently dropped."""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        replace_file(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def read_json(path: str, default: Any = None) -> Any:
@@ -36,6 +48,24 @@ def read_json(path: str, default: Any = None) -> Any:
 
 def write_json(path: str, data: Any) -> None:
     atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def update_json(path: str, change, default: Any = None, timeout: float = 10.0) -> Any:
+    """Read, change and write a JSON file shared by several Foreman processes (suggestions, provider health, the daily
+    budget) under a cross-process lock, so two processes never lose each other's update. `change(data)` edits data in
+    place or returns the new value; the value written is returned."""
+    from orchestrator.oscompat import FileLock
+    lock = FileLock(path + ".lock")
+    if not lock.acquire(timeout):
+        raise TimeoutError(f"{path} stayed locked for {timeout:.0f}s")
+    try:
+        data = read_json(path, default)
+        new = change(data)
+        data = data if new is None else new
+        write_json(path, data)
+        return data
+    finally:
+        lock.release()
 
 
 def read_text(path: str, limit: int = 200_000) -> str:
@@ -120,25 +150,25 @@ class ProcResult:
 
 
 def run_process(cmd: List[str], cwd: str, timeout: int, env: Optional[Dict[str, str]] = None,
-                shell: bool = False) -> ProcResult:
-    """Run a command in its own process group; kill the whole group on timeout."""
+                shell: bool = False, stoppable: bool = True) -> ProcResult:
+    """Run a command in its own process group; kill the whole group on timeout. Once the task is being stopped, no
+    new stoppable process starts (workers, checks); Foreman's own short git reads (stoppable=False) still run, so the
+    record of what changed stays right."""
     start = time.time()
-    if STOPPING.is_set():
+    if stoppable and STOPPING.is_set():
         return ProcResult(-1, "", "stopped by user", False, 0.0)
-    kwargs: Dict[str, Any] = dict(cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  stdin=subprocess.DEVNULL, text=True, errors="replace", env=env, shell=shell)
-    if os.name != "nt":
-        kwargs["start_new_session"] = True
+    kwargs: Dict[str, Any] = dict(cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                  text=True, encoding="utf-8", errors="replace", env=env, shell=shell, **group_kwargs())
     try:
         proc = subprocess.Popen(cmd, **kwargs)
     except (OSError, ValueError) as e:
         return ProcResult(-1, "", f"failed to start: {e}", False, 0.0)
-    key = register_kill(lambda: _kill_group(proc))
+    key = register_kill(lambda: kill_tree(proc))
     try:
         out, err = proc.communicate(timeout=timeout)
         return ProcResult(proc.returncode, out or "", err or "", False, time.time() - start)
     except subprocess.TimeoutExpired:
-        _kill_group(proc)
+        kill_tree(proc)
         out, err = proc.communicate()
         return ProcResult(-1, out or "", (err or "") + f"\ntimed out after {timeout}s", True, time.time() - start)
     finally:
@@ -152,16 +182,16 @@ def run_streaming(cmd: List[str], cwd: str, timeout: int, on_line, env: Optional
         return ProcResult(-1, "", "stopped by user", False, 0.0)
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                                text=True, errors="replace", env=env, start_new_session=(os.name != "nt"))
+                                text=True, encoding="utf-8", errors="replace", env=env, **group_kwargs())
     except (OSError, ValueError) as e:
         return ProcResult(-1, "", f"failed to start: {e}", False, 0.0)
-    key = register_kill(lambda: _kill_group(proc))
+    key = register_kill(lambda: kill_tree(proc))
     err_chunks: List[str] = []
     t_err = threading.Thread(target=lambda: err_chunks.append(proc.stderr.read()), daemon=True)
     t_err.start()
     out_lines: List[str] = []
     timed_out = threading.Event()
-    timer = threading.Timer(timeout, lambda: (timed_out.set(), _kill_group(proc)))
+    timer = threading.Timer(timeout, lambda: (timed_out.set(), kill_tree(proc)))
     timer.start()
     try:
         for line in proc.stdout:
@@ -175,28 +205,20 @@ def run_streaming(cmd: List[str], cwd: str, timeout: int, on_line, env: Optional
         timer.cancel()
         unregister_kill(key)
     t_err.join(2)
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            pipe.close()
+        except OSError:
+            pass
     err = "".join(err_chunks) + (f"\ntimed out after {timeout}s" if timed_out.is_set() else "")
     return ProcResult(-1 if timed_out.is_set() else proc.returncode, "".join(out_lines), err, timed_out.is_set(),
                       time.time() - start)
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
-    try:
-        if os.name != "nt":
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGTERM)
-            time.sleep(0.2)
-            os.killpg(pgid, signal.SIGKILL)
-        else:
-            proc.kill()
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
 # ---------------------------------------------------------------- git snapshots
 
 def _git(path: str, *args: str) -> Optional[str]:
-    res = run_process(["git", "-C", path, *args], cwd=path, timeout=30)
+    res = run_process(["git", "-C", path, *args], cwd=path, timeout=30, stoppable=False)
     return res.out if res.code == 0 else None
 
 

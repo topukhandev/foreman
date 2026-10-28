@@ -189,9 +189,24 @@ def foreman_home() -> str:
     return home
 
 
+def secure_home(home: str) -> None:
+    """Make the Foreman home readable by its owner only (0700). Everything Foreman stores sits below it, so this also
+    covers files that older versions created with default permissions. POSIX only; a folder someone else owns is
+    left alone."""
+    if os.name == "nt":
+        return
+    try:
+        st = os.stat(home)
+        if st.st_uid == os.getuid() and st.st_mode & 0o077:
+            os.chmod(home, 0o700)
+    except OSError:
+        pass
+
+
 def load_config(home: Optional[str] = None) -> Config:
     home = home or foreman_home()
-    os.makedirs(home, exist_ok=True)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    secure_home(home)
     path = os.path.join(home, "config.yaml")
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:

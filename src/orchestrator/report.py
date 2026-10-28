@@ -66,11 +66,13 @@ def notify(title: str, body: str) -> None:
     if not exe:
         return
     try:
+        # Title and body are AI-written: they go in as plain arguments, never into a script or as an option.
         if exe.endswith("notify-send"):
-            subprocess.Popen([exe, "-a", "Foreman", title, body], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd = [exe, "-a", "Foreman", "--", title, body]
         else:
-            subprocess.Popen([exe, "-e", f'display notification "{body[:150]}" with title "{title}"'],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            cmd = [exe, "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+                   "-e", "end run", title, body[:150]]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
 

@@ -88,7 +88,7 @@ class Chat:
     def __init__(self, cwd: str, visual: Optional[bool] = None, engine=None):
         self.cwd = os.path.abspath(cwd)
         self.visual = visual
-        self.eng = engine or build_engine(visual=visual, out=lambda _m: None)
+        self.eng = engine or build_engine(visual=visual, out=lambda _m: None, actor="chat")
         self.turns: List[Tuple[str, str]] = []
         self.focus: Optional[str] = None      # task the conversation is currently about
         self.background: List[str] = []      # tasks left running with Ctrl+C
@@ -538,7 +538,7 @@ class Chat:
 
     def _execute(self, task: Dict[str, Any]) -> None:
         """Run the task in a detached process and stream its progress (tests override this)."""
-        proc = spawn_task(self.eng.cfg.home, task["id"], self.visual)
+        proc = spawn_task(self.eng.cfg.home, task["id"], self.visual, run=task.get("run_request"))
         self._watch(task["id"], proc)
 
     def _watch(self, task_id: str, proc) -> None:
@@ -647,7 +647,7 @@ class Chat:
         for tid in list(self.background):
             t = self.eng.store.load(tid)
             if t and t["status"] not in ("running", "queued", "planning") \
-                    and not os.path.exists(self.eng.store.path(tid, "lock")):
+                    and not self.eng.is_running(tid):
                 self.background.remove(tid)
                 self.focus = tid
                 text = ui.c("  ── background task finished ──", ui.GREY) + "\n" + self.render(t)

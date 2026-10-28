@@ -8,15 +8,17 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from orchestrator.config import load_config
 from orchestrator.engine import Engine
+from orchestrator.oscompat import python_command, spawn_detached
 from orchestrator.providers import build_providers
 from orchestrator.registry import Registry
 from orchestrator.store import Store
 
 
 def build_engine(visual: Optional[bool] = None, out: Callable[[str], None] = print,
-                 home: Optional[str] = None) -> Engine:
+                 home: Optional[str] = None, actor: str = "cli") -> Engine:
     cfg = load_config(home)
-    return Engine(cfg, build_providers(cfg), Registry(cfg.home, cfg.roots), Store(cfg.home), out=out, visual=visual)
+    return Engine(cfg, build_providers(cfg), Registry(cfg.home, cfg.roots), Store(cfg.home), out=out, visual=visual,
+                  actor=actor)
 
 
 def entry_command() -> List[str]:
@@ -27,14 +29,15 @@ def entry_command() -> List[str]:
     return [sys.executable, "-m", "orchestrator.cli"]
 
 
-def spawn_task(home: str, task_id: str, visual: Optional[bool] = None) -> subprocess.Popen:
-    """Execute a prepared task in a detached process (survives the caller, e.g. an MCP tool call timing out)."""
-    cmd = entry_command() + ["run-task", task_id]
+def spawn_task(home: str, task_id: str, visual: Optional[bool] = None, run: Optional[str] = None) -> subprocess.Popen:
+    """Execute a prepared task in a detached process (survives the caller, e.g. an MCP tool call timing out). `run`
+    is the token the task was queued with: the runner runs the task only for that token, so a duplicate start
+    can't run it twice."""
+    cmd = python_command() + entry_command()[1:] + ["run-task", task_id] + (["--run", run] if run else [])
     if visual is not None:
         cmd.append("--visual" if visual else "--headless")
     log = open(os.path.join(home, "tasks", task_id, "runner.log"), "a")
-    return subprocess.Popen(cmd, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True,
-                            env={**os.environ, "FOREMAN_HOME": home})
+    return spawn_detached(cmd, stdout=log, stderr=log, stdin=subprocess.DEVNULL, env={**os.environ, "FOREMAN_HOME": home})
 
 
 def wait_for(engine: Engine, task_id: str, seconds: int) -> Tuple[Dict, bool]:
@@ -42,8 +45,8 @@ def wait_for(engine: Engine, task_id: str, seconds: int) -> Tuple[Dict, bool]:
     deadline = time.time() + max(0, seconds)
     started = time.time()
     while True:
-        task = engine.store.load(task_id)
-        running = task["status"] in ("queued", "running", "planning") or os.path.exists(engine.store.path(task_id, "lock"))
+        task = engine.reconcile(engine.store.load(task_id))
+        running = task["status"] in ("queued", "running", "planning") or engine.is_running(task_id)
         if not running and time.time() - started > 0.5:
             return task, True
         if time.time() >= deadline:
