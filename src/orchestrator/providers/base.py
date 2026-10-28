@@ -207,8 +207,10 @@ def token_counts(**counts: Any) -> Optional[Dict[str, int]]:
 def tool_line(name: str, arg: Any, cwd: str) -> str:
     """Claude Code-style 'Tool(arg)' with paths shown relative to the project."""
     arg = " ".join(str(arg or "").split())
-    if cwd and arg.startswith(cwd.rstrip("/") + "/"):
-        arg = arg[len(cwd.rstrip("/")) + 1:]
+    for sep in {os.sep, "/"}:
+        if cwd and arg.startswith(cwd.rstrip(sep) + sep):
+            arg = arg[len(cwd.rstrip(sep)) + 1:]
+            break
     return f"{name}({arg[:400]})"  # the engine shortens it after turning project paths into names
 
 

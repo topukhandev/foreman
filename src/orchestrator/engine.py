@@ -169,7 +169,7 @@ def check_command_allowed(cmd: str) -> Tuple[bool, str]:
             continue
         if part.startswith("cd "):
             target = part[3:].strip()
-            if target.startswith("/") or ".." in target.split("/"):
+            if target.startswith(("/", "\\", "~")) or re.match(r"[A-Za-z]:", target) or ".." in re.split(r"[\\/]", target):
                 return False, "cd outside the project"
             continue
         if not part.startswith(SAFE_CHECK_PREFIXES):
@@ -2486,7 +2486,9 @@ class Engine:
             return
         self._last_activity[key] = (time.time(), text)
         for p in sorted(self.registry.projects.values(), key=lambda p: -len(p.path)):  # show paths as project/…
-            text = text.replace(p.path.rstrip("/") + "/", p.name + "/").replace(p.path, p.name)
+            for sep in {os.sep, "/"}:
+                text = text.replace(p.path.rstrip(sep) + sep, p.name + "/")
+            text = text.replace(p.path, p.name)
         m = re.match(r"^(\w+)\((.*)\)$", text, re.S)
         if m and len(m.group(2)) > 90:
             text = f"{m.group(1)}({m.group(2)[:89]}…)"

@@ -311,7 +311,15 @@ class PtyPasteTest(unittest.TestCase):
                     return
         drain(1.0)
         text = lines(545).replace("\n", "\r")  # terminals send Enter as CR inside a paste
-        os.write(fd, b"\x1b[200~" + text.encode() + b"\x1b[201~")
+        data = b"\x1b[200~" + text.encode() + b"\x1b[201~"
+        os.set_blocking(fd, False)  # a blocking write of it all deadlocks once the pty's buffer (small on macOS) fills
+        while data:
+            try:
+                data = data[os.write(fd, data[:512]):]
+            except BlockingIOError:
+                pass
+            drain(0.05)
+        os.set_blocking(fd, True)
         drain(0.8)
         screen = out.decode(errors="replace")
         self.assertIn("[Pasted text #1 +545 lines]", screen)

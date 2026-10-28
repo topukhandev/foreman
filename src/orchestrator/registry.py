@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+from orchestrator.oscompat import is_within
 from orchestrator.util import atomic_write, git_head, now_iso, read_text, short
 
 MANIFESTS = {
@@ -113,10 +114,10 @@ class Registry:
         if known:
             return known
         for root in self.roots:
-            root = os.path.abspath(os.path.expanduser(root)).rstrip("/")
-            if not path.startswith(root + "/"):
+            root = os.path.abspath(os.path.expanduser(root))
+            if not is_within(path, root) or is_within(root, path):
                 continue
-            top = os.path.join(root, path[len(root) + 1:].split("/")[0])
+            top = os.path.join(root, os.path.relpath(path, root).split(os.sep)[0])
             base = os.path.basename(top)
             if not os.path.isdir(top) or base.startswith(".") or base in SKIP_DIRS:
                 return None
@@ -159,7 +160,7 @@ class Registry:
     def add_project(self, path: str, name: Optional[str] = None, source: str = "declared") -> Project:
         path = os.path.abspath(os.path.expanduser(path))
         with self._lock:
-            name = name or os.path.basename(path.rstrip("/"))
+            name = name or os.path.basename(os.path.normpath(path))
             proj = self._describe(name, path, self.projects.get(name))
             proj.source = source
             self.projects[name] = proj
@@ -291,7 +292,7 @@ class Registry:
         path = os.path.abspath(path)
         best = None
         for p in self.projects.values():
-            if path == p.path or path.startswith(p.path.rstrip("/") + "/"):
+            if is_within(path, p.path):
                 if not best or len(p.path) > len(best.path):
                     best = p
         return best
@@ -476,7 +477,7 @@ def _identities(p: Project) -> Dict[str, List[str]]:
     """Strings that, found in another project's files, indicate a relation to p."""
     paths = [p.path]
     home = os.path.expanduser("~")
-    if p.path.startswith(home + "/"):
+    if is_within(p.path, home) and p.path != home:
         paths.append("~" + p.path[len(home):])
     modules = []
     gomod = read_text(os.path.join(p.path, "go.mod"), 5000)

@@ -14,6 +14,8 @@ Windows notes (exercised by the Windows CI job, not on a developer machine yet):
 
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -250,6 +252,42 @@ def replace_file(src: str, dst: str) -> None:
             if attempt == 39:
                 raise
             time.sleep(0.05)
+
+
+# Characters cmd.exe interprets in the arguments of a .cmd/.bat program (it re-parses its whole command line), and
+# control characters. Escaping them reliably is not possible, so such arguments are refused instead.
+_BATCH_UNSAFE = re.compile(r'[&|<>^%!"\x00-\x1f]')
+
+
+def batch_args_problem(args: List[str]) -> str:
+    """Why these arguments can't be passed to a batch-file program, or "" when they can."""
+    bad = next((a for a in args if _BATCH_UNSAFE.search(a)), None)
+    if bad is None:
+        return ""
+    return (f"an argument contains characters cmd.exe would interpret ({bad[:60]!r}); install the program's native "
+            "executable, or avoid & | < > ^ % ! \" and line breaks in paths and arguments")
+
+
+def resolve_command(cmd: List[str]) -> "tuple":
+    """(command, problem). On Windows a program is found through PATHEXT as a shell would (npm -> npm.cmd;
+    CreateProcess alone finds only .exe files), and a .cmd/.bat program gets only arguments cmd.exe can't
+    misread. Elsewhere the command is returned unchanged."""
+    if not WINDOWS or not cmd:
+        return cmd, ""
+    exe = cmd[0] if os.path.dirname(cmd[0]) else (shutil.which(cmd[0]) or cmd[0])
+    if exe.lower().endswith((".cmd", ".bat")):
+        problem = batch_args_problem([str(a) for a in cmd[1:]])
+        if problem:
+            return cmd, f"refused to run {os.path.basename(exe)}: {problem}"
+    return [exe] + list(cmd[1:]), ""
+
+
+def is_within(path: str, folder: str) -> bool:
+    """path is folder itself or inside it. Separators and, on Windows, letter case are normalised, so "C:\\Work\\api"
+    is inside "c:/work". Text comparison only: symbolic links are not resolved."""
+    p = os.path.normcase(os.path.normpath(os.path.abspath(path)))
+    f = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+    return p == f or p.startswith(f.rstrip(os.sep) + os.sep)
 
 
 def python_command() -> List[str]:

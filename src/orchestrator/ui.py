@@ -706,10 +706,10 @@ class LineEditor:
                 for base, dirs, names in os.walk(self.root):
                     dirs[:] = [d for d in dirs if d not in skip and not d.startswith(".")]
                     rel = os.path.relpath(base, self.root)
-                    found += [n if rel == "." else os.path.join(rel, n) for n in names]
+                    found += [n if rel == "." else rel.replace(os.sep, "/") + "/" + n for n in names]
                     if len(found) > 20000:
                         break
-            folders = {os.path.dirname(f) for f in found} - {""}
+            folders = {f.rsplit("/", 1)[0] for f in found if "/" in f}
             self._files = sorted(found[:20000]) + sorted(d + "/" for d in folders)
         return self._files
 

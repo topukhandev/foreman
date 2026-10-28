@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from orchestrator.oscompat import group_kwargs, kill_tree, replace_file
+from orchestrator.oscompat import group_kwargs, kill_tree, replace_file, resolve_command
 
 
 def now_iso() -> str:
@@ -157,6 +157,10 @@ def run_process(cmd: List[str], cwd: str, timeout: int, env: Optional[Dict[str, 
     start = time.time()
     if stoppable and STOPPING.is_set():
         return ProcResult(-1, "", "stopped by user", False, 0.0)
+    if not shell:
+        cmd, problem = resolve_command(cmd)
+        if problem:
+            return ProcResult(-1, "", problem, False, 0.0)
     kwargs: Dict[str, Any] = dict(cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
                                   text=True, encoding="utf-8", errors="replace", env=env, shell=shell, **group_kwargs())
     try:
@@ -180,6 +184,9 @@ def run_streaming(cmd: List[str], cwd: str, timeout: int, on_line, env: Optional
     start = time.time()
     if STOPPING.is_set():
         return ProcResult(-1, "", "stopped by user", False, 0.0)
+    cmd, problem = resolve_command(cmd)
+    if problem:
+        return ProcResult(-1, "", problem, False, 0.0)
     try:
         proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
                                 text=True, encoding="utf-8", errors="replace", env=env, **group_kwargs())

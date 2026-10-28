@@ -3,6 +3,8 @@
 import io
 import json
 import os
+import re
+import pathlib
 import sqlite3
 import tempfile
 import unittest
@@ -78,7 +80,11 @@ class ClaudeTest(unittest.TestCase):
                 f.write(json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": "fix login bug"}]}}) + "\n")
             with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": cfg}):
                 sessions = self.p.discover_sessions(proj)
-        self.assertEqual(encode_cwd(proj), "-work-my-app")
+        # Claude Code names the folder after the absolute path with every other character as "-" (D--work-my-app
+        # on Windows, where the path gets a drive letter; to be confirmed against Claude Code on Windows)
+        self.assertEqual(encode_cwd(proj), re.sub(r"[^a-zA-Z0-9]", "-", os.path.abspath(proj)))
+        if os.name != "nt":
+            self.assertEqual(encode_cwd(proj), "-work-my-app")
         self.assertEqual([(s.session_id, s.title) for s in sessions], [("s-1", "fix login bug")])
 
 
@@ -110,15 +116,19 @@ class AntigravityTest(unittest.TestCase):
         self.assertIn("denied", r.error)
 
     def test_session_discovery_from_index(self):
+        def uri(path):  # how agy records a workspace: file:///work/api (file:///D:/work/api on Windows)
+            return pathlib.Path(os.path.abspath(path)).as_uri()
+        if os.name != "nt":
+            self.assertEqual(uri("/work/api"), "file:///work/api")
         with tempfile.TemporaryDirectory() as d:
             db = os.path.join(d, "idx.db")
             con = sqlite3.connect(db)
             con.execute("CREATE TABLE conversation_summaries (conversation_id text, title text, preview text, "
                         "last_modified_time datetime, workspace_uris text)")
             con.execute("INSERT INTO conversation_summaries VALUES ('c1','Refund work','', "
-                        "'2026-10-24 06:00:00.123456789+00:00', ?)", (json.dumps(["file:///work/api"]),))
+                        "'2026-10-24 06:00:00.123456789+00:00', ?)", (json.dumps([uri("/work/api")]),))
             con.execute("INSERT INTO conversation_summaries VALUES ('c2','Other','', '2026-10-24 06:00:00+00:00', ?)",
-                        (json.dumps(["file:///work/ui"]),))
+                        (json.dumps([uri("/work/ui")]),))
             con.commit()
             con.close()
             with mock.patch.dict(os.environ, {"ANTIGRAVITY_INDEX": db}):
@@ -149,12 +159,13 @@ class OpenCodeTest(unittest.TestCase):
 class MiscTest(unittest.TestCase):
     def test_finder_never_substitutes_another_program(self):
         with tempfile.TemporaryDirectory() as d:
-            fake = os.path.join(d, "antigravity")
-            write(d, "antigravity", "#!/bin/sh\n")
+            name = "antigravity.exe" if os.name == "nt" else "antigravity"  # Windows finds programs by extension
+            fake = os.path.join(d, name)
+            write(d, name, "#!/bin/sh\n")
             os.chmod(fake, 0o755)
             with mock.patch.dict(os.environ, {"PATH": d}), mock.patch("orchestrator.finder._USER_BIN_GLOBS", []):
                 self.assertIsNone(find_executable("agy"))
-                self.assertEqual(find_executable("antigravity"), fake)
+                self.assertEqual(os.path.normcase(find_executable("antigravity")), os.path.normcase(fake))
 
     def test_extract_json(self):
         self.assertEqual(extract_json('text ```json\n{"a": 1}\n``` more'), {"a": 1})
@@ -309,7 +320,7 @@ class RenameCompatibilityTest(unittest.TestCase):
         fake = tempfile.mkdtemp()
         os.makedirs(os.path.join(fake, ".switchyard", "tasks"))
         env = {k: v for k, v in os.environ.items() if k not in ("SWITCHYARD_HOME", "FOREMAN_HOME")}
-        env["HOME"] = fake
+        env["HOME"] = env["USERPROFILE"] = fake  # ~ is HOME on POSIX, USERPROFILE on Windows
         with mock.patch.dict(os.environ, env, clear=True):
             home = foreman_home()
         self.assertEqual(home, os.path.join(fake, ".foreman"))

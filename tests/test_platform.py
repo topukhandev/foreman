@@ -117,6 +117,44 @@ class AtomicWriteTest(unittest.TestCase):
         self.assertEqual([n for n in os.listdir(os.path.dirname(path)) if n.startswith(".tmp_")], [])
 
 
+class PathTest(unittest.TestCase):
+    def test_inside_a_folder_whatever_the_separators(self):
+        from orchestrator.oscompat import is_within
+        root = os.path.join(tempfile.gettempdir(), "projects", "api")
+        self.assertTrue(is_within(root, root))
+        self.assertTrue(is_within(os.path.join(root, "src", "x.js"), root))
+        self.assertTrue(is_within(root + os.sep + "src" + os.sep, root + os.sep))
+        self.assertFalse(is_within(root + "-v2", root), "a sibling with a longer name is not inside")
+        self.assertFalse(is_within(os.path.dirname(root), root))
+        if os.name == "nt":
+            self.assertTrue(is_within(root.upper() + "\\src", root.lower()), "Windows paths ignore case")
+
+    def test_check_commands_cannot_cd_out_of_the_project(self):
+        from orchestrator.engine import check_command_allowed
+        for target in ("/etc", "..", "../x", "a/../../b", "~/x", "C:\\Windows", "c:/x", "\\\\server\\share", "..\\x"):
+            ok, why = check_command_allowed(f"cd {target} && npm test")
+            self.assertFalse(ok, target)
+        self.assertTrue(check_command_allowed("cd packages/api && npm test")[0])
+
+
+class WindowsCommandTest(unittest.TestCase):
+    def test_batch_file_arguments_that_cmd_would_interpret_are_refused(self):
+        from orchestrator.oscompat import batch_args_problem
+        self.assertEqual(batch_args_problem(["test", "--watch=false", "src/a b.js"]), "")
+        for bad in ("a & calc", "x|y", "100%", "!x!", 'say "hi"', "two\nlines", "a^b", "<in"):
+            self.assertTrue(batch_args_problem(["run", bad]), bad)
+
+    @unittest.skipUnless(os.name == "nt", "Windows program lookup")
+    def test_programs_are_found_like_a_shell_finds_them(self):
+        import shutil
+        if not shutil.which("npm"):
+            self.skipTest("npm is not installed")
+        res = run_process(["npm", "--version"], cwd=tempfile.gettempdir(), timeout=120)  # npm is npm.cmd
+        self.assertEqual(res.code, 0, res.err)
+        res = run_process(["npm", "run", "x & calc"], cwd=tempfile.gettempdir(), timeout=60)
+        self.assertIn("refused to run", res.err)
+
+
 class SkipListTest(unittest.TestCase):
     def test_the_skip_list_never_grows_and_every_entry_has_a_reason(self):
         count = sum(len(v) for v in platform_skips.SKIPS.values())

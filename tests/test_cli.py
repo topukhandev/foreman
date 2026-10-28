@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import os
 import subprocess
 import unittest
 
@@ -38,7 +39,10 @@ class CompletionTest(unittest.TestCase):
             for word in ("lifecycle", "mcp", "deployment"):
                 self.assertIn(word, text)
         bash = completion.bash()
-        self.assertEqual(subprocess.run(["bash", "-n"], input=bash, text=True).returncode, 0)
+        # Windows: "bash" on PATH may be the WSL launcher; Git's bash is the one completion scripts are for
+        git_bash = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe")
+        exe = git_bash if os.name == "nt" and os.path.exists(git_bash) else "bash"
+        self.assertEqual(subprocess.run([exe, "-n"], input=bash, text=True).returncode, 0)
 
     def test_zsh_descriptions_are_quote_safe(self):
         for _, desc in completion.COMMANDS:

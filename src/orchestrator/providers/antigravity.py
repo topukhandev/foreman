@@ -21,6 +21,7 @@
 
 import json
 import os
+import pathlib
 import sqlite3
 from datetime import datetime, timezone
 import re
@@ -160,7 +161,7 @@ class AntigravityProvider(Provider):
         db = antigravity_index()
         if not os.path.exists(db):
             return []
-        uri = "file://" + os.path.abspath(cwd)
+        uri = pathlib.Path(os.path.abspath(cwd)).as_uri()  # file:///work/api; file:///D:/work/api on Windows
         try:
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
             rows = con.execute("SELECT conversation_id, title, preview, last_modified_time, workspace_uris "
