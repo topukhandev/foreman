@@ -149,6 +149,10 @@ def serve_stdio() -> None:
     protocol = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())  # a stray print (ours or a library's) can't corrupt it
     sys.stdout = sys.stderr
-    from orchestrator.app import build_engine
+    from orchestrator.app import apply_login_env, build_engine, login_shell_env
+    if os.environ.get("FOREMAN_LOGIN_ENV", "1") != "0":  # started from the desktop: no shell profile was loaded
+        added = apply_login_env(login_shell_env())
+        if added:
+            print(f"environment from the login shell: {', '.join(sorted(added))}", file=sys.stderr)
     api = Api(build_engine(out=lambda _m: None, actor="desktop"), actor="desktop")
     RpcServer(api, protocol).serve(sys.stdin.buffer)

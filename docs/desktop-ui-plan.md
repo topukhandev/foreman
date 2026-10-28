@@ -484,6 +484,19 @@ Implemented and tested (Linux; 363 tests, ruff clean; not committed):
   - 391 tests.
   - Not done yet: moving MCP and `--json` onto `api.py`; moving the chat's status-line logic (`Phase`) for reuse.
 
+- **B steps** (2026-10-28, branch `desktop-b-steps`; `main` has A1–A8):
+  - **Global slots:** `limits.max_global` (default 6) AI CLI runs at once across all tasks and processes; held only
+    while a CLI runs.
+  - **B1 live output:** each provider run's raw output goes to a `.live` log, redacted as it is written (environment
+    secrets, token formats, private keys across lines). API 1.1 adds `tasks.outputs` / `tasks.output`, plain text
+    with control sequences removed.
+  - **B2:** Windows `.cmd`/`.bat` CLIs get their whole prompt through a file; the prompt limit is 30,000 bytes on
+    Windows.
+  - **B3:** `schema` on `task.json` (a newer one is never rewritten) and on `projects.yaml` (unknown fields are kept).
+  - **B4:** the desktop sidecar reads PATH and variables from the login shell (markers, timeout, never overriding);
+    `FOREMAN_LOGIN_ENV=0` turns it off.
+  - 402 tests.
+
 Deliberate deviations and open points:
 - **UTC:** `now_iso()` stays local time, because `metrics.py` and `chat.py` subtract parsed timestamps, and mixing
   old naive values with new UTC-aware ones would raise. Events get an epoch `ts` instead, and `rev` orders

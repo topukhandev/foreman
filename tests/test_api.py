@@ -265,7 +265,7 @@ class StdioProcessTest(unittest.TestCase):
     def test_the_real_server_speaks_only_protocol_on_stdout_and_ends_with_stdin(self):
         ws = Workspace()
         try:
-            env = {**os.environ, "FOREMAN_HOME": ws.home, "PYTHONPATH": SRC}
+            env = {**os.environ, "FOREMAN_HOME": ws.home, "PYTHONPATH": SRC, "FOREMAN_LOGIN_ENV": "0"}
             proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "orchestrator.cli", "serve", "--stdio"],
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
             reqs = [{"jsonrpc": "2.0", "id": 1, "method": "system.hello", "params": {"api_version": "1.0"}},

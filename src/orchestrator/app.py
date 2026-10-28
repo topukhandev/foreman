@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from typing import Callable, Dict, List, Optional, Tuple
 
 from orchestrator.config import load_config
@@ -40,6 +41,55 @@ def spawn_task(home: str, task_id: str, visual: Optional[bool] = None, run: Opti
         cmd.append("--visual" if visual else "--headless")
     log = open(os.path.join(home, "tasks", task_id, "runner.log"), "a")
     return spawn_detached(cmd, stdout=log, stderr=log, stdin=subprocess.DEVNULL, env={**os.environ, "FOREMAN_HOME": home})
+
+
+# Variables that describe the shell itself, not the environment programs need.
+_SHELL_ONLY = {"PWD", "OLDPWD", "SHLVL", "_", "PS1", "PS2", "PS4", "PROMPT", "RPROMPT", "TERM", "COLUMNS", "LINES",
+               "HISTFILE", "HISTSIZE", "SAVEHIST", "ZDOTDIR"}
+
+
+def login_shell_env(timeout: float = 10.0, shell: Optional[str] = None) -> Dict[str, str]:
+    """macOS and Linux: the environment your login shell sets up (PATH from ~/.zshrc or nvm, keys you export there).
+    An app started from the desktop doesn't get it, so the desktop app's Foreman asks the shell once at startup.
+    Whatever the shell prints while starting is ignored (the environment comes between two markers), and a shell
+    that doesn't answer within `timeout` is given up on. {} on Windows (programs get the user's environment there)
+    or when it fails."""
+    if os.name == "nt":
+        return {}
+    shell = shell or os.environ.get("SHELL") or "/bin/sh"
+    marker = "FOREMAN_ENV_" + uuid.uuid4().hex
+    script = f"printf '%s' {marker}; env -0; printf '%s' {marker}"
+    try:
+        res = subprocess.run([shell, "-l", "-i", "-c", script], stdin=subprocess.DEVNULL, capture_output=True,
+                             timeout=timeout, start_new_session=True)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    parts = res.stdout.split(marker.encode())
+    if len(parts) < 3:
+        return {}
+    env = {}
+    for item in parts[1].split(b"\0"):
+        key, sep, value = item.decode("utf-8", errors="replace").partition("=")
+        if sep and key and key not in _SHELL_ONLY:
+            env[key] = value
+    return env
+
+
+def apply_login_env(found: Dict[str, str], environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Merge the login shell's environment into this process's: its PATH entries come first (then the ones only this
+    process had), and its other variables are added where this process has none. Returns what was added or changed."""
+    environ = os.environ if environ is None else environ
+    changed = {}
+    if found.get("PATH"):
+        mine = [p for p in environ.get("PATH", "").split(os.pathsep) if p]
+        theirs = [p for p in found["PATH"].split(os.pathsep) if p]
+        path = os.pathsep.join(dict.fromkeys(theirs + mine))
+        if path != environ.get("PATH"):
+            environ["PATH"] = changed["PATH"] = path
+    for key, value in found.items():
+        if key != "PATH" and key not in environ:
+            environ[key] = changed[key] = value
+    return changed
 
 
 def wait_for(engine: Engine, task_id: str, seconds: int) -> Tuple[Dict, bool]:

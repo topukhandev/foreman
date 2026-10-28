@@ -225,6 +225,43 @@ class GitHeadTest(unittest.TestCase):
         self.assertFalse(is_git_repo(plain))
 
 
+class LoginEnvTest(unittest.TestCase):
+    """The desktop app's Foreman reads PATH and keys from the login shell (an app started from the desktop has none)."""
+
+    def shell(self, body: str) -> str:
+        path = os.path.join(tempfile.mkdtemp(prefix="foreman_shell_"), "fakesh")
+        with open(path, "w") as f:  # called as: fakesh -l -i -c '<script>'
+            f.write("#!/bin/sh\n" + body + '\neval "$4"\n')
+        os.chmod(path, 0o755)
+        return path
+
+    @unittest.skipIf(os.name == "nt", "Windows programs get the user's environment")
+    def test_reads_the_environment_the_profile_sets_and_ignores_its_noise(self):
+        from orchestrator.app import login_shell_env
+        sh = self.shell("echo 'Welcome! nvm loading...'\nexport FROM_PROFILE='a=b c'\nexport PATH=/opt/fromrc/bin:$PATH")
+        env = login_shell_env(timeout=20, shell=sh)
+        self.assertEqual(env.get("FROM_PROFILE"), "a=b c")
+        self.assertTrue(env["PATH"].startswith("/opt/fromrc/bin"))
+        self.assertNotIn("PWD", env)
+
+    @unittest.skipIf(os.name == "nt", "Windows programs get the user's environment")
+    def test_a_shell_that_hangs_or_fails_gives_nothing(self):
+        from orchestrator.app import login_shell_env
+        self.assertEqual(login_shell_env(timeout=1, shell=self.shell("sleep 30")), {})
+        self.assertEqual(login_shell_env(timeout=5, shell="/no/such/shell"), {})
+
+    def test_merging_puts_the_profile_path_first_and_never_overrides(self):
+        from orchestrator.app import apply_login_env
+        sep = os.pathsep
+        environ = {"PATH": sep.join(["/usr/bin", "/bin"]), "HOME": "/home/me"}
+        added = apply_login_env({"PATH": sep.join(["/opt/node/bin", "/usr/bin"]), "HOME": "/elsewhere",
+                                 "ANTHROPIC_API_KEY": "k"}, environ)
+        self.assertEqual(environ["PATH"].split(sep), ["/opt/node/bin", "/usr/bin", "/bin"])
+        self.assertEqual(environ["HOME"], "/home/me", "what the app already has is kept")
+        self.assertEqual(environ["ANTHROPIC_API_KEY"], "k")
+        self.assertEqual(sorted(added), ["ANTHROPIC_API_KEY", "PATH"])
+
+
 class SkipListTest(unittest.TestCase):
     def test_the_skip_list_never_grows_and_every_entry_has_a_reason(self):
         count = sum(len(v) for v in platform_skips.SKIPS.values())
