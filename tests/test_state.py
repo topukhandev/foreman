@@ -67,13 +67,18 @@ class EventLogTest(unittest.TestCase):
         t = threading.Thread(target=writer)
         t.start()
         seen, cursor = [], 0
-        while t.is_alive() or len(seen) < 400:
+
+        def read() -> bool:
+            nonlocal cursor
             events, cursor, resync = self.store.read_events(self.task["id"], cursor, limit=37)
             self.assertFalse(resync)
-            seen += [e["n"] for e in events if e["event"] == "activity"]
-            if not t.is_alive() and not events:
-                break
+            seen.extend(e["n"] for e in events if e["event"] == "activity")
+            return bool(events)
+        while t.is_alive():  # reading while it writes
+            read()
         t.join()
+        while read():  # then what came after the last read
+            pass
         self.assertEqual(seen, list(range(400)))
 
 

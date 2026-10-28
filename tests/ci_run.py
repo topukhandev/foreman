@@ -51,15 +51,25 @@ def hung() -> None:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):  # Windows pipes default to the ANSI code page: "✔" in a report would crash
+        stream.reconfigure(encoding="utf-8", errors="replace")
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)
     timer = threading.Timer(WATCHDOG, hung)
     timer.daemon = True
     timer.start()
-    suite = unittest.defaultTestLoader.discover(here)
-    result = unittest.TextTestRunner(resultclass=Result, verbosity=1).run(suite)
+    try:
+        suite = unittest.defaultTestLoader.discover(here)
+        result = unittest.TextTestRunner(resultclass=Result, verbosity=1).run(suite)
+    except BaseException as e:  # the runner itself failed: say so where it can be seen
+        annotate("the test run crashed", f"{type(e).__name__}: {e}")
+        raise
     timer.cancel()
-    for test, trace in (result.failures + result.errors)[:40]:
+    problems = result.failures + result.errors
+    if problems:  # first: GitHub shows only the first few annotations of a step
+        annotate(f"{len(result.failures)} failed, {len(result.errors)} errors of {result.testsRun} tests",
+                 "\n".join(t.id() if hasattr(t, "id") else str(t) for t, _ in problems))
+    for test, trace in problems[:40]:
         annotate(test.id() if hasattr(test, "id") else str(test), trace)
     return 0 if result.wasSuccessful() else 1
 
