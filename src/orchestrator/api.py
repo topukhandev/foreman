@@ -17,7 +17,9 @@ from orchestrator.app import spawn_task
 from orchestrator.config import ON_CLOSE, set_option
 from orchestrator.engine import Engine
 from orchestrator.modes import resolve as resolve_mode
+from orchestrator.registry import REGISTRY_SCHEMA
 from orchestrator.report import task_summary
+from orchestrator.store import TASK_SCHEMA
 from orchestrator.oscompat import FileLock
 from orchestrator.util import read_text, update_json
 
@@ -76,7 +78,8 @@ class Api:
             ok, info = prov.available()
             providers.append({"name": name, "available": ok, "info": info})
         return {"api_version": API_VERSION, "core_version": __version__, "home": self.eng.cfg.home,
-                "platform": sys.platform, "actor": self.actor, "providers": providers}
+                "platform": sys.platform, "actor": self.actor, "providers": providers,
+                "schemas": {"task": TASK_SCHEMA, "registry": REGISTRY_SCHEMA}}
 
     def doctor(self) -> Dict[str, Any]:
         from orchestrator.cli import doctor_data

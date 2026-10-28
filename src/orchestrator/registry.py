@@ -31,6 +31,8 @@ EVIDENCE_FILES = ["go.mod", "composer.json", "package.json", ".env.example", ".e
 RELATION_TYPES = ["depends_on", "api_client_of", "tests", "shares_contract_with", "deploys", "related", "mentions"]
 
 
+REGISTRY_SCHEMA = 1  # projects.yaml layout; fields a version doesn't know are kept on rewrite
+
 @dataclass
 class Project:
     name: str
@@ -88,12 +90,25 @@ class Registry:
                          for n, p in (data.get("projects") or {}).items()}
         self.relations = [Relation(**{k: v for k, v in r.items() if k in Relation.__dataclass_fields__})
                           for r in (data.get("relations") or [])]
+        # Fields this version doesn't know (written by a newer Foreman, or by hand) are kept and written back as they
+        # were: the CLI and the desktop app may be different versions sharing this file.
+        self._unknown = {k: v for k, v in data.items() if k not in ("projects", "relations", "schema")}
+        self._unknown_projects = {n: {k: v for k, v in (p or {}).items() if k not in Project.__dataclass_fields__}
+                                  for n, p in (data.get("projects") or {}).items()}
+        self._unknown_relations = {(r.get("src"), r.get("dst"), r.get("type")):
+                                   {k: v for k, v in r.items() if k not in Relation.__dataclass_fields__}
+                                   for r in (data.get("relations") or []) if isinstance(r, dict)}
 
     def save(self) -> None:
         with self._lock:
             data = {
-                "projects": {n: {k: v for k, v in asdict(p).items() if k != "name"} for n, p in sorted(self.projects.items())},
-                "relations": [asdict(r) for r in self.relations],
+                "schema": REGISTRY_SCHEMA,
+                **getattr(self, "_unknown", {}),
+                "projects": {n: {**{k: v for k, v in asdict(p).items() if k != "name"},
+                                 **getattr(self, "_unknown_projects", {}).get(n, {})}
+                             for n, p in sorted(self.projects.items())},
+                "relations": [{**asdict(r), **getattr(self, "_unknown_relations", {}).get((r.src, r.dst, r.type), {})}
+                              for r in self.relations],
             }
             atomic_write(self.path, "# Foreman project registry. Safe to edit; `source: declared` entries are never overwritten.\n"
                          + yaml.safe_dump(data, sort_keys=False, allow_unicode=True))

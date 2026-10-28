@@ -25,6 +25,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from orchestrator.util import atomic_write, now_iso, read_json, redact, secret_values, short, update_json, write_json
 
+TASK_SCHEMA = 1  # task.json layout. Fields only grow; a record from a newer layout is read, never rewritten.
+
+
+class RecordTooNew(Exception):
+    pass
+
+
 ACTIVE = {"planning", "planned", "running", "needs_input", "blocked", "partial", "queued", "interrupted", "paused"}
 FINAL = {"done", "failed", "answered", "cancelled"}
 
@@ -72,7 +79,11 @@ class Store:
 
     def save(self, task: Dict[str, Any], reason: str = "") -> None:
         """Replace the task record. `reason` explains a change of status in its event (e.g. runner_exited)."""
+        if int(task.get("schema") or TASK_SCHEMA) > TASK_SCHEMA:
+            raise RecordTooNew(f"task #{task['id']} was written by a newer Foreman (record layout {task['schema']}); "
+                               f"this one (layout {TASK_SCHEMA}) only reads it. Update Foreman to change it.")
         with self._lock:
+            task.setdefault("schema", TASK_SCHEMA)
             task["updated_at"] = now_iso()
             for i, q in enumerate(task.get("questions") or [], 1):  # append-only list: the position is a stable id
                 q.setdefault("id", f"q{i}")

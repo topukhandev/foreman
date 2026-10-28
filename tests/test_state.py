@@ -114,6 +114,40 @@ class RecordTest(unittest.TestCase):
         self.assertEqual(self.store.unreadable(), [bad["id"]])
 
 
+class SchemaTest(unittest.TestCase):
+    """The CLI and the desktop app may be different Foreman versions sharing ~/.foreman."""
+
+    def test_task_records_carry_their_layout_and_a_newer_one_is_never_rewritten(self):
+        from orchestrator.store import TASK_SCHEMA, RecordTooNew
+        store = Store(tempfile.mkdtemp(prefix="foreman_schema_"))
+        task = store.new_task("x", tempfile.gettempdir())
+        self.assertEqual(store.load(task["id"])["schema"], TASK_SCHEMA)
+        newer = store.load(task["id"])
+        newer.update(schema=TASK_SCHEMA + 1, future_field={"kept": True})
+        with open(store.path(task["id"], "task.json"), "w", encoding="utf-8") as f:
+            json.dump(newer, f)
+        with self.assertRaises(RecordTooNew):
+            store.save(store.load(task["id"]))
+        self.assertEqual(store.load(task["id"])["future_field"], {"kept": True})
+
+    def test_registry_rewrites_keep_fields_this_version_doesnt_know(self):
+        import yaml
+        from orchestrator.registry import Registry
+        home = tempfile.mkdtemp(prefix="foreman_schema_")
+        with open(os.path.join(home, "projects.yaml"), "w", encoding="utf-8") as f:
+            yaml.safe_dump({"schema": 1, "team": "payments",
+                            "projects": {"api": {"path": "/w/api", "owner": "ana"}},
+                            "relations": [{"src": "ui", "dst": "api", "type": "uses", "since": "v2"}]}, f)
+        reg = Registry(home, [])
+        reg.projects["api"].summary = "orders service"
+        reg.save()
+        with open(os.path.join(home, "projects.yaml"), encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        self.assertEqual((data["schema"], data["team"]), (1, "payments"))
+        self.assertEqual((data["projects"]["api"]["owner"], data["projects"]["api"]["summary"]), ("ana", "orders service"))
+        self.assertEqual(data["relations"][0]["since"], "v2")
+
+
 WORKER = textwrap.dedent('''
     import sys
     sys.path.insert(0, {src!r})
