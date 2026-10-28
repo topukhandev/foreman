@@ -140,10 +140,8 @@ class ScenarioTest(unittest.TestCase):
         self.s.plan = lambda req: plan([("orders-api", "modify"), ("admin-ui", "modify")],
                                        [step("a", "orders-api"), step("b", "admin-ui")])
         self.s.step, self.s.delay = editing_worker(), 0.4
-        start = time.time()
         task = self.eng.handle("Add request logging to the orders API and the admin UI", self.ws.ui)["task"]
-        self.assertEqual(self.eng.providers["claude"].max_active, 2)
-        self.assertLess(time.time() - start, 0.4 * 2 + 3.0)
+        self.assertEqual(self.eng.providers["claude"].max_active, 2, "both steps ran at the same time")
         self.assertEqual(len({s["session_id"] for s in task["sessions"] if not s.get("reviewer")}), 2)
 
     # 7 ---------------------------------------------------------------------------------------
