@@ -72,6 +72,7 @@ ui:
   prompt_suggestions: true # a suggested next message waits in grey in the empty input (Tab takes it)
   status_line: true        # a line under the input: project, mode, current task, models
   output_style: default    # default | concise | explanatory | learning | proactive (how answers are written)
+  on_close: ask            # desktop app closed while tasks run: ask | keep (they go on) | stop (they stop)
 
 sessions:
   reuse: fork              # fork | off  - continue context from your recent sessions
@@ -168,11 +169,15 @@ class Config:
     prompt_suggestions: bool = True
     status_line: bool = True
     output_style: str = "default"
+    on_close: str = "ask"  # the desktop app is closed while tasks run: ask, keep them running, or stop them
     auto_switch: bool = True  # a provider that hits its usage limit hands its step to another one (off: wait for it)
 
     @property
     def provider_order(self) -> List[str]:
         return [n for n, p in self.providers.items() if p.enabled]
+
+
+ON_CLOSE = ("ask", "keep", "stop")
 
 
 def foreman_home() -> str:
@@ -252,6 +257,7 @@ def load_config(home: Optional[str] = None) -> Config:
         prompt_suggestions=bool(ui.get("prompt_suggestions", True)),
         status_line=bool(ui.get("status_line", True)),
         output_style=str(ui.get("output_style") or "default").lower(),
+        on_close=str(ui.get("on_close") or "ask").lower() if str(ui.get("on_close") or "ask").lower() in ON_CLOSE else "ask",
         auto_switch=bool(data.get("auto_switch", True)),
     )
 

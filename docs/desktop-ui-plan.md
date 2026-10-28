@@ -473,6 +473,17 @@ Implemented and tested (Linux; 363 tests, ruff clean; not committed):
   - `stop_requested` is logged by the runner itself (only the run-lock holder appends during a run).
   - Tests: `tests/test_state.py`; 371 tests in total.
 
+- **Contract, A7 and A8** (2026-10-28):
+  - `docs/api-contract.md` approved.
+  - `api.py`: all v1.0 operations, error kinds, idempotency keys, the `desktop` actor. Dry runs also go to a
+    runner (`run-task --plan-only`), so the API never waits for AI work.
+  - `feed.py`: follows event logs by cursor, announces new tasks, resyncs, and reconciles dead runners.
+  - `rpc_server.py` / `foreman serve --stdio`: JSON-RPC as UTF-8 bytes, concurrent requests, `system.hello` first,
+    stdout protected.
+  - `ui.on_close` setting (D3), also in `foreman config`.
+  - 391 tests.
+  - Not done yet: moving MCP and `--json` onto `api.py`; moving the chat's status-line logic (`Phase`) for reuse.
+
 Deliberate deviations and open points:
 - **UTC:** `now_iso()` stays local time, because `metrics.py` and `chat.py` subtract parsed timestamps, and mixing
   old naive values with new UTC-aware ones would raise. Events get an epoch `ts` instead, and `rev` orders

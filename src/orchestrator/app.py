@@ -29,11 +29,13 @@ def entry_command() -> List[str]:
     return [sys.executable, "-m", "orchestrator.cli"]
 
 
-def spawn_task(home: str, task_id: str, visual: Optional[bool] = None, run: Optional[str] = None) -> subprocess.Popen:
+def spawn_task(home: str, task_id: str, visual: Optional[bool] = None, run: Optional[str] = None,
+               plan_only: bool = False) -> subprocess.Popen:
     """Execute a prepared task in a detached process (survives the caller, e.g. an MCP tool call timing out). `run`
     is the token the task was queued with: the runner runs the task only for that token, so a duplicate start
-    can't run it twice."""
-    cmd = python_command() + entry_command()[1:] + ["run-task", task_id] + (["--run", run] if run else [])
+    can't run it twice. plan_only: a dry run (plan, change nothing)."""
+    cmd = python_command() + entry_command()[1:] + ["run-task", task_id] + (["--run", run] if run else []) \
+        + (["--plan-only"] if plan_only else [])
     if visual is not None:
         cmd.append("--visual" if visual else "--headless")
     log = open(os.path.join(home, "tasks", task_id, "runner.log"), "a")

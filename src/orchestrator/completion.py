@@ -9,7 +9,7 @@ COMMANDS: List[Tuple[str, str]] = [
     ("tasks", "list tasks"), ("stats", "totals across tasks"),
     ("show", "task details"), ("projects", "project registry"), ("sessions", "existing AI sessions"),
     ("suggestions", "open suggestions"), ("accept", "act on a suggestion"), ("dismiss", "dismiss a suggestion"),
-    ("config", "show or change settings"), ("doctor", "check providers and setup"), ("mcp", "MCP server"),
+    ("config", "show or change settings"), ("doctor", "check providers and setup"), ("mcp", "MCP server"), ("serve", "API server for the desktop app"),
     ("completion", "print a shell completion script"), ("version", "print the version"), ("help", "usage"),
 ]
 ARGUMENTS: Dict[str, List[str]] = {
@@ -19,7 +19,7 @@ ARGUMENTS: Dict[str, List[str]] = {
     "completion": ["bash", "zsh"],
 }
 MODES = ["research", "planning", "development", "qa", "deployment"]
-FLAGS = ["--visual", "--headless", "--mode", "--dry-run", "--fix", "--cwd", "--json", "--events", "-c", "-r", "--version", "-h", "--help"]
+FLAGS = ["--visual", "--headless", "--mode", "--dry-run", "--fix", "--cwd", "--json", "--events", "--stdio", "-c", "-r", "--version", "-h", "--help"]
 SHELLS = tuple(ARGUMENTS["completion"])
 
 

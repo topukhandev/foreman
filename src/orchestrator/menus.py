@@ -228,6 +228,10 @@ STYLE_NAMES = {k: v[0] for k, v in OUTPUT_STYLES.items()}
 TABS = ["Settings", "Status"]
 
 
+ON_CLOSE_LABELS = {"ask": "Ask: keep them running or stop them", "keep": "Keep running: you get the usual notification",
+                   "stop": "Stop them: continue them later"}
+
+
 def config_menu(eng) -> Optional[str]:
     """Claude Code-style settings panel with two tabs (←/→): Settings, a list with the current values where typing
     filters the rows, Enter flips a yes/no setting on the spot and opens a panel for the others; Status, what Foreman
@@ -257,6 +261,7 @@ def config_menu(eng) -> Optional[str]:
             ("notify", "Desktop notification when a task finishes", yes(cfg.notify)),
             ("reuse", "Start from your recent sessions", yes(cfg.reuse_sessions == "fork")),
             ("copy", "Copy selected text in the chat", yes(cfg.copy_on_select)),
+            ("close", "Desktop app closed while tasks run", ON_CLOSE_LABELS[cfg.on_close].split(":")[0]),
         ]
         labels = [ui.clip(f"{name:<42} {value}", ui.width() - 8) for _, name, value in rows]
         pick = _panel("Settings", ["Enter changes the selected setting (yes/no ones flip right away). Saved to "
@@ -308,6 +313,15 @@ def _change(eng, key: str) -> Optional[str]:
                       start=names.index(cfg.output_style) if cfg.output_style in names else 0)
         if pick:
             set_option(home, "ui.output_style", names[labels.index(pick)])
+        return None
+    if key == "close":
+        names = list(ON_CLOSE_LABELS)
+        labels = [ON_CLOSE_LABELS[n] for n in names]
+        pick = _panel("Desktop app closed while tasks run", ["Tasks run in their own processes, so closing the app "
+                                                             "doesn't have to stop them."], labels, allow_text=False,
+                      color=ui.FRAME, esc="cancel", start=names.index(cfg.on_close) if cfg.on_close in names else 0)
+        if pick:
+            set_option(home, "ui.on_close", names[labels.index(pick)])
         return None
     if key in ("planner", "first"):
         names = [n for n in eng.providers if cfg.providers[n].enabled]

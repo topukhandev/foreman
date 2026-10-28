@@ -14,7 +14,7 @@ from orchestrator.config import load_config, set_option
 from orchestrator.report import task_summary
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
-               "accept", "dismiss", "close", "config", "doctor", "mcp", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version", "stats"}
+               "accept", "dismiss", "close", "config", "doctor", "mcp", "serve", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version", "stats"}
 
 
 def _progress(msg: str) -> None:
@@ -170,9 +170,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("mcp", help="run the MCP server (stdio), or `mcp install [claude|antigravity|codex|all]`")
     p.add_argument("action", nargs="?", default="serve", choices=["serve", "install", "status"])
     p.add_argument("targets", nargs="*")
+    p = sub.add_parser("serve", help="the application API for the desktop app (JSON-RPC over stdio)")
+    p.add_argument("--stdio", action="store_true", help="speak JSON-RPC on stdin/stdout (the only transport so far)")
     p = add("run-task", argparse.SUPPRESS, json_=False)
     p.add_argument("task")
     p.add_argument("--run", help=argparse.SUPPRESS)  # the token of the run this process was started for
+    p.add_argument("--plan-only", action="store_true", help=argparse.SUPPRESS)  # a dry run
     sub.add_parser("help")
 
     args = ap.parse_args(argv)
@@ -248,6 +251,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if cmd == "doctor":
         return doctor(as_json=args.json, fix=args.fix)
 
+    if cmd == "serve":
+        if not args.stdio:
+            print("usage: foreman serve --stdio   (JSON-RPC 2.0 on stdin/stdout; see docs/api-contract.md)", file=sys.stderr)
+            return 1
+        from orchestrator.rpc_server import serve_stdio
+        serve_stdio()
+        return 0
+
     eng = _engine(args)
 
     if cmd == "chat":
@@ -307,7 +318,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         signal.signal(signal.SIGINT, _stop_task)
         if args.run:
             task["run_request"] = args.run
-        eng.execute(task)
+        eng.plan_only(task) if args.plan_only else eng.execute(task)
         return 0
     if cmd == "tasks":
         broken = eng.store.unreadable()
@@ -557,6 +568,7 @@ Foreman
   foreman completion bash|zsh      shell completion script (eval "$(foreman completion bash)")
   foreman --version                version (with the commit when run from a checkout)
   foreman mcp [install [claude|antigravity|codex]]   MCP server for Claude Code, Antigravity, Codex…
+  foreman serve --stdio            the application API for the desktop app (JSON-RPC 2.0 on stdin/stdout)
 
   --visual / --headless               override the display mode for one run
 """
