@@ -1089,7 +1089,7 @@ class ChatHistory:
         if not os.path.isdir(self.dir):
             return []
         items = [read_json(os.path.join(self.dir, f)) for f in os.listdir(self.dir) if f.endswith(".json")]
-        return sorted([i for i in items if i], key=lambda i: i.get("updated_at", 0), reverse=True)
+        return sorted([i for i in items if i], key=lambda i: (i.get("updated_at", 0), i.get("started_at", 0)), reverse=True)
 
 
 def _ago(ts: float) -> str:

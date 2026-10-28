@@ -144,14 +144,13 @@ class RecoveryTest(unittest.TestCase):
         self.assertIn("out of their usage limits", task["steps"][0]["summary"])
 
     def test_planning_waits_for_a_limit_reset_instead_of_failing(self):
-        soon = time.time() + 0.3
         calls = []
         inner = self.s.handler("claude")
 
         def claude(req):
             if req.schema is PLAN_SCHEMA and not calls:
-                calls.append(1)
-                return RunResult(False, error="session limit", kind=LIMIT, retry_at=soon)
+                calls.append(1)  # the reset is counted from the limit, however long getting there took
+                return RunResult(False, error="session limit", kind=LIMIT, retry_at=time.time() + 0.5)
             return inner(req)
         self.eng.providers["claude"] = MockProvider(name="claude", handler=claude)
         self.eng.providers.pop("opencode")
