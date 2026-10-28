@@ -53,7 +53,7 @@ class ApiTest(unittest.TestCase):
 
     def test_hello_and_version(self):
         hello = self.api.hello("desktop/test", "1.0")
-        self.assertEqual((hello["api_version"], hello["actor"]), ("1.0", "desktop"))
+        self.assertEqual((hello["api_version"], hello["actor"]), ("1.1", "desktop"))
         self.assertEqual(self.kind(self.api.hello, "x", "2.0"), "invalid")
 
     def test_submit_runs_the_task_in_a_runner_and_it_reads_back(self):
@@ -131,6 +131,71 @@ class ApiTest(unittest.TestCase):
         self.assertIn("orders-api", [r["other"] for r in ui["relations"]])
 
 
+class LiveOutputTest(unittest.TestCase):
+    SECRET = "sk-ant-api03-livesecretvalue-0123456789"
+
+    def setUp(self):
+        self.ws = Workspace()
+        self.s = Script()
+        self.s.plan = lambda req: {**change_plan(), "impact": {"summary": "a footer", "risk": "low"}}  # one run
+
+        def noisy(req):  # a CLI printing as it works: colours, a key it read, a token-looking value
+            for line in ["\x1b[32mReading src\x1b[0m", "-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEAsecret",
+                         "-----END RSA PRIVATE KEY-----", f"token {self.SECRET} done", "ghp_" + "a" * 36,
+                         "evil \x1b]52;c;cGF5bG9hZA==\x07 \u202ereversed"]:
+                req.on_output(line + "\n")
+            return edit(req)
+        self.s.step = noisy
+        self.eng = make_engine(self.ws, self.s)
+        self.api = Api(self.eng, spawn=lambda task, plan_only: self.eng.execute(task))
+
+    def tearDown(self):
+        self.ws.cleanup()
+
+    def test_output_is_stored_redacted_and_served_as_plain_text(self):
+        task_id = self.api.tasks_submit("add a footer", self.ws.ui)["task_id"]
+        outs = self.api.tasks_outputs(task_id)["outputs"]
+        self.assertEqual(len(outs), 1)
+        name = outs[0]["name"]
+        self.assertTrue(name.startswith("step-") and name.endswith("-1-claude"), name)  # step, attempt, provider
+        self.assertIn(name, [e.get("log") for e in self.eng.store.events(task_id) if e["event"] == "output"])
+        with open(self.eng.store.path(task_id, "logs", name + ".live"), encoding="utf-8") as f:
+            stored = f.read()
+        for secret in ("MIIEowIBAAKCAQEAsecret", self.SECRET, "ghp_aaaa"):
+            self.assertNotIn(secret, stored, "redacted before it reached the disk")
+        self.assertIn("[redacted private key]", stored)
+        self.assertIn("[redacted token]", stored)
+        got = self.api.tasks_output(task_id, name)
+        self.assertTrue(got["eof"])
+        self.assertIn("Reading src", got["text"])
+        for raw in ("\x1b", "\x07", "\u202e"):
+            self.assertNotIn(raw, got["text"], "no terminal control sequences reach a viewer")
+        page = self.api.tasks_output(task_id, name, 0, limit=10)
+        self.assertTrue(page["text"].endswith("\n") and not page["eof"], "whole lines, page by page")
+        rest = self.api.tasks_output(task_id, name, page["offset"])
+        self.assertEqual(page["text"] + rest["text"], got["text"])
+
+    def test_only_listed_outputs_can_be_read(self):
+        task_id = self.api.tasks_submit("add a footer", self.ws.ui)["task_id"]
+        for bad in ("../task", "../../../etc/passwd", "nope"):
+            with self.assertRaises(ApiError) as ctx:
+                self.api.tasks_output(task_id, bad)
+            self.assertEqual(ctx.exception.kind, "not_found")
+
+    def test_environment_secrets_and_keys_split_over_lines_are_redacted(self):
+        log = self.eng.store.live_log("1", "x")
+        self.eng.store._secrets = [("MY_TOKEN", "value-from-the-environment")]
+        for line in ["a value-from-the-environment b", "x -----BEGIN PRIVATE KEY-----", "AAAA", "BBBB",
+                     "-----END PRIVATE KEY----- after", '{"t": "-----BEGIN EC PRIVATE KEY-----\\nQQ\\n-----END EC PRIVATE KEY-----"}']:
+            log.write(line)
+        with open(log.path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertNotIn("value-from-the-environment", text)
+        self.assertNotIn("AAAA", text)
+        self.assertNotIn("QQ", text)
+        self.assertIn(" after", text, "text after the key is kept")
+
+
 class FeedTest(unittest.TestCase):
     def setUp(self):
         self.ws = Workspace()
@@ -178,7 +243,8 @@ class RpcTest(unittest.TestCase):
 
     def test_hello_first_then_methods_errors_and_params(self):
         self.assertEqual(self.rpc("tasks.list")["error"]["data"]["kind"], "invalid")
-        self.assertEqual(self.rpc("system.hello", {"client": "t", "api_version": "1.0"})["result"]["api_version"], "1.0")
+        self.assertEqual(self.rpc("system.hello", {"client": "t", "api_version": "1.0"})["result"]["api_version"], "1.1",
+                         "a 1.0 client is served by 1.1 (minor versions only add)")
         self.assertEqual(self.rpc("tasks.list")["result"]["tasks"], [])
         self.assertEqual(self.rpc("tasks.get", {"task_id": "42"})["error"]["data"]["kind"], "not_found")
         self.assertEqual(self.rpc("tasks.get", {"nope": 1})["error"]["code"], -32602)

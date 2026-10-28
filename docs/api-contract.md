@@ -1,4 +1,4 @@
-# Foreman application API, v1.0 (draft for approval)
+# Foreman application API, v1.1
 
 Status: **approved and implemented, 2026-10-28** (`api.py` operations, `feed.py` events, `rpc_server.py` for
 `foreman serve --stdio`; tests in `tests/test_api.py`). The desktop app uses it. The MCP server and the CLI's `--json`
@@ -58,6 +58,8 @@ JSON-RPC error objects with `data.kind`:
 | `tasks.stop` | `{task_id}` | `{requested}` (the runner ends the run as `interrupted`) |
 | `tasks.close` | `{task_id, note?, cancel?}` | `{task: TaskSummary, message}` |
 | `tasks.events` | `{task_id, cursor=0, limit=1000}` | `{events: [Event], cursor, resync}` |
+| `tasks.outputs` | `{task_id}` | `{outputs: [{name, size, updated}]}`: the live output log of each provider run (1.1) |
+| `tasks.output` | `{task_id, name, offset=0, limit=65536}` | `{text, offset, eof}`: whole lines from a byte offset (1.1) |
 
 **Projects and sessions**
 
@@ -84,6 +86,16 @@ Every mutating call (`submit`, `answer`, `resume`, `next`, `stop`, `close`, `acc
 `set_on_close`) is recorded with the actor `desktop`. `submit` and `answer` with an `idempotency_key` seen in the
 last 24 hours return the first result instead of acting twice.
 
+**Live output (1.1, read-only).** Each provider run's raw output is appended to its log as it arrives. An `output`
+event names the log when a run starts.
+- **Redacted before it is written:** environment secret values, well-known token formats, and private keys, also
+  when a key spans lines. This is best effort: a secret read from a file that looks like nothing known isn't
+  recognised.
+- **Served as plain text:** terminal escape sequences, other control characters and bidirectional overrides are
+  removed. The client renders it as text, never as HTML.
+- **No input path:** there is no way to send input to a run.
+- **Names come from `tasks.outputs`;** paths are never accepted.
+
 ## Live updates
 - `events.subscribe {tasks: [task_id] | "active", since: {task_id: cursor}}` → `{}`. A task given without a cursor
   is followed from the current end of its log (`tasks.events` has its history); "active" means the tasks queued
@@ -107,7 +119,6 @@ Client rules:
 - **Never in the API:** running checks, marking something verified, editing a plan, approving without `plan_fp`,
   running commands. Those are the engine's alone.
 - **Later minor versions:**
-  - `tasks.output` (raw live output, B1) in 1.1;
   - model and settings editing;
   - interactive terminals (`sessions.lease`, `terminal.launch_spec`).
 - **A different transport:** HTTP/SSE would carry the same methods unchanged.

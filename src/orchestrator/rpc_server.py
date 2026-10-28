@@ -22,6 +22,7 @@ METHODS = {
     "tasks.list": "tasks_list", "tasks.get": "tasks_get", "tasks.submit": "tasks_submit",
     "tasks.answer": "tasks_answer", "tasks.resume": "tasks_resume", "tasks.next": "tasks_next",
     "tasks.stop": "tasks_stop", "tasks.close": "tasks_close", "tasks.events": "tasks_events",
+    "tasks.outputs": "tasks_outputs", "tasks.output": "tasks_output",
     "projects.list": "projects_list", "projects.get": "projects_get", "projects.scan": "projects_scan",
     "lifecycle.get": "lifecycle_get", "sessions.list": "sessions_list",
     "suggestions.list": "suggestions_list", "suggestions.accept": "suggestions_accept",

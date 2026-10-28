@@ -57,6 +57,7 @@ class RunRequest:
     # killed terminal, network) can still be resumed.
     on_session: Optional[Callable[[str], None]] = field(default=None, repr=False)
     prompt_dir: Optional[str] = None       # private folder for prompts too long for a command line (default: home/prompts)
+    on_output: Optional[Callable[[str], None]] = field(default=None, repr=False)  # every raw output line, as it comes
 
 
 # A command-line argument can hold about 128 KB on Linux; a big paste in the request can exceed that.
@@ -291,11 +292,13 @@ class Provider:
         return res.code, res.out, res.err, res.duration, res.timed_out
 
     def _line_handler(self, req: RunRequest):
-        if not req.on_activity and not req.on_session:
+        if not req.on_activity and not req.on_session and not req.on_output:
             return None
         seen: List[str] = []
 
         def handle(line: str) -> None:
+            if req.on_output:
+                req.on_output(line)
             try:
                 ev = json.loads(line)
             except ValueError:

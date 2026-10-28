@@ -185,6 +185,34 @@ class Store:
             f.write(f"===== {now_iso()}\n{self.clean(text)}\n")
         return p
 
+    def live_log(self, task_id: str, name: str) -> "LiveLog":
+        return LiveLog(self, self.path(task_id, "logs", re.sub(r"[^\w.-]", "_", name) + ".live"))
+
+    def outputs(self, task_id: str) -> List[Dict[str, Any]]:
+        """The live output logs of a task's runs, oldest first."""
+        folder = self.path(str(task_id), "logs")
+        try:
+            names = [n for n in os.listdir(folder) if n.endswith(".live")]
+        except OSError:
+            return []
+        out = [{"name": n[:-5], "size": os.path.getsize(os.path.join(folder, n)),
+                "updated": os.path.getmtime(os.path.join(folder, n))} for n in names]
+        return sorted(out, key=lambda o: o["updated"])
+
+    def read_output(self, task_id: str, name: str, offset: int = 0, limit: int = 65536) -> Tuple[str, int, bool]:
+        """(text, next offset, at the end) of a live log from byte `offset`: complete lines only, at most about
+        `limit` bytes (at least one line)."""
+        path = self.path(str(task_id), "logs", name + ".live")
+        with open(path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, min(offset, size)))
+            data = f.read(max(1, limit))
+            if data and not data.endswith(b"\n"):
+                data += f.readline()  # finish the line that crosses the limit (a page holds whole lines)
+        cut = data.rfind(b"\n") + 1
+        start = max(0, min(offset, size))
+        return data[:cut].decode("utf-8", errors="replace"), start + cut, start + cut >= size
+
     def write_report(self, task_id: str, text: str) -> None:
         atomic_write(self.path(task_id, "report.md"), self.clean(text))
 
@@ -288,6 +316,53 @@ def _line_start(f, size: int) -> int:
     tail = f.read()
     i = tail.rfind(b"\n")
     return size - len(tail) + i + 1 if i >= 0 else (0 if size <= 65536 else size)
+
+
+PEM_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.S)
+PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+TOKEN_RE = re.compile(r"\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|"
+                      r"github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|"
+                      r"glpat-[A-Za-z0-9_-]{20,})")
+
+
+class LiveLog:
+    """The raw output of one provider run, appended as it arrives (tasks/<id>/logs/<name>.live), for the desktop
+    app's output view. Redacted before it is written, never after: secret values from the environment (as every
+    record), well-known token formats, and private-key blocks, also when one spans lines.
+
+    Best effort, and documented as such: a secret the worker reads from a file (.env, credentials) that isn't in
+    Foreman's environment and doesn't look like a known token, or one that is encoded (base64, hex, URL-encoded),
+    is not recognised. The protection is that workers don't get secrets in the first place (util.worker_env)."""
+
+    def __init__(self, store: "Store", path: str):
+        self.store, self.path = store, path
+        self._in_key = False
+        self._lock = threading.Lock()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    def redact(self, line: str) -> Optional[str]:
+        """The line as it may be stored, or None when all of it is inside a private key."""
+        if self._in_key:
+            end = PEM_END_RE.search(line)
+            if not end:
+                return None
+            self._in_key = False
+            line = line[end.end():]
+        line = PEM_RE.sub("[redacted private key]", line)  # a whole key on one line (JSON-escaped output)
+        begin = PEM_BEGIN_RE.search(line)
+        if begin:  # a key that goes on over the next lines
+            self._in_key = True
+            line = line[:begin.start()] + "[redacted private key]"
+        return TOKEN_RE.sub("[redacted token]", self.store.clean(line))
+
+    def write(self, line: str) -> None:
+        with self._lock:
+            text = self.redact(line.rstrip("\r\n"))
+            if text is None:
+                return
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
 
 
 _STOP = {"the", "and", "for", "with", "that", "this", "task", "previous", "continue", "resume", "finish", "remaining",

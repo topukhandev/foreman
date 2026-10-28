@@ -1307,6 +1307,9 @@ class Engine:
                 step.setdefault("history", []).append(attempt)
                 self.store.save(task)
             perm = step["assignment"]["permissions"]
+            live = self.store.live_log(task["id"], f"step-{step['id']}-{len(step['history'])}-{provider.name}")
+            self.store.event(task["id"], "output", step=step["id"], provider=provider.name,
+                             log=os.path.basename(live.path)[:-5])
             with self._slot(task, f"{step['kind']} {step['project']} via {provider.name}"):  # waiting isn't timed
                 result = provider.run(RunRequest(
                     web=perm["web"], prompt=attempt_prompt, cwd=proj.path,
@@ -1319,7 +1322,7 @@ class Engine:
                     prompt_dir=self._prompt_dir(task),
                     on_activity=lambda text, _p=provider.name: self._activity(task["id"], _p, step["project"], text),
                     on_session=lambda sid, _p=provider.name, _a=attempt, _f=(session_id if fork else None):
-                        self._live_session(task, step, _p, sid, _a, _f)))
+                        self._live_session(task, step, _p, sid, _a, _f), on_output=live.write))
             if result.ok:  # the final report must match the contract; otherwise it is a missing report, not success
                 data, problems = check_result(result.data, schema)
                 if data is not None and int(data.get("v") or PROTOCOL_VERSION) > PROTOCOL_VERSION:

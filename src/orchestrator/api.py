@@ -7,6 +7,7 @@ turns the engine's answers into data and error kinds a client can act on. The tr
 
 import hashlib
 import os
+import re
 import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -20,8 +21,17 @@ from orchestrator.report import task_summary
 from orchestrator.oscompat import FileLock
 from orchestrator.util import read_text, update_json
 
-API_VERSION = "1.0"
+API_VERSION = "1.1"  # 1.1: tasks.outputs / tasks.output (live output, read-only)
 IDEMPOTENCY_TTL = 24 * 3600
+# What a viewer must never receive from a CLI's raw output: terminal escape sequences (colours, cursor moves, window
+# titles, hyperlinks, clipboard writes), other control characters, and bidirectional overrides that can make text
+# read differently from what it is. Line breaks and tabs stay.
+_ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
+
+
+def plain_output(text: str) -> str:
+    return _CONTROL.sub("", _ESCAPES.sub("", text))
 
 
 class ApiError(Exception):
@@ -104,6 +114,20 @@ class Api:
         self._task(task_id)
         events, cursor, resync = self.eng.store.read_events(str(task_id), int(cursor), int(limit))
         return {"events": events, "cursor": cursor, "resync": resync}
+
+    def tasks_outputs(self, task_id: str) -> Dict[str, Any]:
+        """The live output logs of a task's provider runs (read-only)."""
+        task = self._task(task_id)
+        return {"outputs": self.eng.store.outputs(task["id"])}
+
+    def tasks_output(self, task_id: str, name: str, offset: int = 0, limit: int = 65536) -> Dict[str, Any]:
+        """Text of one live output log from a byte offset, already redacted when it was written and here stripped of
+        terminal control sequences. `name` must be one of tasks.outputs (never a path)."""
+        task = self._task(task_id)
+        if name not in {o["name"] for o in self.eng.store.outputs(task["id"])}:
+            raise ApiError("not_found", f"#{task['id']} has no output '{name}'.")
+        text, offset, eof = self.eng.store.read_output(task["id"], name, max(0, int(offset)), min(int(limit), 1 << 20))
+        return {"text": plain_output(text), "offset": offset, "eof": eof}
 
     # ------------------------------------------------------------------ tasks: changing
     def _start(self, task: Dict[str, Any], plan_only: bool = False) -> Dict[str, Any]:
