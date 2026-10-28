@@ -19,6 +19,7 @@ jobs:
     # Linux, macOS and Windows are all targets: every job blocks. A test may be skipped on a platform only through
     # tests/platform_skips.py, which must not grow; tests/test_platform.py is never skipped.
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30  # backstop; tests/ci_run.py reports a hang after 20
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +45,6 @@ jobs:
           node-version: "20"
       - run: git config --global core.autocrlf false
       - run: pip install -e .
-      - run: python -m unittest discover tests
+      - run: python tests/ci_run.py  # the suite, with a hang watchdog and failures as annotations
       - run: foreman --version
       - run: foreman completion bash | bash -n
