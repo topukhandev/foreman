@@ -97,7 +97,7 @@ class RecoveryTest(unittest.TestCase):
         self.assertNotIn("claude:plan", self.s.log[before:])
 
     def test_when_every_provider_is_out_of_limits_foreman_waits_for_the_stated_reset(self):
-        soon = time.time() + 0.4
+        soon = time.time() + 2.0  # from the test's start: leaves room for a slow machine to reach the limit first
         self.script("claude", [RunResult(False, error="limit", kind=LIMIT, retry_at=soon)], session="c-1")
         self.script("opencode", [RunResult(False, error="Rate limit reached", kind=LIMIT, retry_at=soon + 60)])
         task = self.eng.handle("look into currency", self.ws.api)["task"]
@@ -110,7 +110,7 @@ class RecoveryTest(unittest.TestCase):
         self.assertNotIn("waiting", task)
 
     def test_without_a_reset_time_it_checks_periodically_then_pauses(self):
-        self.eng.cfg.limits.limit_retry_sec = 0.05
+        self.eng.cfg.limits.limit_retry_sec = 0.5  # each check waits; 50 ms was less than a slow machine's overhead
         self.eng.cfg.limits.limit_retries = 3
         lim = RunResult(False, error="quota exceeded", kind=LIMIT)
         self.script("claude", [lim] * 20, session="c-1")

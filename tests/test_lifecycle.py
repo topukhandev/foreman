@@ -67,7 +67,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(all(c.web for c in steps), "planning may research the web")
         doc = os.path.join(self.ws.api, ".foreman", "plans", "vip-discount.md")
         self.assertTrue(os.path.isfile(doc))
-        self.assertIn("Add VIP flag", open(doc).read())
+        self.assertIn("Add VIP flag", open(doc, encoding="utf-8").read())
         self.assertEqual(task["document"]["path"], ".foreman/plans/vip-discount.md")
         self.assertEqual(task["projects"]["orders-api"]["role"], "inspect", "nothing is 'to change' in planning")
         self.assertEqual(git(self.ws.api, "status", "--porcelain", "--", "server.js"), "", "no code touched")
@@ -258,7 +258,7 @@ class LifecycleTest(unittest.TestCase):
         self.s.step = editing_worker()
         self.s.plan = lambda req: with_mode(plan([("orders-api", "modify")], [step("1", "orders-api")]), "development")
         self.eng.answer(task["id"], "lifetime spend above $5,000")
-        log = open(os.path.join(self.ws.api, ".foreman", "decisions.md")).read()
+        log = open(os.path.join(self.ws.api, ".foreman", "decisions.md"), encoding="utf-8").read()
         self.assertIn("Which customers are VIP? → lifetime spend above $5,000", log)
         self.assertEqual(self.eng.store.load(task["id"])["mode"], "development", "the mode stays with the task")
 

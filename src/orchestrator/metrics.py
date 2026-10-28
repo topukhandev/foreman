@@ -11,7 +11,7 @@ TOKEN_KEYS = ("input", "output", "reasoning", "cache_read", "cache_write")
 def usage_fields(result: Any) -> Dict[str, Any]:
     """Duration, cost and tokens of one provider run, for the attempt journal or an event."""
     out: Dict[str, Any] = {}
-    if getattr(result, "duration", 0):
+    if getattr(result, "duration", None) is not None:
         out["duration"] = round(float(result.duration), 1)
     if getattr(result, "cost_usd", None) is not None:
         out["cost_usd"] = round(float(result.cost_usd), 4)

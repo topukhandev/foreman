@@ -32,7 +32,7 @@ class DecisionLogTest(unittest.TestCase):
         self.kn.add_decision(Q, "No", "4", "refunds")  # the same answer again: not repeated
         self.kn.add_decision("should REFUNDS above the order total be allowed", "Yes, up to 10%", "7", "refunds")
         self.kn.add_decision("Which currency?", "EUR", "7")
-        with open(os.path.join(self.ws.ui, ".foreman", "decisions.md")) as f:
+        with open(os.path.join(self.ws.ui, ".foreman", "decisions.md"), encoding="utf-8") as f:
             text = f.read()
         self.assertEqual(text.count(f"{Q} → No"), 1)
         self.assertIn("[superseded", text)
