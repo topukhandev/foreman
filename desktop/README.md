@@ -36,6 +36,14 @@ end-to-end test can drive the page in a browser against a real `foreman serve --
 `window.__foremanBridge` before the page loads (see `bridgeTransport` in `src/lib/rpc.js`; it is ignored inside the
 app).
 
+## The app icon in the dock (Linux)
+
+A desktop shows an app's icon and name from its `.desktop` entry. A packaged build installs one itself. For
+`npm run tauri dev`, run `desktop/scripts/install-linux-launcher.sh` once: it installs the entry and the icon into
+`~/.local/share`, and then Foreman can be started from the app grid and pinned to the dash. The window reports the
+app id `dev.foreman.desktop` (`enableGTKAppId` in `tauri.conf.json`), which is how GNOME matches it to that entry.
+Side effect: with an app id, a second `tauri dev` joins the first instead of opening another window.
+
 ## How it is put together
 
 - The app and the CLI offer the same operations, through the same API. `src/orchestrator/surface.py` lists each

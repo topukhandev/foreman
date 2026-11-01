@@ -573,6 +573,10 @@ Implemented and tested (Linux; 363 tests, ruff clean; not committed):
       `open`, `projects hide`, `models PROVIDER MODEL [EFFORT]`, and `config KEY VALUE` for every setting; app
       `system.doctor` / `system.stats` (Settings > About), `sessions.list` (Settings > Projects),
       `projects.open` / `projects.hide`. API 1.5.
+  - App icon (a hard hat with a check mark) for the window, the sidebar and the page; on Linux the window's app id
+    is the bundle identifier and `desktop/scripts/install-linux-launcher.sh` installs a matching desktop entry and
+    icons, so the dash shows Foreman's icon. Verified: the app starts from that entry and registers as
+    `dev.foreman.desktop`. Not verified: how the dash draws it (no screenshots of the shell are possible here).
   - Checked against a copy of the real Foreman home through a test bridge (`window.__foremanBridge`, outside Tauri
     only): real tasks, a 3-question task in the question dialog, and a new conversation with instant replies.
 
