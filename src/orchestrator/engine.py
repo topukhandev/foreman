@@ -1672,10 +1672,21 @@ class Engine:
                           "kind": "technical", "options": [], "default": None, "answer": None, "from_step": step["id"],
                           "project": step["project"]})
         if not asked and step["status"] == "blocked":
-            asked.append({"text": f"The worker in {proj.name} is blocked:\n{short(step['summary'], 900)}\n"
-                                  "How should it continue?", "kind": "blocker",
-                          "options": ["Try again", "Skip this step"], "default": "Try again", "answer": None,
-                          "from_step": step["id"], "project": step["project"]})
+            if step["kind"] == "investigate" and WRITE_BLOCK_RE.search(step.get("summary") or ""):
+                # A read-only step that tried to write: trying again can't help, so say why and what would.
+                mode = self._mode(task)
+                why = f"{mode.title} mode is read-only" if mode and mode.writes == "none" else "This step is read-only"
+                asked.append({"text": f"The worker in {proj.name} couldn't write files:\n{short(step['summary'], 600)}\n\n"
+                                      f"{why}: its workers can't create or change files, and trying again won't change "
+                                      "that. Its findings are kept. To have files written in the project, send the "
+                                      "request again in Development mode.", "kind": "blocker",
+                              "options": ["Skip this step", "Try again"], "default": "Skip this step", "answer": None,
+                              "from_step": step["id"], "project": step["project"]})
+            else:
+                asked.append({"text": f"The worker in {proj.name} is blocked:\n{short(step['summary'], 900)}\n"
+                                      "How should it continue?", "kind": "blocker",
+                              "options": ["Try again", "Skip this step"], "default": "Try again", "answer": None,
+                              "from_step": step["id"], "project": step["project"]})
         knowledge = ProjectKnowledge(proj.path)
         for q in asked:
             known = knowledge.known_answer(q["text"]) if q["kind"] == "business" and self._trusted(task, proj.name) \
@@ -2684,6 +2695,11 @@ def _tail(path: str, limit: int) -> str:
     except OSError:
         return ""
     return text[-limit:].strip()
+
+
+# A blocked read-only step that was refused a write (its summary says so): see _record_step.
+WRITE_BLOCK_RE = re.compile(r"(not|n't|cannot|can't|couldn't|unable to)\s+(be\s+)?(written|write|create|creat|edit|modif|chang)"
+                            r"|need(s|ed)? approval|read-only|permission|refused", re.I)
 
 
 def _settled(step: Dict[str, Any]) -> bool:

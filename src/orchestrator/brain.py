@@ -228,6 +228,13 @@ something must be run to answer, add an investigate step or say what you could n
 """ + QUESTION_RULE + "\n" + SUGGESTION_RULE
 
 
+READ_ONLY_FILES = """\
+- Workers in read-only modes (research, planning, deployment) cannot create, edit or delete any file, and nobody can
+  grant them that. Never write a step that asks a worker for files in such a mode: steps report what they found in
+  their results, and Foreman writes the mode's document itself (one file under .foreman/). When the user asks for
+  files in the project itself (notes, reports, docs) in a read-only mode, plan the investigation and add a
+  "technical" question saying that writing files in the project needs development mode, with the options "Keep the
+  findings in Foreman's document" (the default) and "Run it again in development mode"."""
 MODE_RULES = """\
 Lifecycle modes. Choose one in "mode" and say why in "mode_reason" (a few words):
 - "none" for a quick question answered now that is not lifecycle work (intent "answer").
@@ -236,10 +243,14 @@ Lifecycle modes. Choose one in "mode" and say why in "mode_reason" (a few words)
   ambiguous or risky -> planning first (the user can override); small, clear changes -> development.
 - "feature": a short name for the feature or topic this belongs to; reuse a lifecycle name for the same feature.
 - Read-only modes (research, planning, deployment) use investigate steps only. In qa, implement steps may only
-  change tests. Steps get the chosen mode's worker guidance from Foreman."""
+  change tests. Steps get the chosen mode's worker guidance from Foreman.
+""" + READ_ONLY_FILES
 MODE_RULES_FIXED = """\
 The user chose the "{mode}" mode: set "mode" to "{mode}" and plan within its rules below.
-"feature": a short name for the feature or topic this belongs to; reuse a lifecycle name for the same feature."""
+"feature": a short name for the feature or topic this belongs to; reuse a lifecycle name for the same feature.
+- Read-only modes (research, planning, deployment) use investigate steps only. In qa, implement steps may only
+  change tests.
+""" + READ_ONLY_FILES
 
 
 class BrainError(Exception):

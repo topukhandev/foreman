@@ -140,10 +140,21 @@ class AntigravityTest(unittest.TestCase):
 class OpenCodeTest(unittest.TestCase):
     def test_command_and_event_parsing(self):
         p = OpenCodeProvider(ProviderSettings("opencode", command="opencode"))
+        p._major = 1
         cmd = p.build_command(RunRequest("q", "/x", mode="read", session_id="ses", fork=True, schema=SCHEMA))
         self.assertEqual(cmd[cmd.index("--agent") + 1], "plan")
         self.assertIn("--fork", cmd)
         self.assertEqual(cmd[cmd.index("--dir") + 1], "/x")
+        p._major = 2  # 2.x: no --dir; a private server in the project's folder; write steps can't stall on a prompt
+        cmd = p.build_command(RunRequest("q", "/x", mode="read"))
+        self.assertNotIn("--dir", cmd)
+        self.assertIn("--standalone", cmd)
+        self.assertNotIn("--auto", cmd)
+        self.assertIn("--auto", p.build_command(RunRequest("q", "/x", mode="write")))
+        two = json.dumps({"type": "error", "sessionID": "s", "error": {"type": "provider.quota", "message": "This request requires more credits"}})
+        with fake_proc(two, code=1):
+            r = p.run(RunRequest("q", tempfile.gettempdir()))
+        self.assertEqual(r.error, "This request requires more credits", "2.x errors carry the message directly")
         out = "\n".join([json.dumps({"type": "text", "sessionID": "ses_1", "part": {"type": "text", "text": 'ok ```json\n{"a": "1"}\n```'}})])
         with fake_proc(out):
             r = p.run(RunRequest("q", tempfile.gettempdir(), schema=SCHEMA))

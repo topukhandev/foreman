@@ -166,8 +166,13 @@ class CommandTest(unittest.TestCase):
         self.assertFalse(any(c.startswith("--effort") for c in cmd))
         self.assertIn("--model=gpt-oss-120b-medium", agy.build_command(RunRequest("hi", "/x", model="gpt-oss-120b-medium")))
         oc = OpenCodeProvider(self.cfg("claude"))
+        oc._major = 1
         cmd = oc.build_command(RunRequest("hi", "/x", model="opencode/beam-free", effort="low"))
         self.assertEqual((cmd[cmd.index("-m") + 1], cmd[cmd.index("--variant") + 1]), ("opencode/beam-free", "low"))
+        oc._major = 2
+        cmd = oc.build_command(RunRequest("hi", "/x", model="opencode/beam-free", effort="low"))
+        self.assertEqual(cmd[cmd.index("-m") + 1], "opencode/beam-free#low", "2.x: the effort is a variant of the model")
+        self.assertNotIn("--variant", cmd)
 
     def test_claude_models_and_levels_are_read_from_its_help(self):
         help_text = ("  --effort <level>                      Effort level for the current session\n"
@@ -208,6 +213,13 @@ class CommandTest(unittest.TestCase):
                          [("opencode/beam-free", "opencode", ["low", "medium", "high"]),
                           ("opencode-go/glm-5.3", "opencode-go", ["low", "high", "max"]),
                           ("openrouter/plain", "openrouter", [])])
+        # 2.x: `models --verbose` fails; the plain list still gives the ids
+        replies = iter([ProcResult(1, "", "ERROR Unrecognized flag: --verbose", False, 0),
+                        ProcResult(0, "opencode-go/glm-5.3\nagentrouter/glm-5.3\n", "", False, 0)])
+        with mock.patch("orchestrator.providers.opencode.run_process", side_effect=lambda *a, **k: next(replies)):
+            models = p.list_models()
+        self.assertEqual([(m.id, m.group, m.levels) for m in models],
+                         [("opencode-go/glm-5.3", "opencode-go", []), ("agentrouter/glm-5.3", "agentrouter", [])])
 
 
 class MenuTest(Base):

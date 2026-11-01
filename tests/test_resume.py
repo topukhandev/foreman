@@ -106,6 +106,25 @@ class ResumeTest(unittest.TestCase):
         self.assertTrue(by["r1.0.s1"]["skipped_by_user"])
         self.assertEqual(by["r1.0.s3"]["status"], "done")
 
+    def test_a_read_only_step_refused_a_write_says_why_instead_of_try_again(self):
+        """Replays task #5: a planning task's investigate steps were told to write files, were refused, and the user
+        was asked "Try again" (which can't help) four times over."""
+        self.s.plan = lambda req: with_mode(plan([("orders-api", "inspect")],
+                                                 [step("a", "orders-api", kind="investigate", text="write docs/x.md")]),
+                                            "planning", feature="roadmap")
+        self.s.step = lambda req: {"status": "blocked", "summary": "docs/x.md was not written: file changes in this "
+                                                               "directory need approval, and this session can't give it."}
+        task = self.eng.handle("make an improvement file", self.ws.api)["task"]
+        q = task["questions"][0]
+        self.assertEqual((q["options"], q["default"]), (["Skip this step", "Try again"], "Skip this step"))
+        self.assertIn("Planning mode is read-only", q["text"])
+        self.assertIn("Development mode", q["text"])
+
+    def test_the_planner_hears_the_read_only_rule_when_the_user_chose_the_mode(self):
+        from orchestrator.brain import MODE_RULES, MODE_RULES_FIXED
+        for rules in (MODE_RULES, MODE_RULES_FIXED):
+            self.assertIn("cannot create, edit or delete any file", rules)
+
     # ------------------------------------------------------------------ failed steps and "continue"
     def test_a_failed_step_keeps_the_plan_and_continue_carries_on(self):
         fail = {"on": True}
