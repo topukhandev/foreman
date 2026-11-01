@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rpc-send"
+description = "Enables the rpc_send command without any pre-configured scope."
+commands.allow = ["rpc_send"]
+
+[[permission]]
+identifier = "deny-rpc-send"
+description = "Denies the rpc_send command without any pre-configured scope."
+commands.deny = ["rpc_send"]

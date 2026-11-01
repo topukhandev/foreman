@@ -329,7 +329,6 @@ AppImage/deb/msi/dmg packages, auto-update, a CLI shim installed by the app.
 - Interactive PTY with leases.
 - HTTP/SSE server, a daemon, remote or multi-user access.
 - Bundled runtime, signing, auto-update.
-- Editing settings from the UI.
 - A queue for answers given mid-run.
 - Log retention.
 - File watching (polling is enough).
@@ -482,7 +481,8 @@ Implemented and tested (Linux; 363 tests, ruff clean; not committed):
     stdout protected.
   - `ui.on_close` setting (D3), also in `foreman config`.
   - 391 tests.
-  - Not done yet: moving MCP and `--json` onto `api.py`; moving the chat's status-line logic (`Phase`) for reuse.
+  - Not done then (done 2026-11-01, see "A7 leftovers"): moving MCP and `--json` onto `api.py`; moving the chat's
+    status-line logic (`Phase`) for reuse.
 
 - **B steps** (2026-10-28, branch `desktop-b-steps`; `main` has A1–A8):
   - **Global slots:** `limits.max_global` (default 6) AI CLI runs at once across all tasks and processes; held only
@@ -496,6 +496,85 @@ Implemented and tested (Linux; 363 tests, ruff clean; not committed):
   - **B4:** the desktop sidecar reads PATH and variables from the login shell (markers, timeout, never overriding);
     `FOREMAN_LOGIN_ENV=0` turns it off.
   - 402 tests.
+
+- **A7 leftovers** (2026-11-01, branch `api-frontends`):
+  - The MCP tools go through `api.py`: runners are started there (with the call's display choice), refusals keep
+    their error kinds (not found, several match, running are the reply; bad calls are tool errors), the `mcp` actor
+    is recorded, and a dry run plans in a runner like the desktop app's. Python-only helpers in `api.py` for these
+    front ends: `find`, `status`, `resume_ref`, `answer_text` (free-text answers), `projects_link`, `wait`.
+  - The CLI's `--json` output uses the API's shapes: `ask`/`status`/`resume`/`answer`/`close`/`next`/`accept` give
+    `{task: TaskSummary, report}`, `tasks` a list of TaskSummary, `show` the record via `tasks.get`, `lifecycle`
+    `lifecycle.get`.
+  - A dry run writes its plan as `report.md`, so `tasks.get` and MCP read it after a runner planned it.
+  - The chat's status line (`Phase`) moved to `progress.py`; the feed sends it as the `phase` notification (API 1.2).
+  - 406 tests.
+
+- **B5, minimal Tauri shell** (2026-11-01, in progress, `desktop/`; see `desktop/README.md`):
+  - Page (Svelte 5 + Vite):
+    - views: inbox, tasks, task detail with live phase, questions and approvals with kept drafts,
+      stop/continue/close, activity and raw output, projects, suggestions, read-only settings;
+    - the close dialog (D3) with "remember my choice";
+    - a browser demo with labelled fake data.
+  - AI text goes only through `render.js` (markdown-it `html:false` + DOMPurify, links as `data-href`). XSS
+    fixtures are in `desktop/tests`, and a CI job runs them and the build.
+  - Shell (Rust):
+    - starts `foreman serve --stdio`, finding it on PATH or in ~/.local/bin (`FOREMAN_BIN` in debug builds only);
+    - offers five commands and no plugins to the webview, under a strict CSP;
+    - checks each request (API methods only);
+    - confirms approval and dependency answers in a native dialog built from the task record;
+    - opens http(s) links only after a native confirmation;
+    - shows Foreman's stderr tail when it stops.
+  - Verified on Linux (Ubuntu 26.04, GNOME):
+    - checks: page tests, build, `cargo test` and clippy all pass;
+    - `npm run tauri dev` starts the app, which starts `foreman serve --stdio`, says hello, loads tasks, config,
+      projects and suggestions, and subscribes; the real projects render;
+    - closing the app ends the sidecar.
+    Not yet exercised by hand: sending a request, the native confirmations (approval, dependency, link) and the
+    close dialog with running tasks. Debug builds log each request method the page sends (`[page] …`).
+  - Settings editing, asked for by the user (moved up from "deferred"):
+    - `settings.py` defines the settings once: `foreman config`, /config and the app (API 1.3: `config.set`,
+      `models.list`, `models.set`) show and save the same list;
+    - the app adds a model and effort picker that offers only the levels the chosen model supports.
+  - UX pass:
+    - light/dark/system appearance;
+    - instant replies (status, what's next) in a reply card;
+    - a project picker by name;
+    - an inbox with a welcome card, example requests and "Recently finished";
+    - relative times, sidebar icons and counts;
+    - notices that hide themselves;
+    - picking an option kept apart from typing your own answer; answer drafts kept per task and question.
+    Interactions were checked by driving the demo page with Playwright.
+  - Redesign after the user's review (2026-11-01). The page had been organised around Foreman's internals (inbox,
+    tasks, projects, suggestions), so a new user didn't know where to start. It is now organised like a chat app:
+    - sidebar: New conversation, "Needs you", projects with their conversations (projects with no activity sit
+      behind "Other projects"), and Settings;
+    - middle: the conversation, with the message box at the bottom and each task shown inline where it was last
+      mentioned;
+    - task card: a live phase line, the latest activity and progress, or the questions, or the result;
+    - questions: one at a time, with Back, Next and a review screen;
+    - Foreman's text report is no longer shown, because it is written for the terminal (repeated header, CLI hints,
+      question list); the card shows the answer, what changed, what is still open, the next step and suggestions
+      as buttons;
+    - steps, checks and what the workers said are under "Details";
+    - a side panel shows full activity and raw output;
+    - Settings is a dialog with sections, and Projects and their relations moved into it, one line per related
+      project.
+  - Core for it (API 1.4): `conversations.py` holds the terminal chat's store and is shared with the app;
+    `conversations.list`, `.get`, `.send` and `.rename`; terminal chat entries now record their task.
+  - Opened projects and the front-end protocol (after the user's review, 2026-11-01):
+    - the sidebar lists only projects the user opened; New conversation shows the native folder picker (a new
+      shell command, `pick_folder`); a project can be hidden;
+    - "opened" is core state shared with the CLI (`Registry.open` / `hide`, the `opened` field in projects.yaml):
+      `foreman open`, the chat started in a project and any request sent from a project's folder open it;
+      `foreman projects hide` hides it;
+    - the registry is re-read when another process changed it, so the CLI and an open app see each other's changes;
+    - `surface.py` lists every operation with its CLI and app forms, enforced by `tests/test_protocol.py` (AGENTS.md:
+      "One feature, every front end"). It found gaps that are now closed: CLI `stop`, `output`, `conversations`,
+      `open`, `projects hide`, `models PROVIDER MODEL [EFFORT]`, and `config KEY VALUE` for every setting; app
+      `system.doctor` / `system.stats` (Settings > About), `sessions.list` (Settings > Projects),
+      `projects.open` / `projects.hide`. API 1.5.
+  - Checked against a copy of the real Foreman home through a test bridge (`window.__foremanBridge`, outside Tauri
+    only): real tasks, a 3-question task in the question dialog, and a new conversation with instant replies.
 
 Deliberate deviations and open points:
 - **UTC:** `now_iso()` stays local time, because `metrics.py` and `chat.py` subtract parsed timestamps, and mixing
@@ -530,4 +609,4 @@ Deliberate deviations and open points:
 10. Tauri UI (B5–B6).
 11. C1–C5 per-OS support, then deferred items as needed.
 
-Each step keeps the test suite and `ruff` green. No commits are made by the implementation work.
+Each step keeps the test suite and `ruff` green.

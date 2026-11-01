@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-close-ack"
+description = "Enables the close_ack command without any pre-configured scope."
+commands.allow = ["close_ack"]
+
+[[permission]]
+identifier = "deny-close-ack"
+description = "Denies the close_ack command without any pre-configured scope."
+commands.deny = ["close_ack"]

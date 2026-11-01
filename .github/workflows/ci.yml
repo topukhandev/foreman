@@ -15,6 +15,23 @@ jobs:
       - run: pip install ruff
       - run: ruff check .
 
+  desktop-page:
+    # The desktop app's page: XSS fixtures for AI text, the RPC client, task helpers; and that it builds.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
   test:
     # Linux, macOS and Windows are all targets: every job blocks. A test may be skipped on a platform only through
     # tests/platform_skips.py, which must not grow; tests/test_platform.py is never skipped.

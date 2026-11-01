@@ -1,0 +1,94 @@
+:root {
+  --bg: #f7f7f5;
+  --panel: #ffffff;
+  --sunken: #efefec;
+  --text: #1d1d1b;
+  --muted: #6b6b66;
+  --line: #e2e2dd;
+  --accent: #2f5bd3;
+  --accent-text: #ffffff;
+  --ok: #1f7a3a;
+  --ok-bg: #e5f4e9;
+  --warn: #8a5a00;
+  --warn-bg: #fdf1d8;
+  --bad: #b3261e;
+  --bad-bg: #fbe4e2;
+  --info-bg: #e8eefc;
+  --radius: 8px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "DejaVu Sans Mono", monospace;
+  color-scheme: light;
+}
+/* Dark: the system's choice unless the app is set to light, or set to dark explicitly (Settings → Appearance). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615;
+    --panel: #1f1f1e;
+    --sunken: #121211;
+    --text: #ececea;
+    --muted: #9a9a94;
+    --line: #34342f;
+    --accent: #7d9cff;
+    --accent-text: #0d1430;
+    --ok: #6fd08c;
+    --ok-bg: #173322;
+    --warn: #f0c060;
+    --warn-bg: #3a2d10;
+    --bad: #ff8a80;
+    --bad-bg: #3d1a17;
+    --info-bg: #1d2645;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615;
+  --panel: #1f1f1e;
+  --sunken: #121211;
+  --text: #ececea;
+  --muted: #9a9a94;
+  --line: #34342f;
+  --accent: #7d9cff;
+  --accent-text: #0d1430;
+  --ok: #6fd08c;
+  --ok-bg: #173322;
+  --warn: #f0c060;
+  --warn-bg: #3a2d10;
+  --bad: #ff8a80;
+  --bad-bg: #3d1a17;
+  --info-bg: #1d2645;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); transition: background-color .15s;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Ubuntu, sans-serif; }
+#app { height: 100%; }
+button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.danger { color: var(--bad); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px; }
+input, select, textarea { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 8px; }
+textarea { resize: vertical; }
+h1, h2, h3 { margin: 0; font-weight: 600; }
+h1 { font-size: 18px; } h2 { font-size: 15px; } h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+code, pre { font-family: var(--mono); font-size: 12.5px; }
+.muted { color: var(--muted); }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--sunken); white-space: nowrap; }
+.badge.ok { background: var(--ok-bg); color: var(--ok); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.bad { background: var(--bad-bg); color: var(--bad); }
+.badge.info { background: var(--info-bg); color: var(--accent); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+.stack > * + * { margin-top: 12px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.grow { flex: 1; min-width: 0; }
+.prose { overflow-wrap: anywhere; }
+.prose :first-child { margin-top: 0; }
+.prose :last-child { margin-bottom: 0; }
+.prose pre { background: var(--sunken); padding: 8px 10px; border-radius: 6px; overflow-x: auto; }
+.prose a[data-href] { color: var(--accent); text-decoration: underline; cursor: pointer; }
+.prose table { border-collapse: collapse; }
+.prose th, .prose td { border: 1px solid var(--line); padding: 3px 8px; }

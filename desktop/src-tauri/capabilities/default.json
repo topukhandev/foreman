@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window: listen to the sidecar's messages and call the app's six commands. No plugin is exposed to the webview; dialogs and link opening happen in Rust.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-rpc-start",
+    "allow-rpc-send",
+    "allow-open-link",
+    "allow-pick-folder",
+    "allow-close-ack",
+    "allow-app-exit"
+  ]
+}
