@@ -10,11 +10,10 @@ from typing import List, Optional
 from orchestrator import completion
 from orchestrator.app import build_engine
 from orchestrator.completion import SHELLS
-from orchestrator.config import load_config, set_option
-from orchestrator.report import task_summary
 
 SUBCOMMANDS = {"chat", "ask", "status", "resume", "answer", "tasks", "show", "projects", "sessions", "suggestions",
-               "accept", "dismiss", "close", "config", "doctor", "mcp", "serve", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version", "stats"}
+               "accept", "dismiss", "close", "config", "doctor", "mcp", "serve", "run-task", "help", "-h", "--help", "next", "lifecycle", "modes", "models", "completion", "version", "stats",
+               "stop", "output", "conversations", "open"}
 
 
 def _progress(msg: str) -> None:
@@ -37,6 +36,12 @@ def _stop_task(signum, frame) -> None:
     kill_all_children()
 
 
+def _api(eng):
+    """The application API over this engine: --json output uses its data shapes (docs/api-contract.md)."""
+    from orchestrator.api import Api
+    return Api(eng, actor=eng.actor)
+
+
 def _dump(data) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
@@ -49,7 +54,7 @@ def _accept(eng, suggestion, cwd: str, as_json: bool = False) -> None:
 def _print_result(eng, result, as_json: bool = False) -> None:
     task = result.get("task")
     if as_json:
-        _dump({"task": task_summary(task) if task else None, "report": result["report"]})
+        _dump({"task": _api(eng).summary(task) if task else None, "report": result["report"]})
         return
     print(result["report"])
     if task and task.get("suggestions") and sys.stdin.isatty() and sys.stdout.isatty():
@@ -136,8 +141,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("task")
     p.add_argument("note", nargs="*")
     p.add_argument("--cancel", action="store_true", help="not wanted any more (instead of: finished another way)")
-    p = sub.add_parser("models", help="choose each provider's model and effort (interactive)")
+    p = sub.add_parser("models", help="choose each provider's model and effort (interactive), or set one: models PROVIDER MODEL [EFFORT]")
+    p.add_argument("args", nargs="*", help="PROVIDER MODEL [EFFORT] (MODEL `default` lets the CLI decide)")
     p.add_argument("--json", action="store_true", help="print the current choices as JSON")
+    p = sub.add_parser("stop", help="stop a running task (it ends as interrupted at its next checkpoint)")
+    p.add_argument("task")
+    p = sub.add_parser("output", help="raw output of a task's worker runs (redacted when written)")
+    p.add_argument("task")
+    p.add_argument("name", nargs="?", help="the run (from the list); without it, the runs are listed")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("conversations", help="conversations in every project (the chat's and the app's), or one's messages")
+    p.add_argument("id", nargs="?")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("open", help="open a project folder (listed by the app and the chat from now on) and start the chat there")
+    p.add_argument("path", nargs="?", default=os.getcwd())
+    p.add_argument("--no-chat", action="store_true", help="only open it")
     p = sub.add_parser("tasks", help="list tasks")
     p.add_argument("-n", type=int, default=15)
     p.add_argument("--json", action="store_true")
@@ -149,7 +167,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--events", action="store_true")
     p = sub.add_parser("projects", help="project registry")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "scan", "show", "add", "link", "unlink", "test"])
+    p.add_argument("action", nargs="?", default="list", choices=["list", "scan", "show", "add", "link", "unlink", "test", "hide"])
     p.add_argument("args", nargs="*")
     p = sub.add_parser("sessions", help="existing AI sessions for a project")
     p.add_argument("project", nargs="?")
@@ -158,9 +176,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("id")
     p = sub.add_parser("dismiss", help="dismiss a suggestion")
     p.add_argument("id")
-    p = sub.add_parser("config", help="show or change settings")
-    p.add_argument("key", nargs="?", choices=["display", "auto-switch", "notify", "reuse", "planner", "first-worker", "copy-on-select"])
+    p = sub.add_parser("config", help="show or change settings (the same list as the desktop app's Settings)")
+    p.add_argument("key", nargs="?", help="a setting (foreman config --list shows them)")
     p.add_argument("value", nargs="?")
+    p.add_argument("--list", action="store_true", help="the settings, their values and options")
     p = sub.add_parser("doctor", help="check providers, terminal, MCP registration")
     p.add_argument("--json", action="store_true", help="print the findings as JSON")
     p.add_argument("--fix", action="store_true", help="register the MCP server where it is missing and rescan projects")
@@ -205,48 +224,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     if cmd == "config":
-        cfg = load_config()
-        if not args.key:
-            if sys.stdin.isatty() and sys.stdout.isatty():  # a terminal: the interactive settings list
-                from orchestrator import menus
-                note = menus.config_menu(_engine(args))
-                print(note or "No settings changed.")
-                return 0
-            print(f"config file: {os.path.join(cfg.home, 'config.yaml')}")
-            print(f"planner: {cfg.brain}   workers: {', '.join(cfg.provider_order)}")
-            print(f"display: {cfg.display}   auto-switch at a limit: {'on' if cfg.auto_switch else 'off'}   "
-                  f"notify: {cfg.notify}   session reuse: {cfg.reuse_sessions}   "
-                  f"copy on select: {'on' if cfg.copy_on_select else 'off'}")
-            for n, p in cfg.providers.items():
-                if p.enabled:
-                    print(f"{n}: {p.chosen().label()}")
-            print(f"roots: {', '.join(cfg.roots)}")
-            return 0
-        value = args.value or ""
-        if args.key == "display" and value in ("terminal", "headless"):
-            set_option(cfg.home, "ui.display", value)
-        elif args.key == "auto-switch" and value in ("on", "off"):
-            set_option(cfg.home, "auto_switch", value == "on")
-        elif args.key == "notify" and value in ("on", "off"):
-            set_option(cfg.home, "ui.notify", value == "on")
-        elif args.key == "copy-on-select" and value in ("on", "off"):
-            set_option(cfg.home, "ui.copy_on_select", value == "on")
-        elif args.key == "reuse" and value in ("fork", "off"):
-            set_option(cfg.home, "sessions.reuse", value)
-        elif args.key in ("planner", "first-worker") and {"agy": "antigravity"}.get(value, value) in cfg.providers:
-            value = {"agy": "antigravity"}.get(value, value)
-            if args.key == "planner":
-                set_option(cfg.home, "brain", value)
-            else:
-                from orchestrator.config import set_first_provider
-                set_first_provider(cfg.home, value)
-        else:
-            print("usage: foreman config            (interactive)\n"
-                  "       foreman config display terminal|headless | auto-switch on|off | notify on|off | reuse fork|off | "
-                  "planner <provider> | first-worker <provider> | copy-on-select on|off")
-            return 1
-        print(f"{args.key} = {value}")
-        return 0
+        return config_cmd(args)
 
     if cmd == "doctor":
         return doctor(as_json=args.json, fix=args.fix)
@@ -261,6 +239,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     eng = _engine(args)
 
+    if cmd in ("stop", "output", "conversations", "open"):
+        from orchestrator.api import ApiError
+        try:
+            return {"stop": stop_cmd, "output": output_cmd, "conversations": conversations_cmd, "open": open_cmd}[cmd](eng, args)
+        except ApiError as e:
+            print(str(e), file=sys.stderr)
+            return 1
     if cmd == "chat":
         from orchestrator.chat import Chat
         eng.actor = "chat"
@@ -282,7 +267,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     if cmd == "lifecycle":
         if args.json:
-            _dump(eng.lifecycle_data(args.cwd))
+            _dump(_api(eng).lifecycle_get(args.cwd))
         else:
             print(eng.lifecycle_text(args.cwd))
         return 0
@@ -323,7 +308,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if cmd == "tasks":
         broken = eng.store.unreadable()
         if args.json:
-            _dump([task_summary(t) for t in eng.store.all()[: args.n]]
+            _dump(_api(eng).tasks_list(limit=args.n)["tasks"]
                   + [{"id": i, "status": "unreadable", "record": eng.store.path(i, "task.json")} for i in broken])
             return 0
         for t in eng.store.all()[: args.n]:
@@ -346,7 +331,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         t = cands[0]
         if args.json:
-            print(json.dumps(t, indent=2, ensure_ascii=False))
+            _dump(_api(eng).tasks_get(t["id"])["record"])
         elif args.events:
             for e in eng.store.events(t["id"]):
                 print(json.dumps(e, ensure_ascii=False)[:400])
@@ -386,8 +371,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _models(eng, args) -> int:
-    """Interactive provider -> model -> effort menu on a terminal; otherwise the current choices."""
+    """Interactive provider -> model -> effort menu on a terminal; otherwise the current choices. With
+    PROVIDER MODEL [EFFORT], set them directly (models.set)."""
     from orchestrator import menus
+    if args.args:
+        from orchestrator.api import ApiError
+        if len(args.args) not in (2, 3):
+            print("usage: foreman models PROVIDER MODEL [EFFORT]   (MODEL `default` lets the CLI decide)", file=sys.stderr)
+            return 1
+        try:
+            res = _api(eng).models_set(args.args[0], args.args[1], args.args[2] if len(args.args) == 3 else None)
+        except ApiError as e:
+            print(str(e), file=sys.stderr)
+            return 1
+        print(f"{res['provider']}: {res['model']}" + (f" · effort {res['effort']}" if res["effort"] else ""))
+        return 0
     if args.json:
         _dump({n: {"model": eng.cfg.providers[n].chosen().model, "effort": eng.cfg.providers[n].chosen().effort,
                    "levels": eng.cfg.providers[n].effort_levels()} for n in eng.providers if eng.cfg.providers[n].enabled})
@@ -432,7 +430,9 @@ def projects_cmd(eng, action: str, rest: List[str]) -> int:
     if action == "list":
         for p in sorted(reg.projects.values(), key=lambda p: p.name):
             rels = len(reg.relations_of(p.name))
-            print(f"{p.name:<32} {','.join(p.stack) or '-':<14} rel:{rels:<3} {p.path}")
+            mark = "*" if isinstance(p.opened, (int, float)) and p.opened is not False else " "
+            print(f"{mark} {p.name:<32} {','.join(p.stack) or '-':<14} rel:{rels:<3} {p.path}")
+        print("* opened (listed by the app and the chat); `foreman open PATH` opens one, `foreman projects hide NAME` hides it")
         return 0
     if action == "show" and rest:
         p = reg.find(rest[0])
@@ -458,6 +458,10 @@ def projects_cmd(eng, action: str, rest: List[str]) -> int:
     if action == "unlink" and len(rest) >= 2:
         print(f"removed {reg.unlink(rest[0], rest[1])} relation(s)")
         return 0
+    if action == "hide" and rest:
+        p = reg.hide(rest[0])
+        print(f"{p.name} is off the list until you open it again (`foreman open {p.path}`)" if p else "unknown project")
+        return 0 if p else 1
     if action == "test" and len(rest) >= 2:
         p = reg.find(rest[0])
         if not p:
@@ -467,8 +471,128 @@ def projects_cmd(eng, action: str, rest: List[str]) -> int:
         reg.save()
         print(f"{p.name} test command: {p.test}")
         return 0
-    print("usage: foreman projects [list|scan|show NAME|add PATH [NAME]|link A B TYPE [note]|unlink A B|test NAME CMD]")
+    print("usage: foreman projects [list|scan|show NAME|add PATH [NAME]|link A B TYPE [note]|unlink A B|test NAME CMD|hide NAME]")
     return 1
+
+
+# Old names `foreman config` accepted, and their values, mapped onto settings.py's keys.
+CONFIG_ALIASES = {"auto-switch": "auto_switch", "reuse": "reuse_sessions", "first-worker": "first_worker",
+                  "copy-on-select": "copy_on_select", "on-close": "on_close", "output-style": "output_style",
+                  "prompt-suggestions": "prompt_suggestions", "status-line": "status_line"}
+
+
+def config_cmd(args) -> int:
+    """`foreman config`: the settings (settings.py, the same list as the app's Settings and /config)."""
+    from orchestrator import settings
+    eng = build_engine(out=lambda _m: None)
+    items = settings.describe(eng)
+    if not args.key:
+        if sys.stdin.isatty() and sys.stdout.isatty() and not args.list:  # a terminal: the interactive settings list
+            from orchestrator import menus
+            print(menus.config_menu(eng) or "No settings changed.")
+            return 0
+        print(f"config file: {os.path.join(eng.cfg.home, 'config.yaml')}")
+        for it in items:
+            value = ("on" if it["value"] else "off") if it["kind"] == "toggle" else it["value"]
+            opts = "on|off" if it["kind"] == "toggle" else "|".join(o["value"] for o in it["options"])
+            print(f"  {it['key']:<20} {str(value):<12} {it['label']}  [{opts}]" + (" (terminal chat)" if it["applies"] == "chat" else ""))
+        for n, p in eng.cfg.providers.items():
+            if p.enabled:
+                print(f"  {n}: {p.chosen().label()}   (change: foreman models {n} MODEL [EFFORT])")
+        print(f"roots: {', '.join(eng.cfg.roots)}")
+        return 0
+    key = CONFIG_ALIASES.get(args.key, args.key.replace("-", "_"))
+    value = args.value or ""
+    if key == "display" and value in ("terminal", "headless"):
+        value = value == "terminal"
+    elif key == "reuse_sessions" and value in ("fork", "off"):
+        value = value == "fork"
+    elif key in ("planner", "first_worker"):
+        value = {"agy": "antigravity"}.get(value, value)
+    try:
+        settings.change(eng, key, value)
+    except ValueError as e:
+        print(f"{e}\nusage: foreman config KEY VALUE   (foreman config --list shows the settings)", file=sys.stderr)
+        return 1
+    it = next(x for x in settings.describe(eng) if x["key"] == key)
+    print(f"{args.key} = " + (("on" if it["value"] else "off") if it["kind"] == "toggle" else str(it["value"])))
+    return 0
+
+
+def stop_cmd(eng, args) -> int:
+    api = _api(eng)
+    task = api.find(args.task)
+    if api.tasks_stop(task["id"])["requested"]:
+        print(f"Stop requested for #{task['id']}: it ends as interrupted at its next checkpoint; `foreman resume {task['id']}` continues it.")
+    else:
+        print(f"#{task['id']} is not running ({task['status']}).")
+    return 0
+
+
+def output_cmd(eng, args) -> int:
+    api = _api(eng)
+    task = api.find(args.task)
+    outputs = api.tasks_outputs(task["id"])["outputs"]
+    if not args.name:
+        if args.json:
+            _dump(outputs)
+        elif not outputs:
+            print(f"#{task['id']} has no recorded output.")
+        else:
+            for o in outputs:
+                print(f"{o['name']:<40} {o['size']:>9} bytes")
+            print(f"→ foreman output {task['id']} NAME")
+        return 0
+    offset = 0
+    while True:
+        page = api.tasks_output(task["id"], args.name, offset)
+        sys.stdout.write(page["text"])
+        offset = page["offset"]
+        if page["eof"]:
+            return 0
+
+
+def conversations_cmd(eng, args) -> int:
+    from datetime import datetime
+    from orchestrator.api import ApiError
+    api = _api(eng)
+    convs = api.conversations_list()["conversations"]
+    if not args.id:
+        if args.json:
+            _dump(convs)
+            return 0
+        for c in convs:
+            when = datetime.fromtimestamp(c["updated_at"]).strftime("%Y-%m-%d %H:%M")
+            tasks = f"  tasks: #{', #'.join(c['tasks'])}" if c["tasks"] else ""
+            print(f"{c['id']}  {when}  {c['project'][:24]:<24} {c['title'][:60]}{tasks}")
+        print("→ foreman conversations ID shows one; `foreman -r` in the project's folder continues one" if convs
+              else "No conversations yet: `foreman` in a project's folder starts one.")
+        return 0
+    conv = next((c for c in convs if c["id"] == args.id), None)
+    if not conv:
+        raise ApiError("not_found", f"No conversation {args.id}.")
+    got = api.conversations_get(conv["project"], conv["id"])
+    if args.json:
+        _dump(got)
+        return 0
+    from orchestrator.api import plain_output
+    print(f"{got['conversation']['title'] or '(untitled)'} — {conv['project']}\n")
+    for e in got["conversation"]["entries"]:
+        print(f"> {e.get('shown') or e['user']}")
+        task = got["tasks"].get(e.get("task") or "")
+        print((f"#{task['id']} {task['title']} — {task['status']}" if task else plain_output(e.get("output") or "")).rstrip() + "\n")
+    return 0
+
+
+def open_cmd(eng, args) -> int:
+    p = _api(eng).projects_open(args.path)
+    print(f"Opened {p['name']}: {p['path']}")
+    if args.no_chat or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return 0
+    from orchestrator.chat import Chat
+    eng.actor = "chat"
+    Chat(p["path"], engine=eng).run()
+    return 0
 
 
 def doctor_data(eng) -> dict:
@@ -546,23 +670,26 @@ Foreman
 
   foreman                          open the chat (plain language for everything)
   foreman -c | -r                  continue the latest chat here | pick an earlier one
+  foreman open [path]              open a project folder (listed by the app and the chat) and start the chat there
+  foreman conversations [id]       conversations in every project (the chat's and the desktop app's), or one's messages
   foreman "<request>"              do something (plans, picks projects/sessions, executes, validates, reports)
   foreman --mode qa "<request>"    same, in a chosen mode (research, planning, development, qa, deployment)
   foreman --dry-run "<request>"    plan only: what would be done, nothing runs; `foreman resume` then runs that plan
   foreman lifecycle | next         where this project's features stand | start the recommended next step
   foreman modes                    the mode templates and where each comes from
-  foreman models                   choose each provider's model and effort (interactive; --json shows the choices)
-  foreman config                   interactive settings: terminal windows, auto-switch at limits, models, planner, ...
+  foreman models [PROVIDER MODEL [EFFORT]]   choose each provider's model and effort (interactive), or set one
+  foreman config [KEY VALUE]       settings (interactive), or set one; --list shows them all
   foreman status [task]            state of a task (instant, no AI)
   foreman resume [task] [note]     continue a task, re-verifying against current code
   foreman answer <task> <text>     answer a task's open question
   foreman close <task> [note]      mark a task finished another way (--cancel: not wanted); "close #N" in chat
+  foreman stop <task>              stop a running task (it ends as interrupted; resume continues it)
+  foreman output <task> [run]      raw output of a task's worker runs (redacted when written)
   foreman tasks | show <task>      history and details (show --events for the audit log)
   foreman stats [--since DATE]     totals across tasks: outcomes, model calls, retries, time, cost (no AI)
   foreman suggestions | accept <id> | dismiss <id>
-  foreman projects [list|scan|show|add|link|unlink|test]
+  foreman projects [list|scan|show|add|link|unlink|test|hide]
   foreman sessions [project]       existing Claude/OpenCode/Antigravity sessions for a project
-  foreman config [display terminal|headless | auto-switch on|off | notify on|off | reuse fork|off]
   foreman doctor [--fix]           providers, display, MCP registration (--fix registers MCP where missing)
   --json                           machine-readable output on ask, status, tasks, show, lifecycle, next, resume, answer, doctor
   foreman completion bash|zsh      shell completion script (eval "$(foreman completion bash)")

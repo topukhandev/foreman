@@ -3,9 +3,11 @@
 from typing import Dict, List, Tuple
 
 COMMANDS: List[Tuple[str, str]] = [
-    ("chat", "interactive chat"), ("ask", "submit a request"), ("next", "start the recommended next step"),
+    ("chat", "interactive chat"), ("open", "open a project folder and chat there"), ("ask", "submit a request"),
+    ("conversations", "conversations in every project"), ("next", "start the recommended next step"),
     ("lifecycle", "where features stand"), ("modes", "list lifecycle modes"), ("models", "model and effort per provider"), ("status", "state of a task"),
     ("resume", "continue a task"), ("answer", "answer an open question"), ("close", "mark a task finished or cancelled"),
+    ("stop", "stop a running task"), ("output", "raw output of the worker runs of a task"),
     ("tasks", "list tasks"), ("stats", "totals across tasks"),
     ("show", "task details"), ("projects", "project registry"), ("sessions", "existing AI sessions"),
     ("suggestions", "open suggestions"), ("accept", "act on a suggestion"), ("dismiss", "dismiss a suggestion"),
@@ -13,13 +15,15 @@ COMMANDS: List[Tuple[str, str]] = [
     ("completion", "print a shell completion script"), ("version", "print the version"), ("help", "usage"),
 ]
 ARGUMENTS: Dict[str, List[str]] = {
-    "config": ["display", "auto-switch", "notify", "reuse", "planner", "first-worker", "copy-on-select"],
+    "config": ["--list", "display", "auto_switch", "planner", "first_worker", "output_style", "prompt_suggestions",
+               "status_line", "notify", "reuse_sessions", "copy_on_select", "on_close"],
     "mcp": ["serve", "install", "status"],
-    "projects": ["list", "scan", "show", "add", "link", "unlink", "test"],
+    "projects": ["list", "scan", "show", "add", "link", "unlink", "test", "hide"],
     "completion": ["bash", "zsh"],
 }
 MODES = ["research", "planning", "development", "qa", "deployment"]
-FLAGS = ["--visual", "--headless", "--mode", "--dry-run", "--fix", "--cwd", "--json", "--events", "--stdio", "-c", "-r", "--version", "-h", "--help"]
+FLAGS = ["--visual", "--headless", "--mode", "--dry-run", "--fix", "--cwd", "--json", "--events", "--stdio", "--no-chat",
+         "--list", "-c", "-r", "--version", "-h", "--help"]
 SHELLS = tuple(ARGUMENTS["completion"])
 
 

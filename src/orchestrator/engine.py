@@ -289,6 +289,7 @@ class Engine:
         """Decide what a request is without executing it: an instant answer (returned as text) or a task to run."""
         cwd = os.path.abspath(cwd)
         self.registry.ensure_scanned(cwd)
+        self.registry.open(cwd)  # working from a project's folder opens it (every front end lists opened projects)
         if SMALL_TALK_RE.match(request):
             return None, self.small_talk(request, cwd)
         m = CLOSE_RE.match(request)
@@ -806,7 +807,9 @@ class Engine:
             task["status"] = "needs_input" if self._open_questions(task) else "planned"
         self.store.event(task["id"], "dry_run", status=task["status"])
         self.store.save(task)
-        return {"task": task, "report": render_plan(task)}
+        report = render_plan(task)
+        self.store.write_report(task["id"], report)  # what a client started through a runner reads (tasks.get, MCP)
+        return {"task": task, "report": report}
 
     def execute(self, task: Dict[str, Any]) -> Dict[str, Any]:
         return self._as_run(task, self._execute)

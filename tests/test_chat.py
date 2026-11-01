@@ -321,6 +321,11 @@ class ChatHistoryTest(unittest.TestCase):
             later._exchange("and where is that tested?")
             self.assertIn("how are totals shown?", seen[0])
             self.assertEqual(len(later.history.load(first_id)["entries"]), 3, "resumed chat keeps growing")
+            entries = later.history.load(first_id)["entries"]
+            self.assertTrue(entries[0].get("task") and not entries[1].get("task"),
+                            "a message that ran a task records it (the desktop app shows it there); small talk doesn't")
+            from orchestrator.conversations import list_all
+            self.assertIn(entries[0]["task"], next(c for c in list_all(eng.cfg.home) if c["id"] == first_id)["tasks"])
         finally:
             ws.cleanup()
 

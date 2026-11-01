@@ -1,6 +1,6 @@
 """Interactive settings: `foreman config` / `/config` and `foreman models` / `/models`.
 
-Menus only ask and save (config.set_option); what the models and effort levels are comes from the provider CLIs
+Menus only ask and save (through settings.py, which the desktop app's API uses too); what the models and effort levels are comes from the provider CLIs
 themselves (Provider.list_models), so a new model or level shows up without a Foreman release. Each function returns
 a short text for the caller to show ("" / None when nothing changed). Needs a terminal: callers print a plain summary
 instead when there isn't one."""
@@ -8,9 +8,8 @@ instead when there isn't one."""
 import re
 from typing import Dict, List, Optional
 
-from orchestrator import ui
+from orchestrator import settings, ui
 from orchestrator.brain import OUTPUT_STYLES
-from orchestrator.config import set_first_provider, set_option
 from orchestrator.providers.base import ModelInfo
 from orchestrator.util import short
 
@@ -144,10 +143,7 @@ def search(models: List[ModelInfo], pattern: str) -> Optional[List[ModelInfo]]:
     return [m for m in models if all(w.search(m.id + " " + m.name) for w in words)]
 
 
-def _levels_for_typed(models: List[ModelInfo]) -> List[str]:
-    """A model typed by hand: its effort levels when every listed model shares one list (Claude), else none."""
-    sets = {tuple(m.levels) for m in models}
-    return list(next(iter(sets))) if len(sets) == 1 else []
+_levels_for_typed = settings.levels_for_typed
 
 
 def _pick_effort(eng, name: str, model: str, levels: List[str]) -> Optional[str]:
@@ -163,11 +159,7 @@ def _pick_effort(eng, name: str, model: str, levels: List[str]) -> Optional[str]
 
 
 def _save(eng, name: str, model: str, effort: Optional[str], levels: List[str]) -> None:
-    base = f"providers.{name}"
-    set_option(eng.cfg.home, base + ".model", model)
-    set_option(eng.cfg.home, base + ".effort", effort)
-    set_option(eng.cfg.home, base + ".levels", levels)
-    eng.reload_config()
+    settings.save_model(eng, name, model, effort, levels)
 
 
 # ---------------------------------------------------------------------------------------------- settings
@@ -206,30 +198,19 @@ def models_loop(eng) -> Optional[str]:
 
 def _toggle(eng, key: str) -> None:
     """Flip a true/false setting right away (Enter on its row) and save it."""
-    cfg = eng.cfg
-    if key == "display":
-        set_option(cfg.home, "ui.display", "headless" if cfg.display == "terminal" else "terminal")
-    elif key == "switch":
-        set_option(cfg.home, "auto_switch", not cfg.auto_switch)
-    elif key == "notify":
-        set_option(cfg.home, "ui.notify", not cfg.notify)
-    elif key == "reuse":
-        set_option(cfg.home, "sessions.reuse", "off" if cfg.reuse_sessions == "fork" else "fork")
-    elif key == "suggest":
-        set_option(cfg.home, "ui.prompt_suggestions", not cfg.prompt_suggestions)
-    elif key == "status":
-        set_option(cfg.home, "ui.status_line", not cfg.status_line)
-    else:  # "copy": applies the next time the chat opens
-        set_option(cfg.home, "ui.copy_on_select", not cfg.copy_on_select)
+    settings.flip(eng, key)
 
 
-TOGGLES = ("display", "switch", "notify", "reuse", "copy", "suggest", "status")
+TOGGLES = tuple(settings.TOGGLES)
 STYLE_NAMES = {k: v[0] for k, v in OUTPUT_STYLES.items()}
 TABS = ["Settings", "Status"]
 
 
-ON_CLOSE_LABELS = {"ask": "Ask: keep them running or stop them", "keep": "Keep running: you get the usual notification",
-                   "stop": "Stop them: continue them later"}
+def _row_value(s) -> str:
+    """A setting's value as the settings list shows it."""
+    if s["kind"] == "toggle":
+        return "true" if s["value"] else "false"
+    return next((o["label"] for o in s["options"] if o["value"] == s["value"]), str(s["value"]))
 
 
 def config_menu(eng) -> Optional[str]:
@@ -246,23 +227,12 @@ def config_menu(eng) -> Optional[str]:
                 tab = 0
                 continue
             return "\n".join(changes(before, snapshot(eng)) + problems) or None
-        first = next(iter(eng.providers), "?")
-        yes = lambda v: "true" if v else "false"  # noqa: E731
-        rows = [
-            ("display", "Show workers in terminal windows", yes(cfg.display == "terminal")),
-            ("switch", "Switch provider automatically at a limit", yes(cfg.auto_switch)),
-            ("models", "Models and effort", " · ".join(f"{n} {current_text(eng, n)}" for n in eng.providers
-                                                      if cfg.providers[n].enabled)),
-            ("planner", "Planner (plans and reviews)", cfg.brain),
-            ("first", "First worker", first),
-            ("style", "Output style (how answers are written)", STYLE_NAMES.get(cfg.output_style, cfg.output_style)),
-            ("suggest", "Suggest your next message (Tab takes it)", yes(cfg.prompt_suggestions)),
-            ("status", "Status line under the input", yes(cfg.status_line)),
-            ("notify", "Desktop notification when a task finishes", yes(cfg.notify)),
-            ("reuse", "Start from your recent sessions", yes(cfg.reuse_sessions == "fork")),
-            ("copy", "Copy selected text in the chat", yes(cfg.copy_on_select)),
-            ("close", "Desktop app closed while tasks run", ON_CLOSE_LABELS[cfg.on_close].split(":")[0]),
-        ]
+        rows = []
+        for item in settings.describe(eng):
+            if item["key"] == "planner":
+                rows.append(("models", "Models and effort", " · ".join(f"{n} {current_text(eng, n)}" for n in eng.providers
+                                                                        if cfg.providers[n].enabled)))
+            rows.append((item["key"], item["label"], _row_value(item)))
         labels = [ui.clip(f"{name:<42} {value}", ui.width() - 8) for _, name, value in rows]
         pick = _panel("Settings", ["Enter changes the selected setting (yes/no ones flip right away). Saved to "
                                    "~/.foreman/config.yaml."], labels, allow_text=False, start=at, color=ui.FRAME,
@@ -300,48 +270,30 @@ def status_rows(eng) -> List[str]:
 
 
 def _change(eng, key: str) -> Optional[str]:
-    cfg, home = eng.cfg, eng.cfg.home
+    """A setting with several options: a panel to pick one. A sentence when it couldn't be saved."""
     if key == "models":
         models_loop(eng)
         return None
-    if key == "style":
-        names = list(OUTPUT_STYLES)
-        labels = [OUTPUT_STYLES[n][0] for n in names]
-        pick = _panel("Output style", ["How answers and documents are written for you. Applies from your next "
-                                       "request."], labels, allow_text=False, color=ui.FRAME, esc="cancel",
-                      descriptions=[OUTPUT_STYLES[n][1] for n in names],
-                      start=names.index(cfg.output_style) if cfg.output_style in names else 0)
-        if pick:
-            set_option(home, "ui.output_style", names[labels.index(pick)])
+    item = next(x for x in settings.describe(eng) if x["key"] == key)
+    opts = item["options"]
+    if key in ("planner", "first_worker"):
+        labels = [f"{o['label']:<12} {o['description']}" for o in opts]
+        descriptions = None
+    elif key == "on_close":
+        labels = [f"{o['label']}: {o['description']}" for o in opts]
+        descriptions = None
+    else:
+        labels = [o["label"] for o in opts]
+        descriptions = [o["description"] for o in opts]
+    values = [o["value"] for o in opts]
+    title = {"planner": "Planner", "first_worker": "First worker", "output_style": "Output style"}.get(key, item["label"])
+    pick = _panel(title, [item["about"]], labels, allow_text=False, color=ui.FRAME, esc="cancel",
+                  start=values.index(item["value"]) if item["value"] in values else 0,
+                  **({"descriptions": descriptions} if descriptions else {}))
+    if not pick:
         return None
-    if key == "close":
-        names = list(ON_CLOSE_LABELS)
-        labels = [ON_CLOSE_LABELS[n] for n in names]
-        pick = _panel("Desktop app closed while tasks run", ["Tasks run in their own processes, so closing the app "
-                                                             "doesn't have to stop them."], labels, allow_text=False,
-                      color=ui.FRAME, esc="cancel", start=names.index(cfg.on_close) if cfg.on_close in names else 0)
-        if pick:
-            set_option(home, "ui.on_close", names[labels.index(pick)])
-        return None
-    if key in ("planner", "first"):
-        names = [n for n in eng.providers if cfg.providers[n].enabled]
-        labels = []
-        for n in names:
-            ok, _ = eng.providers[n].available()
-            labels.append(f"{n:<12} {'ready' if ok else 'not installed'}")
-        current = cfg.brain if key == "planner" else next(iter(eng.providers), "")
-        title, body = ("Planner", "The planner scopes requests, answers questions and reviews work.") if key == "planner" \
-            else ("First worker", "Workers make the changes; the first ready one in the list is used.")
-        pick = _panel(title, [body], labels, allow_text=False, start=names.index(current) if current in names else 0,
-                         color=ui.FRAME, esc="cancel")
-        if not pick:
-            return None
-        name = names[labels.index(pick)]
-        if not eng.providers[name].available()[0]:
-            return f"{name} isn't installed; kept the previous choice."
-        if key == "planner":
-            set_option(home, "brain", name)
-        else:
-            set_first_provider(home, name)
-        return None
+    try:
+        settings.change(eng, key, values[labels.index(pick)])
+    except ValueError as e:
+        return str(e)
     return None

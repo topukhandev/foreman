@@ -3,7 +3,8 @@ say when a task should be reloaded.
 
 Events are hints; task.json is the truth. The feed never invents events. It passes on what the runners wrote, says
 "resync" when a client's cursor doesn't fit a log, and says "tasks_changed" when a task appeared or its record
-changed. It also lets the engine notice a runner that died (Engine.reconcile), whose record then says so.
+changed. It also lets the engine notice a runner that died (Engine.reconcile), whose record then says so. For a
+running task it says what is happening in a few words ("phase", the same line the chat shows; progress.Phase).
 """
 
 import os
@@ -11,9 +12,11 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from orchestrator.engine import Engine
+from orchestrator.progress import Phase
 
 Note = Tuple[str, Dict[str, Any]]  # (notification method, params)
 RECONCILE_EVERY = 8  # polls between looks for runners that died (a look takes the task's run lock briefly)
+LIVE = ("queued", "planning", "running")
 
 
 class Feed:
@@ -24,6 +27,8 @@ class Feed:
         self._known: set = set()
         self._mtimes: Dict[str, float] = {}
         self._polls = 0
+        self._phases: Dict[str, Phase] = {}
+        self._said: Dict[str, Tuple[str, str]] = {}  # the phase line last sent per task
         self._lock = threading.Lock()
 
     def _ids(self) -> List[str]:
@@ -43,20 +48,63 @@ class Feed:
         with self._lock:
             if tasks == "active":
                 self.active = True
-                ids = [t["id"] for t in self.eng.store.all() if t["status"] in ("queued", "planning", "running")]
+                ids = [t["id"] for t in self.eng.store.all() if t["status"] in LIVE]
             else:
                 ids = [str(t) for t in tasks or []]
             ids += [i for i in since if i not in ids]
             for task_id in ids:
                 self.cursors[task_id] = since.get(task_id, self._end(task_id))
                 self._mtimes[task_id] = self._mtime(task_id)
+                self._phases.pop(task_id, None)
+                self._said.pop(task_id, None)
+                self._seed_phase(task_id)
             self._known = set(self._ids())
         return {}
+
+    def _seed_phase(self, task_id: str) -> None:
+        """A running task followed from a later cursor: its phase so far, from the events before that cursor."""
+        task = self.eng.store.load(task_id)
+        if not task or task["status"] not in LIVE:
+            return
+        phase = self._phases[task_id] = Phase(task)
+        cursor, end = 0, self.cursors[task_id]
+        while cursor < end:
+            events, nxt, resync = self.eng.store.read_events(task_id, cursor, 1000)
+            for e in events:
+                if e["cursor"] <= end:
+                    phase.update(e)
+            if resync or nxt <= cursor:
+                break
+            cursor = nxt
+
+    def _phase_note(self, task_id: str, events: List[Dict[str, Any]]) -> Optional[Note]:
+        """The task's phase line when it changed (and only while the task is live)."""
+        phase = self._phases.get(task_id)
+        if phase is None:
+            if not events:
+                return None
+            task = self.eng.store.load(task_id)
+            if not task or task["status"] not in LIVE:
+                return None
+            phase = self._phases[task_id] = Phase(task)
+        for e in events:
+            phase.update(e)
+        if any(e.get("event") == "finished" for e in events):
+            self._phases.pop(task_id, None)
+            self._said.pop(task_id, None)
+            return None
+        line = (phase.verb, phase.who)
+        if self._said.get(task_id) == line:
+            return None
+        self._said[task_id] = line
+        return ("phase", {"task_id": task_id, "text": phase.verb, "provider": phase.who})
 
     def unsubscribe(self) -> Dict[str, Any]:
         with self._lock:
             self.cursors.clear()
             self._mtimes.clear()
+            self._phases.clear()
+            self._said.clear()
             self.active = False
         return {}
 
@@ -85,6 +133,9 @@ class Feed:
                     notes.append(("resync", {"task_id": task_id, "cursor": nxt}))
                     continue
                 notes += [("event", {"task_id": task_id, "cursor": e["cursor"], "event": e}) for e in events]
+                phase = self._phase_note(task_id, events)
+                if phase:
+                    notes.append(phase)
                 mtime = self._mtime(task_id)
                 if mtime != self._mtimes.get(task_id):
                     self._mtimes[task_id] = mtime
@@ -95,7 +146,7 @@ class Feed:
         if look:  # outside the feed's lock: reconciling takes a task's run lock
             for task_id in ids:
                 task = self.eng.store.load(task_id)
-                if task and task["status"] in ("running", "planning", "queued"):
+                if task and task["status"] in LIVE:
                     self.eng.reconcile(task)  # its status event arrives with the next poll
         if changed:
             notes.append(("tasks_changed", {"task_ids": changed}))

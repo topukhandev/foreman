@@ -16,7 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from orchestrator import ui
 from orchestrator.app import build_engine, spawn_task
 from orchestrator.config import set_first_provider, set_option
+from orchestrator.conversations import ChatHistory
 from orchestrator.engine import BARE_YES_RE, NO_RE, RESUME_RE, YES_RE, clean_text, is_task_status_query
+from orchestrator.progress import Phase, intent_verb  # noqa: F401 (intent_verb: re-exported)
 from orchestrator.report import OUTCOME, clock, option_labels, render_report, stopped_at
 from orchestrator.store import ACTIVE
 from orchestrator.util import short
@@ -97,6 +99,7 @@ class Chat:
         self._last_event: Optional[str] = None  # the last event shown: a worker's tool calls line up under the first
         self.queue: List[str] = []           # messages typed while a task was running
         self.history = ChatHistory(self.eng.cfg.home, self._project_key)
+        self._entry_task: Optional[str] = None  # the task the message being answered started or continued
         self.last_providers: Optional[str] = None
         self.mode: Optional[str] = None       # lifecycle mode fixed with /mode (None = recommended per request)
         self._offered_next: set = set()
@@ -111,7 +114,7 @@ class Chat:
             if not self.eng.registry.projects:
                 with ui.Spinner("Indexing your projects", footer=False):
                     self.eng.registry.ensure_scanned()
-            self.eng.registry.adopt(self.cwd)
+            self.eng.registry.open(self.cwd)  # the chat started in a project opens it
             self._title()
             ui.out(self.banner())
             if resume == "last":
@@ -154,12 +157,13 @@ class Chat:
         self.suggestion = ""
         if echo:
             ui.out("\n" + ui.user_echo(shown or line))
+        self._entry_task = None
         out = self.respond(line)
         if out:
             ui.out("\n" + out + "\n")
         if not line.startswith(("/resume", "/new", "/rename", "/btw")):
             named = bool(self.history.data["title"])
-            self.history.append(line, out or "", self.turns, self.focus, shown=shown)
+            self.history.append(line, out or "", self.turns, self.focus, shown=shown, task=self._entry_task)
             if not named and self.history.data["title"]:
                 self._title()
         self._offer_choices()
@@ -508,7 +512,7 @@ class Chat:
         if not task:
             self.turns.append((user_text, short(msg, 300)))
             return self._style(msg) if msg.lstrip()[:1] in "✔✘◐?…!" else ui.bullet(msg)
-        self.focus = task["id"]
+        self.focus = self._entry_task = task["id"]  # the conversation records which task this message ran
         self._execute(task)
         final = self.eng.store.load(task["id"])
         self.last_providers = self._used_providers(task["id"]) or self.last_providers
@@ -622,7 +626,7 @@ class Chat:
             keys.close()
             self.queue += spin.pending()
 
-    def _drain(self, path: str, pos: int, spin: ui.Spinner, phase: "Phase") -> int:
+    def _drain(self, path: str, pos: int, spin: ui.Spinner, phase: Phase) -> int:
         if not os.path.exists(path):
             return pos
         with open(path, encoding="utf-8") as f:
@@ -846,91 +850,6 @@ PURPOSE = {"plan": ("Plan", "Planning"), "replan": ("Re-plan", "Re-planning"), "
            "document": ("Write", "Writing")}
 
 
-TOOL_VERBS = {"read": "Reading", "view": "Reading", "grep": "Searching for", "search": "Searching for",
-              "glob": "Looking for files", "list": "Browsing", "ls": "Browsing", "edit": "Editing",
-              "multiedit": "Editing", "patch": "Editing", "write": "Writing", "bash": "Running",
-              "webfetch": "Reading", "websearch": "Searching the web for", "task": "Delegating",
-              "agent": "Delegating", "todowrite": "Organising the work"}
-QUESTION_RE = re.compile(r"\?\s*$|^\s*(what|how|where|why|which|who|when|is|are|does|do|can|could|should|explain|"
-                         r"show me|tell me|list|find|check|review|compare)\b", re.I)
-
-
-def intent_verb(task: Dict[str, Any]) -> str:
-    """First spinner verb, from the request (before the planner has said anything)."""
-    if any(s.get("status") in ("done", "failed", "blocked") for s in task.get("steps") or []):
-        return "Picking up where it left off"
-    return "Looking into it" if QUESTION_RE.search(task.get("request") or "") else "Planning the change"
-
-
-class Phase:
-    """Turns task events into the spinner's '<what is happening>' line and the active provider.
-    Tool activity wins (Reading server.js, Running npm test); otherwise the phase (implementing, checks, review)."""
-
-    def __init__(self, task: Dict[str, Any]):
-        self.verb, self.who = intent_verb(task), ""
-        self.running: Dict[str, Tuple[str, str]] = {}  # project -> (phase verb, provider)
-
-    def update(self, ev: Dict[str, Any]) -> bool:
-        """Apply one event; True when the line changed."""
-        before = (self.verb, self.who)
-        e, provider = ev.get("event"), ev.get("provider")
-        if e == "thinking":
-            purpose = ev.get("purpose")
-            self.verb = {"replan": "Expanding the plan", "review": "Reviewing the changes",
-                         "document": "Writing the document"}.get(purpose, self.verb)
-            self.who = provider or self.who
-        elif e == "impact":
-            self.verb = "Checking the impact before editing"
-        elif e == "plan":
-            steps = (ev.get("plan") or {}).get("steps") or []
-            projects = sorted({s.get("project") for s in steps if s.get("project")})
-            self.verb = "Writing the answer" if not steps else \
-                f"Starting work on {projects[0]}" if len(projects) == 1 else f"Starting work on {len(projects)} projects"
-        elif e == "step_start":
-            project = ev.get("project", "")
-            verb = {"investigate": f"Investigating {project}", "verify": f"Verifying the changes (QA) in {project}"}.get(
-                ev.get("step_kind"), f"Implementing in {project}")
-            self.running[project] = (verb, provider or "")
-            self.verb, self.who = verb, provider or self.who
-        elif e == "step_failed":  # another provider may retry the step; the next step_start says so
-            self.verb = "Recovering from a failed attempt"
-        elif e == "waiting":
-            self.verb, self.who = f"Waiting for a provider (next try at {clock(ev.get('until'))})", ""
-        elif e == "step_done":
-            self.running.pop(ev.get("project", ""), None)
-            if self.running:
-                self.verb, self.who = next(iter(self.running.values()))
-            else:
-                self.verb = "Checking the results"
-        elif e == "check":
-            self.verb, self.who = "Running checks", ""
-        elif e == "review":
-            self.verb = "Writing the report"
-        elif e == "activity":
-            self.verb = self._activity(ev)
-            self.who = provider or self.who
-        elif e == "finished":
-            self.verb = "Finishing"
-        return (self.verb, self.who) != before
-
-    def _activity(self, ev: Dict[str, Any]) -> str:
-        text, where = ev.get("text", ""), ev.get("where") or ""
-        in_project = where in self.running and len(self.running) > 1
-        m = re.match(r"(\w+)\((.*)\)$", text)
-        if not m:  # assistant text: the model is reasoning between tool calls
-            return f"Thinking about {where}" if in_project else "Thinking"
-        name, arg = m.group(1), m.group(2)
-        action = TOOL_VERBS.get(name.lower(), f"Using {name}")
-        if action.startswith(("Reading", "Editing", "Writing")) and "/" in arg and not arg.startswith("http"):
-            arg = arg.rstrip("/").rsplit("/", 1)[-1]
-        elif action == "Running":
-            arg = arg.split("&&")[0].split("|")[0].strip()
-        if action in ("Looking for files", "Browsing", "Organising the work", "Delegating"):
-            arg = ""
-        line = f"{action} {short(arg, 40)}".strip() if arg else action
-        return line + (f" in {where}" if in_project else "")
-
-
 def format_event(ev: Dict[str, Any], current: Optional[str] = None, follows: bool = False) -> Optional[str]:
     """Progress blocks: '◆ Name(arg) · provider' headers with '╰' lines under them. None = quiet.
     follows: the previous line shown was a tool call too (this one lines up under it, without a second '╰')."""
@@ -1034,62 +953,6 @@ class _KeyReader:
             import termios
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
             self.old = None
-
-
-class ChatHistory:
-    """Per-project conversation transcripts (~/.foreman/chats/<project>/<id>.json) for /resume."""
-
-    def __init__(self, home: str, project_key):
-        self.home = home
-        self._key = project_key  # callable: resolved on first use, once the project index is loaded
-        self.chat_id = ""
-        self.start_new()
-
-    @property
-    def project(self) -> str:
-        if callable(self._key):
-            self._key = self._key()
-        return self._key
-
-    @property
-    def dir(self) -> str:
-        return os.path.join(self.home, "chats", re.sub(r"[^A-Za-z0-9._-]+", "-", self.project).strip("-") or "default")
-
-    def start_new(self) -> None:
-        self.chat_id = time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
-        self.data: Dict[str, Any] = {"id": self.chat_id, "title": "", "entries": [],
-                                     "turns": [], "focus": None, "started_at": time.time(), "updated_at": time.time()}
-
-    def append(self, user: str, output: str, turns, focus, shown: str = "") -> None:
-        from orchestrator.util import write_json
-        self.data["project"] = self.project
-        if user and not self.data["title"] and not user.startswith("/"):
-            self.data["title"] = short(shown or user, 80)
-        self.data["entries"].append({"user": user, "output": output, "at": time.time(), **({"shown": shown} if shown else {})})
-        self.data["entries"] = self.data["entries"][-200:]
-        self.data.update(turns=[list(t) for t in turns][-12:], focus=focus, updated_at=time.time())
-        write_json(os.path.join(self.dir, self.chat_id + ".json"), self.data)
-
-    def rename(self, name: str) -> None:
-        """Name the conversation; saved now when it has messages, else with its first one."""
-        from orchestrator.util import write_json
-        self.data["title"], self.data["named"] = short(" ".join(name.split()), 80), True
-        if self.data["entries"]:
-            write_json(os.path.join(self.dir, self.chat_id + ".json"), self.data)
-
-    def load(self, chat_id: str) -> Optional[Dict[str, Any]]:
-        from orchestrator.util import read_json
-        data = read_json(os.path.join(self.dir, chat_id + ".json"))
-        if data:
-            self.chat_id, self.data = chat_id, data  # continue appending to the resumed conversation
-        return data
-
-    def list(self) -> List[Dict[str, Any]]:
-        from orchestrator.util import read_json
-        if not os.path.isdir(self.dir):
-            return []
-        items = [read_json(os.path.join(self.dir, f)) for f in os.listdir(self.dir) if f.endswith(".json")]
-        return sorted([i for i in items if i], key=lambda i: (i.get("updated_at", 0), i.get("started_at", 0)), reverse=True)
 
 
 def _ago(ts: float) -> str:

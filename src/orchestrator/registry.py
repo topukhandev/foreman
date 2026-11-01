@@ -12,6 +12,7 @@ import json
 import os
 import re
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -47,6 +48,10 @@ class Project:
     head: Optional[str] = None
     scanned_at: str = ""
     source: str = "discovered"
+    # The user works in it: opened in a front end (the chat started in it, a request sent from it, the desktop app's
+    # folder picker, `foreman open`). Epoch seconds; False: hidden by the user; None: never (a project merely found
+    # by a scan). Front ends list opened projects, not everything under the roots.
+    opened: Optional[float] = None
 
 
 @dataclass
@@ -80,7 +85,22 @@ class Registry:
         self.load()
 
     # ------------------------------------------------------------------ persistence
+    def _stamp(self) -> Optional[Tuple[float, int]]:
+        try:
+            st = os.stat(self.path)
+            return st.st_mtime_ns, st.st_size
+        except OSError:
+            return None
+
+    def reload_if_changed(self) -> None:
+        """Read the file again when another process (the CLI, the desktop app's Foreman, a runner) changed it, so
+        every front end sees the same projects."""
+        if self._stamp() != getattr(self, "_loaded", None):
+            with self._lock:
+                self.load()
+
     def load(self) -> None:
+        self._loaded = self._stamp()
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
@@ -112,10 +132,12 @@ class Registry:
             }
             atomic_write(self.path, "# Foreman project registry. Safe to edit; `source: declared` entries are never overwritten.\n"
                          + yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+            self._loaded = self._stamp()  # our own write is not a change to read back
 
     # ------------------------------------------------------------------ discovery
     def ensure_scanned(self, cwd: Optional[str] = None) -> None:
         """Scan once; and recognise the directory the user works in, even if it was created after the last scan."""
+        self.reload_if_changed()
         if not self.projects:
             self.scan()
         if cwd:
@@ -172,6 +194,34 @@ class Registry:
             self.save()
             return sorted(self.projects)
 
+    def open(self, path: str, add: bool = False) -> Optional[Project]:
+        """The user works in this folder: mark its project opened (now). add: a folder the user picked explicitly
+        (the desktop app's folder picker, `foreman open`) becomes a project when none holds it; otherwise only a
+        known project (or a new folder under a root, see adopt) is opened, so a request from some other directory
+        doesn't turn it into a project."""
+        path = os.path.abspath(os.path.expanduser(path))
+        self.reload_if_changed()
+        proj = self.adopt(path)
+        if not proj and add:
+            proj = self.add_project(path)
+        if not proj:
+            return None
+        with self._lock:
+            if not isinstance(proj.opened, (int, float)) or isinstance(proj.opened, bool) or time.time() - proj.opened > 60:
+                proj.opened = time.time()
+                self.save()
+        return proj
+
+    def hide(self, name: str) -> Optional[Project]:
+        """Take a project off the front ends' list until it is opened again. Nothing else changes."""
+        self.reload_if_changed()
+        proj = self.find(name)
+        if proj:
+            with self._lock:
+                proj.opened = False
+                self.save()
+        return proj
+
     def add_project(self, path: str, name: Optional[str] = None, source: str = "declared") -> Project:
         path = os.path.abspath(os.path.expanduser(path))
         with self._lock:
@@ -227,6 +277,7 @@ class Registry:
             notes=prev.notes if prev else [],
             head=git_head(path), scanned_at=now_iso(),
             source=prev.source if prev else "discovered",
+            opened=prev.opened if prev else None,
         )
 
     def _discover_relations(self) -> None:

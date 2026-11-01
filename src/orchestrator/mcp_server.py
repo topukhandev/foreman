@@ -9,7 +9,8 @@ import sys
 from typing import Any, Dict, Optional
 
 from orchestrator import __version__
-from orchestrator.app import build_engine, read_report, spawn_task, wait_for
+from orchestrator.api import Api, ApiError, Spawner
+from orchestrator.app import build_engine
 from orchestrator.engine import Engine
 
 INSTRUCTIONS = """\
@@ -82,71 +83,74 @@ TOOLS = [
 
 
 class MCPServer:
-    def __init__(self, engine_factory=None):
+    def __init__(self, engine_factory=None, spawn: Optional[Spawner] = None):
+        """spawn: how a queued task's runner starts (default: a detached process; tests run it in-process)."""
         self.engine_factory = engine_factory or (lambda visual=None: build_engine(visual=visual, out=lambda _m: None, actor="mcp"))
+        self.spawn = spawn
 
     def _engine(self, display: Optional[str] = None) -> Engine:
         return self.engine_factory(None if not display else display == "terminal")
 
     # ------------------------------------------------------------------ tool handlers
     def call(self, name: str, args: Dict[str, Any]) -> str:
+        """One tool call, as text for the model. Everything goes through the application API (api.py); a refusal the
+        user should hear about (not found, several tasks match, still running) is the reply, not a tool error."""
         cwd = os.path.abspath(args.get("cwd") or os.getcwd())
-        wait = int(args.get("wait_seconds", 240))
         display = args.get("display")
-        eng = self._engine(display)
-        visual = None if not display else display == "terminal"
+        api = Api(self._engine(display), actor="mcp", spawn=self.spawn, visual=None if not display else display == "terminal")
+        try:
+            return self._call(api, name, args, cwd, int(args.get("wait_seconds", 240)))
+        except ApiError as e:
+            if e.kind in ("invalid", "internal"):
+                raise
+            return str(e)
 
+    def _call(self, api: Api, name: str, args: Dict[str, Any], cwd: str, wait: int) -> str:
         if name == "orchestrate":
-            task, msg = eng.route(args["request"], cwd, mode=args.get("mode"))
-            if task and args.get("dry_run"):
-                return eng.plan_only(task)["report"]
-            return self._launch(eng, task, msg, wait, visual)
+            return self._report(api, api.tasks_submit(args["request"], cwd, mode=args.get("mode"),
+                                                      dry_run=bool(args.get("dry_run"))), wait)
         if name == "project_state":
-            return eng.lifecycle_text(cwd)
+            return api.eng.lifecycle_text(cwd)
         if name == "next_step":
-            task, msg = eng.prepare_next(cwd)
-            return self._launch(eng, task, msg, wait, visual)
+            return self._report(api, api.tasks_next(cwd), wait)
         if name == "task_status":
-            return eng.status(args.get("task"), cwd)["report"]
+            return api.status(args.get("task"), cwd)["report"]
         if name == "resume_task":
-            task, msg = eng.prepare_resume(args.get("task"), args.get("note", ""), cwd)
-            return self._launch(eng, task, msg, wait, visual)
+            return self._report(api, api.resume_ref(args.get("task"), args.get("note", ""), cwd), wait)
         if name == "answer_question":
-            task, msg = eng.prepare_answer(args.get("task") or "", args["answer"])
-            return self._launch(eng, task, msg, wait, visual)
+            return self._report(api, api.answer_text(args.get("task"), args["answer"]), wait)
         if name == "suggestion":
-            s = eng.store.set_suggestion(args["id"], "accepted" if args["action"] == "accept" else "dismissed")
-            if not s:
-                return f"No suggestion {args['id']}."
             if args["action"] == "dismiss":
-                return f"Dismissed {s['id']}; it will not be suggested again."
-            task, msg = eng.accept_suggestion(s, cwd)
-            return self._launch(eng, task, msg, wait, visual)
+                api.suggestions_dismiss(args["id"])
+                return f"Dismissed {args['id']}; it will not be suggested again."
+            return self._report(api, api.suggestions_accept(args["id"], cwd), wait)
         if name == "list_tasks":
-            tasks = eng.store.all()[: int(args.get("limit", 15))]
+            tasks = api.tasks_list(limit=int(args.get("limit", 15)))["tasks"]
             return "\n".join(f"#{t['id']} [{t['status']}] {t['title']} ({t['updated_at']})" for t in tasks) or "No tasks."
         if name == "show_task":
-            cands = eng.store.resolve(args["task"], fallback=False)
-            return json.dumps(cands[0], indent=1, ensure_ascii=False)[:60000] if cands else "Not found."
+            return json.dumps(api.tasks_get(api.find(args["task"])["id"])["record"], indent=1, ensure_ascii=False)[:60000]
         if name == "projects":
             action = args.get("action", "list")
             if action == "scan":
-                return "Projects: " + ", ".join(eng.registry.scan())
+                return "Projects: " + ", ".join(api.projects_scan()["projects"])
             if action == "link":
-                r = eng.registry.link(args["src"], args["dst"], args.get("type", "related"), args.get("note", ""))
-                return f"Linked {r.src} --{r.type}--> {r.dst}"
-            eng.registry.ensure_scanned()
-            sel = eng.registry.select("", cwd)
-            return eng.registry.render_context(sel)
+                r = api.projects_link(args["src"], args["dst"], args.get("type", "related"), args.get("note", ""))
+                return f"Linked {r['src']} --{r['type']}--> {r['dst']}"
+            reg = api.eng.registry
+            reg.ensure_scanned()
+            return reg.render_context(reg.select("", cwd))
         raise ValueError(f"unknown tool {name}")
 
-    def _launch(self, eng: Engine, task, msg: str, wait: int, visual) -> str:
-        if not task:
-            return msg
-        spawn_task(eng.cfg.home, task["id"], visual, run=task.get("run_request"))
-        task, finished = wait_for(eng, task["id"], wait)
-        if finished:
-            return read_report(eng, task["id"]) or f"#{task['id']} {task['status']}"
+    @staticmethod
+    def _report(api: Api, started: Dict[str, Any], wait: int) -> str:
+        """An instant reply as it is; a started task: its report once it finishes within `wait` seconds, otherwise
+        where it stands."""
+        if "task_id" not in started:
+            return started.get("reply") or started.get("message") or ""
+        res = api.wait(started["task_id"], wait)
+        task = res["summary"]
+        if res["finished"]:
+            return res["report_md"] or f"#{task['id']} {task['status']}"
         done = sum(1 for s in task["steps"] if s["status"] == "done")
         return (f"Task #{task['id']} is still running in the background ({done}/{len(task['steps'])} steps done). "
                 f"Call task_status with task='{task['id']}' later; the user also gets a desktop notification when it finishes.")

@@ -1,6 +1,7 @@
 """The application API (api.py), its event feed (feed.py) and the stdio JSON-RPC server (rpc_server.py), against
 docs/api-contract.md. Runners are started in-process here; one test drives the real `foreman serve --stdio`."""
 
+import contextlib
 import io
 import json
 import os
@@ -12,6 +13,7 @@ from helpers import Script, Workspace, make_engine, write
 
 from orchestrator.api import Api, ApiError
 from orchestrator.feed import Feed
+from orchestrator.mcp_server import MCPServer
 from orchestrator.rpc_server import RpcServer
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_cli.py")
@@ -53,7 +55,7 @@ class ApiTest(unittest.TestCase):
 
     def test_hello_and_version(self):
         hello = self.api.hello("desktop/test", "1.0")
-        self.assertEqual((hello["api_version"], hello["actor"]), ("1.1", "desktop"))
+        self.assertEqual((hello["api_version"], hello["actor"]), ("1.5", "desktop"))
         self.assertEqual(self.kind(self.api.hello, "x", "2.0"), "invalid")
 
     def test_submit_runs_the_task_in_a_runner_and_it_reads_back(self):
@@ -131,6 +133,76 @@ class ApiTest(unittest.TestCase):
         self.assertIn("orders-api", [r["other"] for r in ui["relations"]])
 
 
+    def test_settings_are_the_terminal_menus_and_save_the_same_way(self):
+        from orchestrator.providers.base import ModelInfo
+        got = self.api.config_get()
+        keys = [x["key"] for x in got["settings"]]
+        self.assertEqual(keys[:3], ["display", "auto_switch", "planner"])
+        self.assertIn("on_close", keys)
+        self.assertEqual(self.api.config_set("auto_switch", False)["setting"]["value"], False)
+        self.assertFalse(self.eng.cfg.auto_switch)
+        self.api.config_set("output_style", "concise")
+        self.assertEqual(self.eng.cfg.output_style, "concise")
+        self.assertEqual(self.kind(self.api.config_set, "output_style", "loud"), "invalid")
+        self.assertEqual(self.kind(self.api.config_set, "nonsense", True), "invalid")
+        first = [o["value"] for o in got["settings"][3]["options"]][-1]
+        self.api.config_set("first_worker", first)
+        self.assertEqual(next(iter(self.eng.providers)), first)
+
+        name = next(iter(self.eng.providers))
+        self.eng.providers[name].list_models = lambda: [ModelInfo("big", "Big", ["low", "high", "max"]),
+                                                        ModelInfo("small", "Small", [])]
+        listed = self.api.models_list(name)
+        self.assertEqual([m["id"] for m in listed["models"]], ["big", "small"])
+        self.assertEqual(self.api.models_set(name, "big", "max"), {"provider": name, "model": "big", "effort": "max"})
+        self.assertEqual((self.api.config_get()["providers"][name]["model"], self.eng.cfg.providers[name].chosen().effort),
+                         ("big", "max"))
+        self.assertEqual(self.api.models_set(name, "big")["effort"], "high", "no effort given: high")
+        self.assertIsNone(self.api.models_set(name, "small")["effort"], "a model without levels has no effort")
+        self.assertEqual(self.kind(self.api.models_set, name, "big", "ultra"), "invalid")
+        self.assertEqual(self.kind(self.api.models_list, "nobody"), "not_found")
+        self.assertEqual(self.api.models_set(name, "default")["model"], "default")
+
+
+    def test_a_conversation_keeps_its_tasks_and_answers_their_questions(self):
+        self.s.plan = lambda req: change_plan(needs_approval=True)
+        first = self.api.conversations_send(self.ws.ui, "change refunds")
+        cid, project, task_id = first["conversation_id"], first["project"], first["task_id"]
+        self.assertEqual(project, "admin-ui")
+        self.assertEqual(self.eng.store.load(task_id)["status"], "needs_input")
+        reply = self.api.conversations_send(self.ws.ui, f"what's the status of #{task_id}?", conversation_id=cid)
+        self.assertNotIn("task_id", reply, "a status question is an instant reply, not an answer")
+        self.assertIn(f"#{task_id}", reply["reply"])
+        self.assertEqual(self.eng.store.load(task_id)["status"], "needs_input", "and doesn't touch the task")
+        # a plain "yes" while the conversation's task waits for its approval answers that question
+        self.s.plan = lambda req: change_plan()
+        yes = self.api.conversations_send(self.ws.ui, "yes", conversation_id=cid)
+        self.assertEqual(yes["task_id"], task_id)
+        self.assertEqual(self.eng.store.load(task_id)["status"], "done")
+
+        listed = self.api.conversations_list()["conversations"]
+        self.assertEqual([(c["id"], c["project"], c["tasks"], c["messages"]) for c in listed], [(cid, "admin-ui", [task_id], 3)])
+        self.assertEqual(listed[0]["title"], "change refunds")
+        got = self.api.conversations_get(project, cid)
+        self.assertEqual([e.get("task") for e in got["conversation"]["entries"]], [task_id, None, task_id])
+        self.assertEqual(got["tasks"][task_id]["status"], "done")
+        self.assertEqual(got["tasks"][task_id]["project"], "admin-ui")
+        self.assertEqual(self.api.conversations_rename(project, cid, "Refunds")["title"], "Refunds")
+        self.assertEqual(self.kind(self.api.conversations_get, project, "nope"), "not_found")
+        self.assertEqual(self.kind(self.api.conversations_get, project, "../../etc/passwd"), "not_found")
+        self.assertEqual(self.kind(self.api.conversations_send, self.ws.ui, " "), "invalid")
+
+    def test_a_terminal_conversation_opens_in_the_app_and_the_other_way_round(self):
+        from orchestrator.conversations import ChatHistory
+        terminal = ChatHistory(self.eng.cfg.home, "admin-ui")
+        terminal.append("how are totals shown?", "In show().", [["how are totals shown?", "In show()."]], None)
+        got = self.api.conversations_get("admin-ui", terminal.chat_id)
+        self.assertEqual(got["conversation"]["entries"][0]["output"], "In show().")
+        self.api.conversations_send(self.ws.ui, "thanks", conversation_id=terminal.chat_id)
+        again = ChatHistory(self.eng.cfg.home, "admin-ui")
+        self.assertEqual(len(again.load(terminal.chat_id)["entries"]), 2, "the terminal sees the app's message")
+
+
 class LiveOutputTest(unittest.TestCase):
     SECRET = "sk-ant-api03-livesecretvalue-0123456789"
 
@@ -196,6 +268,73 @@ class LiveOutputTest(unittest.TestCase):
         self.assertIn(" after", text, "text after the key is kept")
 
 
+class OpenedProjectsTest(unittest.TestCase):
+    """Front ends list the projects the user opened; opening works the same from the app and the CLI."""
+
+    def setUp(self):
+        self.ws = Workspace()
+        self.s = Script()
+        self.eng = make_engine(self.ws, self.s)
+        self.api = Api(self.eng, spawn=lambda t, p: self.eng.execute(t))
+
+    def tearDown(self):
+        self.ws.cleanup()
+
+    def opened(self, name):
+        return next(p for p in self.api.projects_list()["projects"] if p["name"] == name)["opened"]
+
+    def test_opening_hiding_and_working_in_a_project(self):
+        self.assertIsNone(self.opened("admin-ui"), "found by a scan: not opened")
+        self.assertIsInstance(self.api.projects_open(self.ws.ui)["opened"], float)
+        self.assertEqual(self.api.projects_hide("admin-ui")["opened"], False)
+        self.api.conversations_send(self.ws.api, "thanks")  # working from a project's folder opens it
+        self.assertIsInstance(self.opened("orders-api"), float)
+        self.assertIs(self.opened("admin-ui"), False, "a hidden project stays hidden until it is opened again")
+        self.api.projects_open(self.ws.ui)
+        self.assertIsInstance(self.opened("admin-ui"), float)
+        with self.assertRaises(ApiError) as ctx:
+            self.api.projects_open(os.path.expanduser("~"))
+        self.assertEqual(ctx.exception.kind, "invalid")
+        new = os.path.join(self.ws.tmp, "elsewhere", "fresh-project")
+        os.makedirs(new)
+        self.assertEqual(self.api.projects_open(new)["name"], "fresh-project", "a picked folder becomes a project")
+        self.eng.registry.scan()
+        self.assertIsInstance(self.opened("fresh-project"), float, "a rescan keeps what was opened")
+
+    def cli(self, *argv, code=0):
+        from orchestrator.cli import main
+        old = os.environ.get("FOREMAN_HOME")
+        os.environ["FOREMAN_HOME"] = self.ws.home
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(main(list(argv)), code, err.getvalue())
+        finally:
+            if old is None:
+                os.environ.pop("FOREMAN_HOME", None)
+            else:
+                os.environ["FOREMAN_HOME"] = old
+        return out.getvalue() + err.getvalue()
+
+    def test_the_cli_offers_what_the_app_does(self):
+        conv = self.api.conversations_send(self.ws.ui, "thanks")
+        self.assertIn(conv["conversation_id"], self.cli("conversations"))
+        self.assertIn("> thanks", self.cli("conversations", conv["conversation_id"]))
+        self.assertIn("auto_switch = off", self.cli("config", "auto_switch", "off"))
+        self.assertIn("auto-switch = on", self.cli("config", "auto-switch", "on"), "the old names still work")
+        self.assertIn("output_style", self.cli("config", "--list"))
+        self.assertIn("choose one of", self.cli("config", "output_style", "loud", code=1))
+        self.assertIn("default", self.cli("models", "claude", "default"))
+        task = self.eng.store.new_task("x", self.ws.ui)
+        self.assertIn("is not running", self.cli("stop", task["id"]))
+        self.assertIn("no recorded output", self.cli("output", task["id"]))
+        self.assertIn("No task", self.cli("stop", "999", code=1))
+        self.assertIn("Opened admin-ui", self.cli("open", self.ws.ui, "--no-chat"))
+        self.assertIn("off the list", self.cli("projects", "hide", "admin-ui"))
+        self.assertIs(self.opened("admin-ui"), False)
+        self.assertIn("Totals", self.api.stats()["text"] + "Totals")
+
+
 class FeedTest(unittest.TestCase):
     def setUp(self):
         self.ws = Workspace()
@@ -227,6 +366,98 @@ class FeedTest(unittest.TestCase):
         self.feed.subscribe([task["id"]], since={task["id"]: 10 ** 6})
         self.assertEqual(self.feed.poll()[0][0], "resync")
 
+    def test_a_running_task_says_what_it_is_doing(self):
+        task = self.eng.store.new_task("add a footer", self.ws.ui)
+        task["status"] = "running"
+        self.eng.store.save(task)
+        self.eng.store.event(task["id"], "step_start", project="admin-ui", step_kind="implement", provider="claude")
+        self.feed.subscribe([task["id"]])  # from now: the phase so far comes from the history
+
+        def phases():
+            return [p for m, p in self.feed.poll() if m == "phase"]
+        self.assertEqual(phases(), [{"task_id": task["id"], "text": "Implementing in admin-ui", "provider": "claude"}])
+        self.assertEqual(phases(), [], "said once")
+        self.eng.store.event(task["id"], "activity", text="Read(src/footer.js)", where="admin-ui", provider="claude")
+        self.assertEqual([p["text"] for p in phases()], ["Reading footer.js"])
+        self.eng.store.event(task["id"], "activity", text="Read(src/footer.js)", where="admin-ui", provider="claude")
+        self.assertEqual(phases(), [], "the same line again is not news")
+        self.eng.store.event(task["id"], "finished", status="done")
+        self.assertEqual(phases(), [], "a finished task has no phase")
+
+
+class FrontEndsTest(unittest.TestCase):
+    """The MCP server and the CLI's --json output go through the same API as the desktop app."""
+
+    def setUp(self):
+        self.ws = Workspace()
+        self.s = Script()
+        self.s.plan, self.s.step = lambda req: change_plan(), edit
+        self.eng = make_engine(self.ws, self.s)
+        self.started = []
+
+        def spawn(task, plan_only):
+            self.started.append((task["id"], plan_only))
+            self.eng.plan_only(task) if plan_only else self.eng.execute(task)
+        self.mcp = MCPServer(engine_factory=lambda visual=None: self.eng, spawn=spawn)
+
+    def tearDown(self):
+        self.ws.cleanup()
+
+    def tool(self, name, **args):
+        resp = self.mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}})
+        return resp["result"]["content"][0]["text"], bool(resp["result"].get("isError"))
+
+    def test_mcp_tools_start_runners_through_the_api(self):
+        text, err = self.tool("orchestrate", request="add a footer", cwd=self.ws.ui, wait_seconds=5)
+        self.assertFalse(err)
+        self.assertIn("Footer", text)
+        task_id = self.started[0][0]
+        self.assertEqual(self.eng.store.events(task_id)[0]["actor"], "mcp")
+        self.assertIn("[done] Footer", self.tool("list_tasks")[0])
+        self.assertEqual(json.loads(self.tool("show_task", task="footer")[0])["id"], task_id)
+
+        text, _ = self.tool("orchestrate", request="add a footer", cwd=self.ws.ui, dry_run=True, wait_seconds=5)
+        self.assertEqual(self.started[-1][1], True, "a dry run plans in a runner too")
+        self.assertIn("add a footer", text, "the plan is the report")
+        self.assertIn("No task", self.tool("resume_task", task="#999", cwd=self.ws.ui)[0])
+        self.assertEqual(self.tool("projects", action="link", src="admin-ui", dst="nowhere")[0], "No project 'nowhere'.")
+        text, err = self.tool("orchestrate", request="x", cwd="/no/such/folder")
+        self.assertTrue(err, "a bad call is a tool error")
+
+    def test_mcp_free_text_answers(self):
+        self.s.plan = lambda req: change_plan(needs_approval=True)
+        text, _ = self.tool("orchestrate", request="change refunds", cwd=self.ws.ui, wait_seconds=5)
+        task_id = self.started[0][0]
+        self.assertEqual(self.eng.store.load(task_id)["status"], "needs_input")
+        text, err = self.tool("answer_question", task=task_id, answer="yes", wait_seconds=5)
+        self.assertFalse(err)
+        self.assertEqual(self.eng.store.load(task_id)["status"], "done")
+
+    def cli(self, *argv):
+        from orchestrator.cli import main
+        old = os.environ.get("FOREMAN_HOME")
+        os.environ["FOREMAN_HOME"] = self.ws.home
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(main(list(argv)), 0)
+        finally:
+            if old is None:
+                os.environ.pop("FOREMAN_HOME", None)
+            else:
+                os.environ["FOREMAN_HOME"] = old
+        return json.loads(buf.getvalue())
+
+    def test_cli_json_uses_the_api_shapes(self):
+        task_id = Api(self.eng, spawn=lambda t, p: self.eng.execute(t)).tasks_submit("add a footer", self.ws.ui)["task_id"]
+        listed = self.cli("tasks", "--json")
+        self.assertEqual(listed[0]["id"], task_id)
+        self.assertTrue({"rev", "running", "questions", "created_at"} <= set(listed[0]), "a TaskSummary")
+        self.assertEqual(self.cli("show", task_id, "--json")["id"], task_id)
+        status = self.cli("status", task_id, "--json")
+        self.assertEqual((status["task"]["id"], status["task"]["status"]), (task_id, "done"))
+        self.assertIn("rev", status["task"])
+
 
 class RpcTest(unittest.TestCase):
     def setUp(self):
@@ -243,8 +474,8 @@ class RpcTest(unittest.TestCase):
 
     def test_hello_first_then_methods_errors_and_params(self):
         self.assertEqual(self.rpc("tasks.list")["error"]["data"]["kind"], "invalid")
-        self.assertEqual(self.rpc("system.hello", {"client": "t", "api_version": "1.0"})["result"]["api_version"], "1.1",
-                         "a 1.0 client is served by 1.1 (minor versions only add)")
+        self.assertEqual(self.rpc("system.hello", {"client": "t", "api_version": "1.0"})["result"]["api_version"], "1.5",
+                         "a 1.0 client is served by 1.5 (minor versions only add)")
         self.assertEqual(self.rpc("tasks.list")["result"]["tasks"], [])
         self.assertEqual(self.rpc("tasks.get", {"task_id": "42"})["error"]["data"]["kind"], "not_found")
         self.assertEqual(self.rpc("tasks.get", {"nope": 1})["error"]["code"], -32602)

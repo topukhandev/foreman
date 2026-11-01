@@ -18,16 +18,20 @@ from orchestrator.api import Api, ApiError
 from orchestrator.feed import Feed
 
 METHODS = {
-    "system.hello": "hello", "system.doctor": "doctor",
+    "system.hello": "hello", "system.doctor": "doctor", "system.stats": "stats",
     "tasks.list": "tasks_list", "tasks.get": "tasks_get", "tasks.submit": "tasks_submit",
     "tasks.answer": "tasks_answer", "tasks.resume": "tasks_resume", "tasks.next": "tasks_next",
     "tasks.stop": "tasks_stop", "tasks.close": "tasks_close", "tasks.events": "tasks_events",
     "tasks.outputs": "tasks_outputs", "tasks.output": "tasks_output",
     "projects.list": "projects_list", "projects.get": "projects_get", "projects.scan": "projects_scan",
+    "projects.open": "projects_open", "projects.hide": "projects_hide",
     "lifecycle.get": "lifecycle_get", "sessions.list": "sessions_list",
     "suggestions.list": "suggestions_list", "suggestions.accept": "suggestions_accept",
     "suggestions.dismiss": "suggestions_dismiss",
-    "config.get": "config_get", "config.set_on_close": "config_set_on_close",
+    "config.get": "config_get", "config.set": "config_set", "config.set_on_close": "config_set_on_close",
+    "models.list": "models_list", "models.set": "models_set",
+    "conversations.list": "conversations_list", "conversations.get": "conversations_get",
+    "conversations.send": "conversations_send", "conversations.rename": "conversations_rename",
 }
 FEED_POLL = 0.25
 API_ERROR, PARSE_ERROR, INVALID_REQUEST, NO_METHOD, INVALID_PARAMS = -32000, -32700, -32600, -32601, -32602

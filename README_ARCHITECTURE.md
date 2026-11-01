@@ -1,9 +1,11 @@
 # Architecture
 
 ```
- Front ends (thin)        CLI (cli.py)        MCP server (mcp_server.py) ◄── Claude Code / Antigravity / Codex …
-                               │                         │  (long tasks run detached: app.spawn_task)
-                               └──────────┬──────────────┘
+ Front ends (thin)   CLI (cli.py)   MCP server (mcp_server.py) ◄── Claude Code / Antigravity / Codex …
+                          │                │        desktop app ─► serve --stdio (rpc_server.py)
+                          │ (--json)       │                              │
+                          └───────► API (api.py, feed.py) ◄───────────────┘
+                                          │  data shapes, error kinds; long tasks run detached (app.spawn_task)
                                           ▼
  Core (engine.py)   request ─► fast path: status / resume / "what's next" / "next" (no AI)
                             └► plan (brain.py): mode, scope, steps, impact ─► questions? ─► needs_input

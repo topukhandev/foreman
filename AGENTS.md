@@ -9,6 +9,26 @@
   permissions only in `roles.py` (guidance files are text and must never grant anything).
 - Interfaces (`cli.py`, `mcp_server.py`) stay thin. New behaviour goes into the engine so every front end
   gets it.
+
+## One feature, every front end (the protocol)
+
+Foreman has two user front ends that must stay aligned: the CLI (`foreman …` and the terminal chat) and the desktop
+app (`desktop/`). `src/orchestrator/surface.py` is the contract between them.
+- Build a feature once, in the core. The behaviour goes in the engine and core modules; the data shape goes in
+  `api.Api`, as a JSON-RPC method in `rpc_server.METHODS`.
+- Then offer it in both front ends in the same change: a CLI command (through `api.Api`, so both get the same data
+  and errors) and the app. Record where each offers it in `surface.OPERATIONS`.
+- A front end may leave an operation out only with a written reason (`"-: why"`), or offer it through another
+  operation (`"via <method>"`).
+- `tests/test_protocol.py` fails when something isn't accounted for: an unlisted API method, a CLI command with no
+  operation or reason, a CLI form that doesn't exist, or an app that doesn't call what it claims to offer.
+- Changing an operation's behaviour or data means checking both front ends and the API contract
+  (`docs/api-contract.md`, with a minor version bump for additions).
+- Shared state lives in the core files that every process reads: tasks, conversations (`conversations.py`), the
+  project registry (re-read when another process changes it), and `config.yaml` (`settings.py`). A front end
+  never keeps its own copy of a user-visible list or setting.
+- Opened projects are part of that shared state: the app's folder picker, `foreman open`, the chat started in a
+  project, and a request sent from a project's folder all open it; both front ends list only opened projects.
 - Don't add UI layers (visual dashboards, voice, custom line editors) unless the user asks. Visible
   terminal windows are supported only through `terminal.py`.
 - Verify provider behaviour against the installed CLI before changing an adapter, and record what was verified
@@ -47,7 +67,7 @@
 - Models and effort levels come from the CLIs (`Provider.list_models`), never from a hard-coded list; verify what a
   CLI accepts before passing it and record that in the adapter's docstring.
 - `auto_switch: false` makes a usage limit wait for the same provider (steps, planning, review) instead of handing over.
-  Settings the user may want to change belong in `menus.config_menu`.
+  Settings the user may want to change belong in `settings.py` (the terminal menu `menus.config_menu` and the desktop app both show that list).
 
 ## Limits (config.yaml → `limits`)
 
