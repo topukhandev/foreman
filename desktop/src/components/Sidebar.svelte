@@ -78,7 +78,7 @@
 
 <aside class="sidebar">
   <div class="top row">
-    <span class="logo" aria-hidden="true">F</span>
+    <img class="logo" src="/icon.png" alt="" width="26" height="26" />
     <strong class="grow">Foreman</strong>
     <button class="icon" onclick={onCollapse} title="Hide the sidebar (Ctrl+B)" aria-label="Hide the sidebar">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM9 5v14" /></svg>
@@ -158,8 +158,7 @@
 <style>
   .sidebar { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-right: 1px solid var(--line); }
   .top { padding: 14px 12px 10px 16px; gap: 8px; }
-  .logo { width: 24px; height: 24px; border-radius: 6px; background: var(--accent); color: var(--accent-text);
-    display: grid; place-items: center; font-weight: 700; font-size: 14px; }
+  .logo { width: 26px; height: 26px; border-radius: 6px; }
   .icon { border: none; background: none; padding: 4px; color: var(--muted); }
   svg { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .new { margin: 4px 12px 8px; display: flex; gap: 8px; align-items: center; padding: 8px 12px; font-weight: 500; }
